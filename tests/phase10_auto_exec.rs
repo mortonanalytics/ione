@@ -68,6 +68,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// The real type will be `anyhow::Result<Option<AutoExecDecision>>`.
 /// Using `serde_json::Value` as the `Some` payload lets us call `.is_some()`/`.is_none()`
 /// and print debug output without depending on the concrete decision type.
+#[allow(dead_code)]
 type EvalResult = anyhow::Result<Option<serde_json::Value>>;
 
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
@@ -125,6 +126,7 @@ async fn ops_workspace_id(pool: &PgPool) -> Uuid {
         .expect("Operations workspace not found — bootstrap seed missing (expected failure)")
 }
 
+#[allow(dead_code)]
 async fn default_user_id(pool: &PgPool) -> Uuid {
     sqlx::query_scalar("SELECT id FROM users WHERE email = 'default@localhost' LIMIT 1")
         .fetch_one(pool)

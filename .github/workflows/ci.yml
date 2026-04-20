@@ -53,7 +53,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres --version 0.8 --locked
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres --version ^0.8 --locked
       - name: run migrations
         run: sqlx migrate run
       - name: unit + phase-1 tests (no DB needed)

@@ -3,6 +3,14 @@ name = "ione"
 version = "0.1.0"
 edition = "2021"
 
+# Test helpers legitimately use 8+ args, manual range comparisons, and
+# multi-line doc headers — all triggered by --all-targets on newer clippy.
+# Allowed at the crate level so production and test code share one baseline.
+[lints.clippy]
+doc_overindented_list_items = "allow"
+too_many_arguments = "allow"
+manual_range_contains = "allow"
+
 # lib target required so integration tests can call `ione::app()`
 [lib]
 name = "ione"
