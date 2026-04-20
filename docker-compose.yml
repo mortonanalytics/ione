@@ -27,6 +27,22 @@ services:
     volumes:
       - ione-minio:/data
 
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/master || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   # ollama:
   #   # Uncomment if you want Ollama containerized instead of running natively.
   #   # By default, Ollama is expected to run natively on the host at port 11434.

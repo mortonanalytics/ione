@@ -16,7 +16,7 @@ path = "src/main.rs"
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "cookies"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -30,3 +30,12 @@ dotenvy = "0.15"
 async-trait = "0.1"
 pgvector = { version = "0.4", features = ["sqlx"] }
 evalexpr = "11"
+
+rand = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+
+[dev-dependencies]
+urlencoding = "2"

@@ -1,4 +1,5 @@
 use axum::{
+    middleware::from_fn_with_state,
     routing::{get, post},
     Router,
 };
@@ -8,13 +9,15 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::state::AppState;
+use crate::{auth::auth_middleware, state::AppState};
 
+pub mod auth_routes;
 pub mod chat;
 pub mod connectors;
 pub mod conversations;
 pub mod feed;
 pub mod health;
+pub mod me;
 pub mod signals;
 pub mod survivors;
 pub mod workspaces;
@@ -22,8 +25,16 @@ pub mod workspaces;
 pub fn router(state: AppState) -> Router {
     let static_dir = state.config.static_dir.clone();
 
-    let api = Router::new()
+    // Routes that are always public (no auth middleware).
+    let public = Router::new()
         .route("/api/v1/health", get(health::health))
+        .route("/auth/login", get(auth_routes::login))
+        .route("/auth/callback", get(auth_routes::callback))
+        .route("/auth/logout", post(auth_routes::logout))
+        .with_state(state.clone());
+
+    // Routes that run through the auth middleware.
+    let protected = Router::new()
         .route("/api/v1/chat", post(chat::chat))
         .route(
             "/api/v1/conversations",
@@ -62,6 +73,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/workspaces/:id/feed", get(feed::get_feed))
         .route("/api/v1/workspaces/:id/roles", get(workspaces::list_roles))
+        .route("/api/v1/me", get(me::me))
+        .route_layer(from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state);
 
     let cors = CorsLayer::new()
@@ -70,7 +83,8 @@ pub fn router(state: AppState) -> Router {
         .allow_headers(Any);
 
     Router::new()
-        .merge(api)
+        .merge(public)
+        .merge(protected)
         .nest_service("/", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
         .layer(cors)

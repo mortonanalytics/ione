@@ -9,6 +9,8 @@ pub mod signal_repo;
 pub mod stream_event_repo;
 pub mod stream_repo;
 pub mod survivor_repo;
+pub mod trust_issuer_repo;
+pub mod user_repo;
 pub mod workspace_repo;
 
 pub use connector_repo::ConnectorRepo;
@@ -21,4 +23,6 @@ pub use signal_repo::SignalRepo;
 pub use stream_event_repo::StreamEventRepo;
 pub use stream_repo::StreamRepo;
 pub use survivor_repo::SurvivorRepo;
+pub use trust_issuer_repo::TrustIssuerRepo;
+pub use user_repo::UserRepo;
 pub use workspace_repo::WorkspaceRepo;

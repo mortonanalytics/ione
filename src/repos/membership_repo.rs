@@ -52,6 +52,31 @@ impl MembershipRepo {
         .context("failed to fetch existing membership")
     }
 
+    /// Upsert a membership with an explicit federated_claim_ref. If the row exists
+    /// (matched on user_id, workspace_id, role_id), update federated_claim_ref.
+    pub async fn upsert_federated(
+        &self,
+        user_id: Uuid,
+        workspace_id: Uuid,
+        role_id: Uuid,
+        federated_claim_ref: &str,
+    ) -> anyhow::Result<Membership> {
+        sqlx::query_as::<_, Membership>(
+            "INSERT INTO memberships (user_id, workspace_id, role_id, federated_claim_ref)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (user_id, workspace_id, role_id) DO UPDATE
+               SET federated_claim_ref = EXCLUDED.federated_claim_ref
+             RETURNING id, user_id, workspace_id, role_id, federated_claim_ref, created_at",
+        )
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(role_id)
+        .bind(federated_claim_ref)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to upsert federated membership")
+    }
+
     pub async fn list_for_user(&self, user_id: Uuid) -> anyhow::Result<Vec<Membership>> {
         sqlx::query_as::<_, Membership>(
             "SELECT id, user_id, workspace_id, role_id, federated_claim_ref, created_at

@@ -1,3 +1,46 @@
+/* ── Auth UI ── */
+const userLabelEl = document.getElementById('user-label');
+const loginBtn    = document.getElementById('login-btn');
+const logoutBtn   = document.getElementById('logout-btn');
+
+async function loadMe() {
+  try {
+    const data = await apiFetch('/api/v1/me');
+    const user = data.user;
+    if (user.email === 'default@localhost') {
+      userLabelEl.textContent = 'Signed in as default (local)';
+      loginBtn.hidden  = true;
+      logoutBtn.hidden = true;
+    } else {
+      userLabelEl.textContent = 'Signed in as ' + (user.displayName || user.email);
+      loginBtn.hidden  = true;
+      logoutBtn.hidden = false;
+    }
+  } catch (_) {
+    userLabelEl.textContent = '';
+    loginBtn.hidden  = false;
+    logoutBtn.hidden = true;
+  }
+}
+
+if (loginBtn) {
+  loginBtn.addEventListener('click', () => {
+    // Redirect to login with the default Keycloak issuer. Operators can
+    // customize IONE_KEYCLOAK_ISSUER or this URL as needed.
+    const issuer = encodeURIComponent(
+      window.IONE_KEYCLOAK_ISSUER || 'http://localhost:8080/realms/ione'
+    );
+    window.location.href = '/auth/login?issuer=' + issuer;
+  });
+}
+
+if (logoutBtn) {
+  logoutBtn.addEventListener('click', async () => {
+    await fetch('/auth/logout', { method: 'POST' });
+    await loadMe();
+  });
+}
+
 /* ── DOM refs ── */
 const convList             = document.getElementById('conv-list');
 const newChatBtn           = document.getElementById('new-chat-btn');
@@ -1330,6 +1373,9 @@ survivorsFilterVerdict.addEventListener('change', loadSurvivors);
 /* ── Init: load workspaces then conversations ── */
 
 (async function init() {
+  // Fetch current user identity and update top bar.
+  await loadMe();
+
   try {
     const wsData = await listWorkspaces();
     workspaces = wsData.items || [];
