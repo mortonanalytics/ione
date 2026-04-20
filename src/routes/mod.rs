@@ -11,6 +11,7 @@ use tower_http::{
 use crate::state::AppState;
 
 pub mod chat;
+pub mod connectors;
 pub mod conversations;
 pub mod health;
 pub mod workspaces;
@@ -42,6 +43,15 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces/:id/close",
             post(workspaces::close_workspace),
         )
+        .route(
+            "/api/v1/workspaces/:id/connectors",
+            get(connectors::list_connectors).post(connectors::create_connector),
+        )
+        .route(
+            "/api/v1/connectors/:id/streams",
+            get(connectors::list_streams),
+        )
+        .route("/api/v1/streams/:id/poll", post(connectors::poll_stream))
         .with_state(state);
 
     let cors = CorsLayer::new()

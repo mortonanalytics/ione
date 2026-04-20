@@ -1,12 +1,18 @@
 pub mod bootstrap;
+pub mod connector_repo;
 pub mod conversation_repo;
 pub mod membership_repo;
 pub mod message_repo;
 pub mod role_repo;
+pub mod stream_event_repo;
+pub mod stream_repo;
 pub mod workspace_repo;
 
+pub use connector_repo::ConnectorRepo;
 pub use conversation_repo::ConversationRepo;
 pub use membership_repo::MembershipRepo;
 pub use message_repo::MessageRepo;
 pub use role_repo::RoleRepo;
+pub use stream_event_repo::StreamEventRepo;
+pub use stream_repo::StreamRepo;
 pub use workspace_repo::WorkspaceRepo;

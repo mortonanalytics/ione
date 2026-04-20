@@ -1,15 +1,21 @@
+pub mod connector;
 pub mod conversation;
 pub mod membership;
 pub mod message;
 pub mod organization;
 pub mod role;
+pub mod stream;
+pub mod stream_event;
 pub mod user;
 pub mod workspace;
 
+pub use connector::{Connector, ConnectorKind, ConnectorStatus};
 pub use conversation::Conversation;
 pub use membership::Membership;
 pub use message::{Message, MessageRole};
 pub use organization::Organization;
 pub use role::Role;
+pub use stream::Stream;
+pub use stream_event::StreamEvent;
 pub use user::User;
 pub use workspace::{Workspace, WorkspaceLifecycle};

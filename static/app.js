@@ -155,6 +155,11 @@ function setActiveWorkspace(ws) {
   clearStatus();
 
   renderSidebar();
+
+  // If the connectors tab is active, reload connectors for the new workspace.
+  if (activeTab === 'connectors') {
+    loadConnectors(ws.id);
+  }
 }
 
 /* ── Workspace menu ── */
@@ -504,6 +509,333 @@ newWorkspaceForm.addEventListener('submit', async (e) => {
     nwErrorEl.textContent = 'Error: ' + err.message;
     nwErrorEl.hidden = false;
     nwSubmitBtn.disabled = false;
+  }
+});
+
+/* ── Tab state ── */
+
+const tabChat          = document.getElementById('tab-chat');
+const tabConnectors    = document.getElementById('tab-connectors');
+const panelChat        = document.getElementById('panel-chat');
+const panelConnectors  = document.getElementById('panel-connectors');
+
+let activeTab = 'chat'; // 'chat' | 'connectors'
+
+function switchTab(name) {
+  activeTab = name;
+  const isChat = name === 'chat';
+
+  tabChat.setAttribute('aria-selected', String(isChat));
+  tabChat.classList.toggle('tab--active', isChat);
+  panelChat.hidden = !isChat;
+
+  tabConnectors.setAttribute('aria-selected', String(!isChat));
+  tabConnectors.classList.toggle('tab--active', !isChat);
+  panelConnectors.hidden = isChat;
+
+  if (!isChat && activeWorkspace) {
+    loadConnectors(activeWorkspace.id);
+  }
+}
+
+tabChat.addEventListener('click', () => switchTab('chat'));
+tabConnectors.addEventListener('click', () => switchTab('connectors'));
+
+tabChat.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
+});
+tabConnectors.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabChat.focus(); tabChat.click(); }
+});
+
+/* ── Connector + Stream API helpers ── */
+
+function listConnectors(workspaceId) {
+  return apiFetch('/api/v1/workspaces/' + workspaceId + '/connectors');
+}
+
+function createConnector(workspaceId, kind, name, config) {
+  return apiFetch('/api/v1/workspaces/' + workspaceId + '/connectors', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, name, config }),
+  });
+}
+
+function listStreams(connectorId) {
+  return apiFetch('/api/v1/connectors/' + connectorId + '/streams');
+}
+
+function pollStream(streamId) {
+  return apiFetch('/api/v1/streams/' + streamId + '/poll', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+}
+
+/* ── Connector panel state ── */
+
+const connectorsStatusEl  = document.getElementById('connectors-status');
+const connectorListEl     = document.getElementById('connector-list');
+const addConnectorBtn     = document.getElementById('add-connector-btn');
+const addConnectorDialog  = document.getElementById('add-connector-dialog');
+const addConnectorForm    = document.getElementById('add-connector-form');
+const acKindSelect        = document.getElementById('ac-kind');
+const acNameInput         = document.getElementById('ac-name');
+const acConfigTextarea    = document.getElementById('ac-config');
+const acErrorEl           = document.getElementById('ac-error');
+const acCancelBtn         = document.getElementById('ac-cancel-btn');
+const acSubmitBtn         = document.getElementById('ac-submit-btn');
+
+// connectorStreams: Map<connectorId, Stream[]>
+const connectorStreams = new Map();
+
+function setConnectorsStatus(msg, isError) {
+  connectorsStatusEl.textContent = msg;
+  connectorsStatusEl.style.color = isError ? 'var(--color-error)' : 'var(--color-sidebar-muted)';
+}
+
+function clearConnectorsStatus() {
+  connectorsStatusEl.textContent = '';
+}
+
+/* ── Build stream sub-list ── */
+
+function buildStreamItem(stream) {
+  const li = document.createElement('li');
+  li.className = 'stream-item';
+  li.dataset.id = stream.id;
+
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'stream-name';
+  nameSpan.textContent = stream.name;
+
+  const pollBtn = document.createElement('button');
+  pollBtn.type = 'button';
+  pollBtn.className = 'poll-btn';
+  pollBtn.textContent = 'Poll';
+  pollBtn.setAttribute('aria-label', 'Poll stream ' + stream.name);
+
+  const resultSpan = document.createElement('span');
+  resultSpan.className = 'poll-result';
+  resultSpan.setAttribute('aria-live', 'polite');
+
+  pollBtn.addEventListener('click', async () => {
+    pollBtn.disabled = true;
+    resultSpan.textContent = 'Polling…';
+    resultSpan.className = 'poll-result';
+    try {
+      const data = await pollStream(stream.id);
+      resultSpan.textContent = 'Ingested ' + data.ingested + ' events';
+      resultSpan.className = 'poll-result';
+      // Refresh streams for parent connector.
+      await refreshStreamsForConnector(stream.connectorId);
+    } catch (err) {
+      resultSpan.textContent = 'Error: ' + err.message;
+      resultSpan.className = 'poll-result poll-result--error';
+    } finally {
+      pollBtn.disabled = false;
+    }
+  });
+
+  li.appendChild(nameSpan);
+  li.appendChild(pollBtn);
+  li.appendChild(resultSpan);
+  return li;
+}
+
+function buildStreamSubList(connectorId, streams) {
+  if (streams.length === 0) {
+    const p = document.createElement('p');
+    p.className = 'streams-empty';
+    p.textContent = 'No streams';
+    return p;
+  }
+
+  const ul = document.createElement('ul');
+  ul.className = 'stream-list';
+  ul.setAttribute('role', 'list');
+  streams.forEach((s) => ul.appendChild(buildStreamItem(s)));
+  return ul;
+}
+
+async function refreshStreamsForConnector(connectorId) {
+  const card = connectorListEl.querySelector('[data-connector-id="' + connectorId + '"]');
+  if (!card) return;
+
+  const streamsContainer = card.querySelector('.connector-streams');
+  if (!streamsContainer) return;
+
+  try {
+    const data = await listStreams(connectorId);
+    const streams = data.items || [];
+    connectorStreams.set(connectorId, streams);
+    streamsContainer.innerHTML = '';
+    streamsContainer.appendChild(buildStreamSubList(connectorId, streams));
+  } catch (err) {
+    streamsContainer.innerHTML = '';
+    const p = document.createElement('p');
+    p.className = 'streams-error';
+    p.textContent = 'Error loading streams: ' + err.message;
+    streamsContainer.appendChild(p);
+  }
+}
+
+/* ── Build connector card ── */
+
+function buildConnectorCard(connector) {
+  const li = document.createElement('li');
+  li.className = 'connector-card';
+  li.dataset.connectorId = connector.id;
+
+  // Header row.
+  const header = document.createElement('div');
+  header.className = 'connector-card-header';
+
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'connector-name';
+  nameSpan.textContent = connector.name;
+
+  const kindBadge = document.createElement('span');
+  kindBadge.className = 'badge-kind';
+  kindBadge.textContent = connector.kind;
+
+  const statusChip = document.createElement('span');
+  statusChip.className = 'status-chip status-chip--' + connector.status;
+  statusChip.textContent = connector.status;
+  if (connector.status === 'error' && connector.lastError) {
+    statusChip.title = connector.lastError;
+  }
+
+  header.appendChild(nameSpan);
+  header.appendChild(kindBadge);
+  header.appendChild(statusChip);
+  li.appendChild(header);
+
+  // Streams container (async-filled).
+  const streamsContainer = document.createElement('div');
+  streamsContainer.className = 'connector-streams';
+
+  const loadingP = document.createElement('p');
+  loadingP.className = 'stream-loading';
+  loadingP.textContent = 'Loading streams…';
+  streamsContainer.appendChild(loadingP);
+
+  li.appendChild(streamsContainer);
+
+  // Load streams.
+  listStreams(connector.id).then((data) => {
+    const streams = data.items || [];
+    connectorStreams.set(connector.id, streams);
+    streamsContainer.innerHTML = '';
+    streamsContainer.appendChild(buildStreamSubList(connector.id, streams));
+  }).catch((err) => {
+    streamsContainer.innerHTML = '';
+    const p = document.createElement('p');
+    p.className = 'streams-error';
+    p.textContent = 'Error: ' + err.message;
+    streamsContainer.appendChild(p);
+  });
+
+  return li;
+}
+
+/* ── Load connectors for active workspace ── */
+
+async function loadConnectors(workspaceId) {
+  clearConnectorsStatus();
+  connectorListEl.innerHTML = '';
+  connectorStreams.clear();
+
+  const loadingP = document.createElement('p');
+  loadingP.className = 'stream-loading';
+  loadingP.textContent = 'Loading connectors…';
+  connectorListEl.appendChild(loadingP);
+
+  try {
+    const data = await listConnectors(workspaceId);
+    const items = data.items || [];
+    connectorListEl.innerHTML = '';
+
+    if (items.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'streams-empty';
+      p.textContent = 'No connectors. Add one to start ingesting data.';
+      connectorListEl.appendChild(p);
+      return;
+    }
+
+    items.forEach((connector) => {
+      connectorListEl.appendChild(buildConnectorCard(connector));
+    });
+  } catch (err) {
+    connectorListEl.innerHTML = '';
+    setConnectorsStatus('Error loading connectors: ' + err.message, true);
+  }
+}
+
+/* ── Add connector dialog ── */
+
+addConnectorBtn.addEventListener('click', () => {
+  acKindSelect.value = 'rust_native';
+  acNameInput.value = '';
+  acConfigTextarea.value = '';
+  acErrorEl.hidden = true;
+  acErrorEl.textContent = '';
+  acSubmitBtn.disabled = false;
+  addConnectorDialog.showModal();
+  acNameInput.focus();
+});
+
+acCancelBtn.addEventListener('click', () => {
+  addConnectorDialog.close();
+});
+
+addConnectorDialog.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    addConnectorDialog.close();
+  }
+});
+
+addConnectorForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  const name = acNameInput.value.trim();
+  const kind = acKindSelect.value;
+  const configRaw = acConfigTextarea.value.trim();
+
+  if (!name) {
+    acErrorEl.textContent = 'Name is required.';
+    acErrorEl.hidden = false;
+    return;
+  }
+
+  let config = {};
+  if (configRaw) {
+    try {
+      config = JSON.parse(configRaw);
+    } catch (_) {
+      acErrorEl.textContent = 'Config is not valid JSON.';
+      acErrorEl.hidden = false;
+      return;
+    }
+  }
+
+  acSubmitBtn.disabled = true;
+  acErrorEl.hidden = true;
+
+  try {
+    const connector = await createConnector(activeWorkspace.id, kind, name, config);
+    addConnectorDialog.close();
+    // Append new card without full reload.
+    const emptyNotice = connectorListEl.querySelector('.streams-empty');
+    if (emptyNotice) connectorListEl.removeChild(emptyNotice);
+    connectorListEl.appendChild(buildConnectorCard(connector));
+  } catch (err) {
+    acErrorEl.textContent = 'Error: ' + err.message;
+    acErrorEl.hidden = false;
+    acSubmitBtn.disabled = false;
   }
 });
 
