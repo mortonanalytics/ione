@@ -66,9 +66,51 @@ async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
                 Err(e) => warn!(workspace_id = %workspace_id, error = %e, "generator error"),
             }
         }
+
+        // (d) Run critic for new signals (those without a survivor yet).
+        //     Budget: at most 20 signals per workspace per tick.
+        if !skip_live {
+            run_critic_for_workspace(state, workspace_id).await;
+        }
     }
 
     Ok(())
+}
+
+async fn run_critic_for_workspace(state: &AppState, workspace_id: uuid::Uuid) {
+    const CRITIC_BUDGET: i64 = 20;
+
+    // Find signals in this workspace that have no survivor yet.
+    let signal_ids: Vec<uuid::Uuid> = match sqlx::query_scalar(
+        "SELECT s.id FROM signals s
+         LEFT JOIN survivors sv ON sv.signal_id = s.id
+         WHERE s.workspace_id = $1 AND sv.id IS NULL
+         ORDER BY s.created_at DESC
+         LIMIT $2",
+    )
+    .bind(workspace_id)
+    .bind(CRITIC_BUDGET)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!(workspace_id = %workspace_id, error = %e, "critic: failed to query pending signals");
+            return;
+        }
+    };
+
+    for signal_id in signal_ids {
+        match super::critic::evaluate_signal(state, signal_id).await {
+            Ok(Some(_)) => {
+                info!(workspace_id = %workspace_id, signal_id = %signal_id, "critic evaluated signal")
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(workspace_id = %workspace_id, signal_id = %signal_id, error = %e, "critic error")
+            }
+        }
+    }
 }
 
 async fn poll_workspace_connectors(

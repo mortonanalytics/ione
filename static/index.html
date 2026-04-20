@@ -31,6 +31,7 @@
         <button id="tab-chat" role="tab" aria-selected="true" aria-controls="panel-chat" class="tab tab--active">Chat</button>
         <button id="tab-connectors" role="tab" aria-selected="false" aria-controls="panel-connectors" class="tab">Connectors</button>
         <button id="tab-signals" role="tab" aria-selected="false" aria-controls="panel-signals" class="tab">Signals</button>
+        <button id="tab-survivors" role="tab" aria-selected="false" aria-controls="panel-survivors" class="tab">Survivors</button>
       </div>
 
       <!-- Chat panel -->
@@ -64,6 +65,22 @@
         </div>
         <div id="signals-status" aria-live="polite"></div>
         <ul id="signal-list" role="list"></ul>
+      </div>
+
+      <!-- Survivors panel -->
+      <div id="panel-survivors" role="tabpanel" aria-labelledby="tab-survivors" hidden>
+        <div id="survivors-toolbar">
+          <label for="survivors-filter-verdict" class="survivors-filter-label">Verdict</label>
+          <select id="survivors-filter-verdict" aria-label="Filter by verdict">
+            <option value="">All</option>
+            <option value="survive">Survive</option>
+            <option value="reject">Reject</option>
+            <option value="defer">Defer</option>
+          </select>
+          <button id="survivors-refresh-btn" type="button" aria-label="Refresh survivors">Refresh</button>
+        </div>
+        <div id="survivors-status" aria-live="polite"></div>
+        <ul id="survivor-list" role="list"></ul>
       </div>
 
       <!-- Connectors panel -->

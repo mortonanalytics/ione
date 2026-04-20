@@ -7,6 +7,7 @@ pub mod role;
 pub mod signal;
 pub mod stream;
 pub mod stream_event;
+pub mod survivor;
 pub mod user;
 pub mod workspace;
 
@@ -19,5 +20,6 @@ pub use role::Role;
 pub use signal::{Severity, Signal, SignalSource};
 pub use stream::Stream;
 pub use stream_event::StreamEvent;
+pub use survivor::{CriticVerdict, Survivor, SurvivorRow};
 pub use user::User;
 pub use workspace::{Workspace, WorkspaceLifecycle};

@@ -174,6 +174,11 @@ function setActiveWorkspace(ws) {
   if (activeTab === 'signals') {
     loadSignals();
   }
+
+  // If the survivors tab is active, reload survivors for the new workspace.
+  if (activeTab === 'survivors') {
+    loadSurvivors();
+  }
 }
 
 /* ── Workspace menu ── */
@@ -531,16 +536,21 @@ newWorkspaceForm.addEventListener('submit', async (e) => {
 const tabChat          = document.getElementById('tab-chat');
 const tabConnectors    = document.getElementById('tab-connectors');
 const tabSignals       = document.getElementById('tab-signals');
+const tabSurvivors     = document.getElementById('tab-survivors');
 const panelChat        = document.getElementById('panel-chat');
 const panelConnectors  = document.getElementById('panel-connectors');
 const panelSignals     = document.getElementById('panel-signals');
+const panelSurvivors   = document.getElementById('panel-survivors');
 
-let activeTab = 'chat'; // 'chat' | 'connectors' | 'signals'
+let activeTab = 'chat'; // 'chat' | 'connectors' | 'signals' | 'survivors'
 
 function switchTab(name) {
-  // Stop signals auto-refresh when leaving the tab.
+  // Stop auto-refresh when leaving a polling tab.
   if (activeTab === 'signals' && name !== 'signals') {
     stopSignalsPolling();
+  }
+  if (activeTab === 'survivors' && name !== 'survivors') {
+    stopSurvivorsPolling();
   }
 
   activeTab = name;
@@ -557,6 +567,10 @@ function switchTab(name) {
   tabSignals.classList.toggle('tab--active', name === 'signals');
   panelSignals.hidden = name !== 'signals';
 
+  tabSurvivors.setAttribute('aria-selected', String(name === 'survivors'));
+  tabSurvivors.classList.toggle('tab--active', name === 'survivors');
+  panelSurvivors.hidden = name !== 'survivors';
+
   if (name === 'connectors' && activeWorkspace) {
     loadConnectors(activeWorkspace.id);
   }
@@ -565,11 +579,17 @@ function switchTab(name) {
     loadSignals();
     startSignalsPolling();
   }
+
+  if (name === 'survivors' && activeWorkspace) {
+    loadSurvivors();
+    startSurvivorsPolling();
+  }
 }
 
 tabChat.addEventListener('click', () => switchTab('chat'));
 tabConnectors.addEventListener('click', () => switchTab('connectors'));
 tabSignals.addEventListener('click', () => switchTab('signals'));
+tabSurvivors.addEventListener('click', () => switchTab('survivors'));
 
 tabChat.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
@@ -580,6 +600,10 @@ tabConnectors.addEventListener('keydown', (e) => {
 });
 tabSignals.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabSurvivors.focus(); tabSurvivors.click(); }
+});
+tabSurvivors.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabSignals.focus(); tabSignals.click(); }
 });
 
 /* ── Connector + Stream API helpers ── */
@@ -1036,6 +1060,192 @@ function stopSignalsPolling() {
 signalsRefreshBtn.addEventListener('click', loadSignals);
 signalsFilterSource.addEventListener('change', loadSignals);
 signalsFilterSeverity.addEventListener('change', loadSignals);
+
+/* ── Survivors panel ── */
+
+const survivorsFilterVerdict = document.getElementById('survivors-filter-verdict');
+const survivorsRefreshBtn    = document.getElementById('survivors-refresh-btn');
+const survivorsStatusEl      = document.getElementById('survivors-status');
+const survivorListEl         = document.getElementById('survivor-list');
+
+let survivorsPollTimer = null;
+const SURVIVORS_POLL_MS = 15000;
+
+function listSurvivors(workspaceId, verdict) {
+  let url = '/api/v1/workspaces/' + workspaceId + '/survivors';
+  if (verdict) url += '?verdict=' + encodeURIComponent(verdict);
+  return apiFetch(url);
+}
+
+function setSurvivorsStatus(msg, isError) {
+  survivorsStatusEl.textContent = msg;
+  survivorsStatusEl.className = isError ? 'survivors-status--error' : '';
+}
+
+function clearSurvivorsStatus() {
+  survivorsStatusEl.textContent = '';
+  survivorsStatusEl.className = '';
+}
+
+function verdictChipClass(verdict) {
+  if (verdict === 'survive') return 'verdict-chip--survive';
+  if (verdict === 'reject') return 'verdict-chip--reject';
+  if (verdict === 'defer') return 'verdict-chip--defer';
+  return '';
+}
+
+function buildConfidenceBar(confidence) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'confidence-bar-wrapper';
+  wrapper.title = 'Confidence: ' + (confidence * 100).toFixed(0) + '%';
+
+  const track = document.createElement('div');
+  track.className = 'confidence-bar-track';
+
+  const fill = document.createElement('div');
+  fill.className = 'confidence-bar-fill';
+  fill.style.width = (confidence * 100).toFixed(1) + '%';
+
+  track.appendChild(fill);
+  wrapper.appendChild(track);
+
+  const label = document.createElement('span');
+  label.className = 'confidence-bar-label';
+  label.textContent = (confidence * 100).toFixed(0) + '%';
+  wrapper.appendChild(label);
+
+  return wrapper;
+}
+
+function buildSurvivorCard(survivor) {
+  const li = document.createElement('li');
+  li.className = 'survivor-card';
+
+  // Header: verdict chip + severity chip + timestamp
+  const header = document.createElement('div');
+  header.className = 'survivor-card-header';
+
+  const verdictChip = document.createElement('span');
+  verdictChip.className = 'verdict-chip ' + verdictChipClass(survivor.verdict);
+  verdictChip.textContent = survivor.verdict;
+
+  const severityChip = document.createElement('span');
+  severityChip.className = 'severity-chip severity-chip--' + (survivor.signalSeverity || '');
+  severityChip.textContent = survivor.signalSeverity || '';
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'signal-time';
+  timeSpan.textContent = formatDateTime(survivor.createdAt);
+
+  header.appendChild(verdictChip);
+  if (survivor.signalSeverity) header.appendChild(severityChip);
+  header.appendChild(timeSpan);
+  li.appendChild(header);
+
+  // Confidence bar
+  li.appendChild(buildConfidenceBar(survivor.confidence));
+
+  // Signal title (from joined projection)
+  const titleEl = document.createElement('div');
+  titleEl.className = 'signal-title';
+  titleEl.textContent = survivor.signalTitle || '(no title)';
+  li.appendChild(titleEl);
+
+  // Signal body
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'signal-body';
+  bodyEl.textContent = survivor.signalBody || '';
+  li.appendChild(bodyEl);
+
+  // Critic model secondary line
+  const modelEl = document.createElement('div');
+  modelEl.className = 'signal-model';
+  modelEl.textContent = survivor.criticModel;
+  li.appendChild(modelEl);
+
+  // Rationale
+  const rationaleEl = document.createElement('div');
+  rationaleEl.className = 'survivor-rationale';
+  rationaleEl.textContent = survivor.rationale;
+  li.appendChild(rationaleEl);
+
+  // Expandable chain-of-reasoning
+  const steps = survivor.chainOfReasoning;
+  if (Array.isArray(steps) && steps.length > 0) {
+    const details = document.createElement('details');
+    details.className = 'survivor-reasoning';
+
+    const summary = document.createElement('summary');
+    summary.textContent = 'Reasoning (' + steps.length + ' step' + (steps.length !== 1 ? 's' : '') + ')';
+    details.appendChild(summary);
+
+    const ol = document.createElement('ol');
+    ol.className = 'survivor-reasoning-steps';
+    steps.forEach((step) => {
+      const item = document.createElement('li');
+      item.textContent = typeof step === 'string' ? step : JSON.stringify(step);
+      ol.appendChild(item);
+    });
+    details.appendChild(ol);
+    li.appendChild(details);
+  }
+
+  return li;
+}
+
+async function loadSurvivors() {
+  if (!activeWorkspace) return;
+
+  clearSurvivorsStatus();
+  survivorListEl.innerHTML = '';
+
+  const loadingEl = document.createElement('p');
+  loadingEl.className = 'survivors-loading';
+  loadingEl.textContent = 'Loading survivors…';
+  survivorListEl.appendChild(loadingEl);
+
+  const verdict = survivorsFilterVerdict.value;
+
+  try {
+    const data = await listSurvivors(activeWorkspace.id, verdict);
+    const items = data.items || [];
+    survivorListEl.innerHTML = '';
+
+    if (items.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'survivors-empty';
+      empty.textContent = 'No survivors match the current filter.';
+      survivorListEl.appendChild(empty);
+      return;
+    }
+
+    items.forEach((survivor) => {
+      survivorListEl.appendChild(buildSurvivorCard(survivor));
+    });
+  } catch (err) {
+    survivorListEl.innerHTML = '';
+    setSurvivorsStatus('Error loading survivors: ' + err.message, true);
+  }
+}
+
+function startSurvivorsPolling() {
+  stopSurvivorsPolling();
+  survivorsPollTimer = setInterval(() => {
+    if (activeTab === 'survivors') {
+      loadSurvivors();
+    }
+  }, SURVIVORS_POLL_MS);
+}
+
+function stopSurvivorsPolling() {
+  if (survivorsPollTimer !== null) {
+    clearInterval(survivorsPollTimer);
+    survivorsPollTimer = null;
+  }
+}
+
+survivorsRefreshBtn.addEventListener('click', loadSurvivors);
+survivorsFilterVerdict.addEventListener('change', loadSurvivors);
 
 /* ── Init: load workspaces then conversations ── */
 

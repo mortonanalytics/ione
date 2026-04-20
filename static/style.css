@@ -999,3 +999,212 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   color: #888;
   padding: var(--space-2) 0;
 }
+
+/* ── Survivors panel ── */
+
+#panel-survivors {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow: hidden;
+  min-height: 0;
+}
+
+#survivors-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.survivors-filter-label {
+  font-size: var(--font-size-xs);
+  color: #555;
+  font-weight: 500;
+}
+
+#survivors-filter-verdict {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: var(--font-size-xs);
+  font-family: inherit;
+  background: var(--color-surface);
+  cursor: pointer;
+}
+
+#survivors-filter-verdict:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+#survivors-refresh-btn {
+  padding: var(--space-1) var(--space-3);
+  background: var(--color-primary);
+  color: var(--color-primary-text);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  transition: opacity 0.12s;
+  margin-left: auto;
+}
+
+#survivors-refresh-btn:hover {
+  opacity: 0.88;
+}
+
+#survivors-refresh-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+#survivors-status {
+  font-size: var(--font-size-sm);
+  min-height: 1.25rem;
+  flex-shrink: 0;
+}
+
+.survivors-status--error {
+  color: var(--color-error);
+}
+
+#survivor-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.survivor-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.survivor-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* Verdict chips */
+
+.verdict-chip {
+  font-size: var(--font-size-xs);
+  padding: 1px var(--space-2);
+  border-radius: 99px;
+  font-weight: 600;
+  cursor: default;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.verdict-chip--survive {
+  background: #e6f4ea;
+  color: #1e7e34;
+}
+
+.verdict-chip--reject {
+  background: #fdecea;
+  color: var(--color-error);
+}
+
+.verdict-chip--defer {
+  background: #fff8e1;
+  color: #b45309;
+}
+
+/* Confidence bar */
+
+.confidence-bar-wrapper {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.confidence-bar-track {
+  flex: 1;
+  height: 6px;
+  background: #e0e0e0;
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.confidence-bar-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: 99px;
+  transition: width 0.2s;
+}
+
+.confidence-bar-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-sidebar-muted);
+  white-space: nowrap;
+  min-width: 2.5rem;
+  text-align: right;
+}
+
+/* Survivor rationale */
+
+.survivor-rationale {
+  font-size: var(--font-size-sm);
+  color: #555;
+  font-style: italic;
+  line-height: 1.4;
+}
+
+/* Chain-of-reasoning disclosure */
+
+.survivor-reasoning {
+  margin-top: var(--space-1);
+}
+
+.survivor-reasoning summary {
+  font-size: var(--font-size-xs);
+  color: var(--color-sidebar-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.survivor-reasoning summary:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+.survivor-reasoning-steps {
+  margin: var(--space-1) 0 0 var(--space-4);
+  padding: 0;
+  font-size: var(--font-size-xs);
+  color: #333;
+  line-height: 1.5;
+}
+
+.survivor-reasoning-steps li {
+  margin-bottom: var(--space-1);
+}
+
+.survivors-loading {
+  font-size: var(--font-size-xs);
+  color: var(--color-sidebar-muted);
+  font-style: italic;
+}
+
+.survivors-empty {
+  font-size: var(--font-size-sm);
+  color: #888;
+  padding: var(--space-2) 0;
+}
