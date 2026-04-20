@@ -299,6 +299,10 @@ async fn list_conversations_returns_items() {
 #[tokio::test]
 #[ignore]
 async fn get_conversation_with_messages_returns_ordered_history() {
+    if std::env::var("IONE_SKIP_LIVE").is_ok() {
+        eprintln!("IONE_SKIP_LIVE set — skipping Ollama-dependent history test");
+        return;
+    }
     let (base, _pool) = spawn_app().await;
     let client = reqwest::Client::new();
 
@@ -441,6 +445,10 @@ async fn get_conversation_with_messages_returns_ordered_history() {
 #[tokio::test]
 #[ignore]
 async fn post_message_persists_user_and_assistant_turns() {
+    if std::env::var("IONE_SKIP_LIVE").is_ok() {
+        eprintln!("IONE_SKIP_LIVE set — skipping Ollama-dependent post-message test");
+        return;
+    }
     let (base, pool) = spawn_app().await;
     let client = reqwest::Client::new();
 
@@ -637,6 +645,10 @@ async fn conversation_foreign_key_cascades_delete_messages() {
 #[tokio::test]
 #[ignore]
 async fn phase_1_chat_endpoint_still_works() {
+    if std::env::var("IONE_SKIP_LIVE").is_ok() {
+        eprintln!("IONE_SKIP_LIVE set — skipping Ollama-dependent chat regression");
+        return;
+    }
     let (base, _pool) = spawn_app().await;
     let client = reqwest::Client::new();
 
