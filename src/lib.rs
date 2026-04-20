@@ -3,6 +3,7 @@ pub mod config;
 pub mod connectors;
 pub mod db;
 pub mod error;
+pub mod mcp_server;
 pub mod models;
 pub mod repos;
 pub mod routes;

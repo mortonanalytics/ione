@@ -30,6 +30,9 @@ pub struct AuthContext {
     pub user_id: Uuid,
     pub org_id: Uuid,
     pub is_oidc: bool,
+    /// True when authentication was via a bearer JWT from a trusted peer issuer
+    /// (MCP-to-MCP or peer-to-peer call). False for cookie sessions and local fallback.
+    pub is_mcp_peer: bool,
     pub active_role_id: Option<Uuid>,
 }
 
@@ -162,7 +165,7 @@ pub async fn issue_session_cookie_with_expiry(
 }
 
 /// Extract the user_id from a `Cookie:` header value, if valid and not expired.
-fn extract_user_id_from_header(key: &[u8; 64], cookie_header: &str) -> Option<Uuid> {
+pub fn extract_user_id_from_header(key: &[u8; 64], cookie_header: &str) -> Option<Uuid> {
     for part in cookie_header.split(';') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(SESSION_COOKIE_NAME) {
@@ -172,6 +175,15 @@ fn extract_user_id_from_header(key: &[u8; 64], cookie_header: &str) -> Option<Uu
         }
     }
     None
+}
+
+/// Extract user_id from an `axum::http::HeaderMap` (reads the `Cookie:` header).
+pub fn extract_user_id_from_headers(
+    key: &[u8; 64],
+    headers: &axum::http::HeaderMap,
+) -> Option<Uuid> {
+    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+    extract_user_id_from_header(key, cookie_header)
 }
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
@@ -207,6 +219,7 @@ pub async fn auth_middleware(
         user_id: resolved_user_id,
         org_id: org_id.unwrap_or(Uuid::nil()),
         is_oidc,
+        is_mcp_peer: false,
         active_role_id: None,
     };
 

@@ -1233,3 +1233,41 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .routing-chip--notification { background: #fef3c7; color: #b45309; }
 .routing-chip--draft        { background: #ede9fe; color: #6d28d9; }
 .routing-chip--peer         { background: #ccfbf1; color: #0f766e; }
+
+/* ── MCP endpoint disclosure (Phase 11) ── */
+.mcp-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  margin: 4px 0 8px;
+  background: #16162a;
+  border-radius: 4px;
+  font-size: 11px;
+  overflow: hidden;
+}
+.mcp-endpoint-label {
+  color: #89dceb;
+  font-weight: 700;
+  letter-spacing: .04em;
+  flex-shrink: 0;
+}
+.mcp-url {
+  color: var(--color-sidebar-muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+}
+.mcp-copy-btn {
+  flex-shrink: 0;
+  background: #313244;
+  border: none;
+  color: var(--color-sidebar-text);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.mcp-copy-btn:hover { background: #45475a; }

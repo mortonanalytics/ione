@@ -9,7 +9,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::{auth::auth_middleware, state::AppState};
+use crate::{auth::auth_middleware, mcp_server, state::AppState};
 
 pub mod approvals;
 pub mod artifacts;
@@ -86,16 +86,20 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/approvals/:id", post(approvals::decide_approval))
         .route("/api/v1/me", get(me::me))
         .route_layer(from_fn_with_state(state.clone(), auth_middleware))
-        .with_state(state);
+        .with_state(state.clone());
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // MCP server routes — no auth_middleware; MCP handles its own auth per tool call.
+    let mcp = mcp_server::router().with_state(state.clone());
+
     Router::new()
         .merge(public)
         .merge(protected)
+        .merge(mcp)
         .nest_service("/", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
         .layer(cors)

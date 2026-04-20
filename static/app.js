@@ -1658,3 +1658,28 @@ approvalsFilterStatus.addEventListener('change', loadApprovals);
     setStatus('Error loading conversations: ' + err.message);
   }
 })();
+
+/* ── MCP endpoint copy button (Phase 11) ── */
+const mcpCopyBtn = document.getElementById('mcp-copy-btn');
+const mcpUrlEl   = document.getElementById('mcp-url');
+
+if (mcpCopyBtn && mcpUrlEl) {
+  // Use window.location to derive the correct host/port at runtime.
+  const mcpUrl = window.location.origin + '/mcp';
+  mcpUrlEl.textContent = mcpUrl;
+
+  mcpCopyBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(mcpUrl);
+      const original = mcpCopyBtn.textContent;
+      mcpCopyBtn.textContent = 'Copied!';
+      setTimeout(() => { mcpCopyBtn.textContent = original; }, 1500);
+    } catch (_) {
+      // Fallback: select the text
+      const range = document.createRange();
+      range.selectNode(mcpUrlEl);
+      window.getSelection().removeAllRanges();
+      window.getSelection().addRange(range);
+    }
+  });
+}

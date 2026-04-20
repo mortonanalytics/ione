@@ -29,6 +29,13 @@
 
       <button id="new-workspace-btn" aria-label="Create new workspace">+ New workspace</button>
       <button id="new-chat-btn" aria-label="New chat">+ New chat</button>
+
+      <!-- MCP endpoint disclosure (Phase 11) -->
+      <div id="mcp-endpoint" class="mcp-endpoint">
+        <span class="mcp-endpoint-label">MCP</span>
+        <span id="mcp-url" class="mcp-url">http://localhost:3000/mcp</span>
+        <button id="mcp-copy-btn" type="button" class="mcp-copy-btn" aria-label="Copy MCP URL">Copy</button>
+      </div>
       <p id="workspace-closed-notice" hidden>This workspace is closed.</p>
       <ul id="conv-list" role="list"></ul>
     </nav>
