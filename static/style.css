@@ -1,0 +1,61 @@
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  padding: 1rem;
+  background: #f5f5f5;
+  color: #111;
+}
+
+#app {
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+h1 { margin-top: 0; }
+
+#transcript {
+  min-height: 200px;
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 0.75rem;
+  background: #fff;
+  margin-bottom: 0.75rem;
+}
+
+.message { margin-bottom: 0.5rem; white-space: pre-wrap; }
+.message.user { color: #005a9c; }
+.message.assistant { color: #1a7a1a; }
+
+#chat-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+textarea {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 1rem;
+  resize: vertical;
+}
+
+button {
+  align-self: flex-end;
+  padding: 0.5rem 1.5rem;
+  background: #005a9c;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+#status { color: #c00; font-size: 0.875rem; min-height: 1.25rem; }
