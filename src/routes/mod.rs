@@ -13,6 +13,7 @@ use crate::state::AppState;
 pub mod chat;
 pub mod connectors;
 pub mod conversations;
+pub mod feed;
 pub mod health;
 pub mod signals;
 pub mod survivors;
@@ -59,6 +60,8 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces/:id/survivors",
             get(survivors::list_survivors),
         )
+        .route("/api/v1/workspaces/:id/feed", get(feed::get_feed))
+        .route("/api/v1/workspaces/:id/roles", get(workspaces::list_roles))
         .with_state(state);
 
     let cors = CorsLayer::new()

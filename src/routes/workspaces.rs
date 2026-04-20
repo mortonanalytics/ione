@@ -6,7 +6,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{error::AppError, models::WorkspaceLifecycle, repos::WorkspaceRepo, state::AppState};
+use crate::{
+    error::AppError,
+    models::WorkspaceLifecycle,
+    repos::{RoleRepo, WorkspaceRepo},
+    state::AppState,
+};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +77,15 @@ pub async fn close_workspace(
     Ok(Json(
         serde_json::to_value(ws).map_err(|e| AppError::Internal(e.into()))?,
     ))
+}
+
+pub async fn list_roles(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    let repo = RoleRepo::new(state.pool.clone());
+    let items = repo.list(workspace_id).await.map_err(AppError::Internal)?;
+    Ok(Json(json!({ "items": items })))
 }
 
 /// Resolve the default org_id by looking up the user's org.

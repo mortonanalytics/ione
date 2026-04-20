@@ -175,9 +175,9 @@ function setActiveWorkspace(ws) {
     loadSignals();
   }
 
-  // If the survivors tab is active, reload survivors for the new workspace.
+  // If the survivors tab is active, reload roles + survivors for the new workspace.
   if (activeTab === 'survivors') {
-    loadSurvivors();
+    loadRolesIntoFilter(ws.id).then(() => loadSurvivors());
   }
 }
 
@@ -581,7 +581,7 @@ function switchTab(name) {
   }
 
   if (name === 'survivors' && activeWorkspace) {
-    loadSurvivors();
+    loadRolesIntoFilter(activeWorkspace.id).then(() => loadSurvivors());
     startSurvivorsPolling();
   }
 }
@@ -1063,6 +1063,7 @@ signalsFilterSeverity.addEventListener('change', loadSignals);
 
 /* ── Survivors panel ── */
 
+const survivorsFilterRole    = document.getElementById('survivors-filter-role');
 const survivorsFilterVerdict = document.getElementById('survivors-filter-verdict');
 const survivorsRefreshBtn    = document.getElementById('survivors-refresh-btn');
 const survivorsStatusEl      = document.getElementById('survivors-status');
@@ -1071,10 +1072,48 @@ const survivorListEl         = document.getElementById('survivor-list');
 let survivorsPollTimer = null;
 const SURVIVORS_POLL_MS = 15000;
 
+const ACTIVE_ROLE_KEY_PREFIX = 'ione.activeRoleId.';
+
+function activeRoleStorageKey(workspaceId) {
+  return ACTIVE_ROLE_KEY_PREFIX + workspaceId;
+}
+
 function listSurvivors(workspaceId, verdict) {
   let url = '/api/v1/workspaces/' + workspaceId + '/survivors';
   if (verdict) url += '?verdict=' + encodeURIComponent(verdict);
   return apiFetch(url);
+}
+
+function listFeed(workspaceId, roleId) {
+  return apiFetch('/api/v1/workspaces/' + workspaceId + '/feed?roleId=' + encodeURIComponent(roleId));
+}
+
+function listRoles(workspaceId) {
+  return apiFetch('/api/v1/workspaces/' + workspaceId + '/roles');
+}
+
+async function loadRolesIntoFilter(workspaceId) {
+  // Reset to "All survivors" then populate from API.
+  survivorsFilterRole.innerHTML = '<option value="">All survivors</option>';
+
+  try {
+    const data = await listRoles(workspaceId);
+    const roles = data.items || [];
+    roles.forEach((role) => {
+      const opt = document.createElement('option');
+      opt.value = role.id;
+      opt.textContent = role.name + ' (CoC ' + role.cocLevel + ')';
+      survivorsFilterRole.appendChild(opt);
+    });
+
+    // Restore persisted role selection for this workspace.
+    const savedRoleId = localStorage.getItem(activeRoleStorageKey(workspaceId));
+    if (savedRoleId && roles.find((r) => r.id === savedRoleId)) {
+      survivorsFilterRole.value = savedRoleId;
+    }
+  } catch (_err) {
+    // Non-fatal: role filter just stays at "All survivors".
+  }
 }
 
 function setSurvivorsStatus(msg, isError) {
@@ -1115,6 +1154,28 @@ function buildConfidenceBar(confidence) {
   wrapper.appendChild(label);
 
   return wrapper;
+}
+
+function routingChipClass(kind) {
+  if (kind === 'feed') return 'routing-chip--feed';
+  if (kind === 'notification') return 'routing-chip--notification';
+  if (kind === 'draft') return 'routing-chip--draft';
+  if (kind === 'peer') return 'routing-chip--peer';
+  return '';
+}
+
+function buildRoutingChips(routingDecisions) {
+  if (!Array.isArray(routingDecisions) || routingDecisions.length === 0) return null;
+  const row = document.createElement('div');
+  row.className = 'routing-chips';
+  routingDecisions.forEach((rd) => {
+    const chip = document.createElement('span');
+    chip.className = 'routing-chip ' + routingChipClass(rd.targetKind);
+    chip.textContent = rd.targetKind;
+    chip.title = rd.rationale || '';
+    row.appendChild(chip);
+  });
+  return row;
 }
 
 function buildSurvivorCard(survivor) {
@@ -1169,6 +1230,10 @@ function buildSurvivorCard(survivor) {
   rationaleEl.textContent = survivor.rationale;
   li.appendChild(rationaleEl);
 
+  // Routing decision chips (inline, from server-side join)
+  const chipsEl = buildRoutingChips(survivor.routingDecisions);
+  if (chipsEl) li.appendChild(chipsEl);
+
   // Expandable chain-of-reasoning
   const steps = survivor.chainOfReasoning;
   if (Array.isArray(steps) && steps.length > 0) {
@@ -1204,10 +1269,24 @@ async function loadSurvivors() {
   loadingEl.textContent = 'Loading survivors…';
   survivorListEl.appendChild(loadingEl);
 
+  const roleId = survivorsFilterRole.value;
   const verdict = survivorsFilterVerdict.value;
 
+  // Persist role selection for this workspace.
+  if (roleId) {
+    localStorage.setItem(activeRoleStorageKey(activeWorkspace.id), roleId);
+  } else {
+    localStorage.removeItem(activeRoleStorageKey(activeWorkspace.id));
+  }
+
   try {
-    const data = await listSurvivors(activeWorkspace.id, verdict);
+    let data;
+    if (roleId) {
+      // Use feed endpoint for role-scoped view.
+      data = await listFeed(activeWorkspace.id, roleId);
+    } else {
+      data = await listSurvivors(activeWorkspace.id, verdict);
+    }
     const items = data.items || [];
     survivorListEl.innerHTML = '';
 
@@ -1245,6 +1324,7 @@ function stopSurvivorsPolling() {
 }
 
 survivorsRefreshBtn.addEventListener('click', loadSurvivors);
+survivorsFilterRole.addEventListener('change', loadSurvivors);
 survivorsFilterVerdict.addEventListener('change', loadSurvivors);
 
 /* ── Init: load workspaces then conversations ── */

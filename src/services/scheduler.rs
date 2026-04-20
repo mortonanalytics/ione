@@ -72,6 +72,12 @@ async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
         if !skip_live {
             run_critic_for_workspace(state, workspace_id).await;
         }
+
+        // (e) Run router for surviving survivors without routing decisions yet.
+        //     Budget: 20 survivors per workspace per tick. Skipped when IONE_SKIP_LIVE=1.
+        if !skip_live {
+            run_router_for_workspace(state, workspace_id).await;
+        }
     }
 
     Ok(())
@@ -108,6 +114,50 @@ async fn run_critic_for_workspace(state: &AppState, workspace_id: uuid::Uuid) {
             Ok(None) => {}
             Err(e) => {
                 warn!(workspace_id = %workspace_id, signal_id = %signal_id, error = %e, "critic error")
+            }
+        }
+    }
+}
+
+async fn run_router_for_workspace(state: &AppState, workspace_id: uuid::Uuid) {
+    const ROUTER_BUDGET: i64 = 20;
+
+    // Find surviving survivors in this workspace that have no routing decisions yet.
+    let survivor_ids: Vec<uuid::Uuid> = match sqlx::query_scalar(
+        "SELECT sv.id FROM survivors sv
+         JOIN signals sig ON sig.id = sv.signal_id
+         LEFT JOIN routing_decisions rd ON rd.survivor_id = sv.id
+         WHERE sig.workspace_id = $1
+           AND sv.verdict = 'survive'::critic_verdict
+           AND rd.id IS NULL
+         ORDER BY sv.created_at DESC
+         LIMIT $2",
+    )
+    .bind(workspace_id)
+    .bind(ROUTER_BUDGET)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!(workspace_id = %workspace_id, error = %e, "router: failed to query pending survivors");
+            return;
+        }
+    };
+
+    for survivor_id in survivor_ids {
+        match super::router::classify_survivor(state, survivor_id).await {
+            Ok(decisions) if !decisions.is_empty() => {
+                info!(
+                    workspace_id = %workspace_id,
+                    survivor_id = %survivor_id,
+                    count = decisions.len(),
+                    "router classified survivor"
+                )
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(workspace_id = %workspace_id, survivor_id = %survivor_id, error = %e, "router error")
             }
         }
     }

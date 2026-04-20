@@ -1208,3 +1208,28 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   color: #888;
   padding: var(--space-2) 0;
 }
+
+
+/* ── Routing decision chips ── */
+
+.routing-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: var(--space-1) 0;
+}
+
+.routing-chip {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border-radius: 9999px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: lowercase;
+  cursor: default;
+}
+
+.routing-chip--feed         { background: #dbeafe; color: #1d4ed8; }
+.routing-chip--notification { background: #fef3c7; color: #b45309; }
+.routing-chip--draft        { background: #ede9fe; color: #6d28d9; }
+.routing-chip--peer         { background: #ccfbf1; color: #0f766e; }

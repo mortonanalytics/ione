@@ -67,6 +67,8 @@ Canonical names and types. All code (SQL migrations, Rust structs, TS/JS interfa
 | coc_level | `coc_level` | `coc_level` | `cocLevel` | INT (0 = top) |
 | permissions | `permissions` | `permissions` | `permissions` | JSONB |
 
+*Unique constraint: `(workspace_id, name, coc_level)` — same role name at different CoC levels is semantically distinct (e.g., deputy vs chief at different levels) and allowed.*
+
 ### membership
 | Field | DB column | Rust field | JS field | Type |
 |-------|-----------|------------|----------|------|
