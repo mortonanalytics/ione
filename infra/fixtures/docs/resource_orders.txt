@@ -1,0 +1,15 @@
+Resource Order Log — Lolo Complex
+
+RO-2024-0815-001: 2x Type 1 Hand Crews — Ordered 08/15 0800, Filled 08/15 1600
+  Source: Northern Rockies Coordination Center
+  Assignment: Division B, Mineral County flank
+
+RO-2024-0815-002: 1x Type 2 Helicopter w/ Crew — Ordered 08/15 1000, Pending
+  Source: GACC request pending
+  Assignment: Air Operations, bucket work on spotfires
+
+RO-2024-0815-003: 200 gal PHOS-CHEK retardant — Ordered 08/15 1200, Filled
+  Source: Aerial supervision module at Missoula ATGS
+
+Status update 1430L: Fire weather watch issued for tomorrow. Red flag conditions
+expected 1400-2000 with sustained 20mph winds and RH dropping to 8%.

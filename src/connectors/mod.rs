@@ -1,3 +1,6 @@
+pub mod firms;
+pub mod fs_s3;
+pub mod irwin;
 pub mod mcp_client;
 pub mod nws;
 pub mod slack;
@@ -72,8 +75,29 @@ pub fn build_from_row(conn: &Connector) -> anyhow::Result<Box<dyn ConnectorImpl>
                 return Ok(Box::new(c));
             }
 
+            if kind_hint == "firms" || name_lower.starts_with("firms") {
+                let c = firms::FirmsConnector::from_config(&conn.config)?;
+                return Ok(Box::new(c));
+            }
+
+            if kind_hint == "fs_s3"
+                || kind_hint == "s3"
+                || kind_hint == "fs"
+                || name_lower.starts_with("s3")
+                || name_lower.starts_with("fs_s3")
+                || name_lower.starts_with("documents")
+            {
+                let c = fs_s3::FsS3Connector::from_config(&conn.config)?;
+                return Ok(Box::new(c));
+            }
+
+            if kind_hint == "irwin" || name_lower.starts_with("irwin") {
+                let c = irwin::IrwinConnector::from_config(&conn.config)?;
+                return Ok(Box::new(c));
+            }
+
             anyhow::bail!(
-                "unknown rust_native connector name '{}'; set config.kind to 'slack', 'smtp', or 'nws'",
+                "unknown rust_native connector name '{}'; set config.kind to 'slack', 'smtp', 'nws', 'firms', 'fs_s3', or 'irwin'",
                 conn.name
             )
         }

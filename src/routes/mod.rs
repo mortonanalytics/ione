@@ -13,6 +13,7 @@ use crate::{auth::auth_middleware, mcp_server, state::AppState};
 
 pub mod approvals;
 pub mod artifacts;
+pub mod audit_events;
 pub mod auth_routes;
 pub mod chat;
 pub mod connectors;
@@ -83,6 +84,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/approvals",
             get(approvals::list_approvals),
+        )
+        .route(
+            "/api/v1/workspaces/:id/audit_events",
+            get(audit_events::list_audit_events),
         )
         .route("/api/v1/approvals/:id", post(approvals::decide_approval))
         .route(
