@@ -38,4 +38,4 @@ First public release.
 - Policy editor UI for auto_exec + sharing policies is deferred to v0.2; configure via SQL for now.
 - Streaming responses (SSE for chat + for signals) deferred to v0.2.
 
-[0.1.0]: https://github.com/morton-analytics/ione/releases/tag/v0.1.0
+[0.1.0]: https://github.com/mortonanalytics/ione/releases/tag/v0.1.0
