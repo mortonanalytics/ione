@@ -19,24 +19,21 @@ pub async fn ensure_default_org_and_user(pool: &PgPool) -> anyhow::Result<(Uuid,
         .await
         .context("failed to acquire bootstrap advisory lock")?;
 
-    let org_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO organizations (name)
-         VALUES ('Default Org')
-         ON CONFLICT DO NOTHING
-         RETURNING id",
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .context("failed to upsert default org")?
-    .unwrap_or(Uuid::nil());
-
-    let org_id = if org_id == Uuid::nil() {
+    // SELECT first to avoid creating duplicate orgs (organizations.name has no UNIQUE constraint).
+    let existing_org: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM organizations WHERE name = 'Default Org' LIMIT 1")
-            .fetch_one(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await
-            .context("failed to fetch default org")?
-    } else {
-        org_id
+            .context("failed to query default org")?;
+
+    let org_id: Uuid = match existing_org {
+        Some(id) => id,
+        None => sqlx::query_scalar(
+            "INSERT INTO organizations (name) VALUES ('Default Org') RETURNING id",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to insert default org")?,
     };
 
     let user_id: Uuid = sqlx::query_scalar(

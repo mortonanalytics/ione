@@ -1,3 +1,4 @@
+pub mod mcp_client;
 pub mod nws;
 pub mod slack;
 pub mod smtp;
@@ -77,7 +78,8 @@ pub fn build_from_row(conn: &Connector) -> anyhow::Result<Box<dyn ConnectorImpl>
             )
         }
         ConnectorKind::Mcp => {
-            anyhow::bail!("MCP connectors not yet implemented (Phase 11)")
+            let c = mcp_client::McpClientConnector::from_config(&conn.config)?;
+            Ok(Box::new(c))
         }
         ConnectorKind::Openapi => {
             anyhow::bail!("OpenAPI connectors not yet implemented")

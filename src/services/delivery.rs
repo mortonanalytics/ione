@@ -4,9 +4,12 @@ use uuid::Uuid;
 
 use crate::{
     connectors::build_from_row,
-    models::{ActorKind, ApprovalStatus, ArtifactKind, ConnectorStatus},
-    repos::{ApprovalRepo, ArtifactRepo, AuditEventRepo, ConnectorRepo},
-    services::auto_exec::{self, AutoExecOutcome},
+    models::{ActorKind, ApprovalStatus, ArtifactKind, ConnectorStatus, PeerStatus},
+    repos::{ApprovalRepo, ArtifactRepo, AuditEventRepo, ConnectorRepo, PeerRepo},
+    services::{
+        auto_exec::{self, AutoExecOutcome},
+        peer::check_sharing_policy,
+    },
     state::AppState,
 };
 
@@ -93,7 +96,7 @@ pub async fn process_routing_decision(state: &AppState, routing_id: Uuid) -> any
     .await
     .context("failed to fetch routing_decision")?;
 
-    let (target_kind, target_ref, _signal_id, signal_title, signal_body, _severity, workspace_id) =
+    let (target_kind, target_ref, _signal_id, signal_title, signal_body, severity, workspace_id) =
         match row {
             Some(r) => r,
             None => {
@@ -139,8 +142,17 @@ pub async fn process_routing_decision(state: &AppState, routing_id: Uuid) -> any
             .await?;
         }
         "peer" => {
-            // Peer routing handled in Phase 12.
-            info!(routing_id = %routing_id, "process_routing_decision: peer target, no-op in Phase 9");
+            process_peer(
+                state,
+                routing_id,
+                workspace_id,
+                survivor_id,
+                &target_ref,
+                &signal_title,
+                &signal_body,
+                &severity,
+            )
+            .await?;
         }
         other => {
             warn!(routing_id = %routing_id, target_kind = other, "process_routing_decision: unknown target kind");
@@ -451,6 +463,237 @@ pub async fn deliver_artifact(
             .context("failed to mark approval as approved after delivery")?;
     }
 
+    Ok(())
+}
+
+// ── Peer path ─────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn process_peer(
+    state: &AppState,
+    routing_id: Uuid,
+    workspace_id: Uuid,
+    survivor_id: Uuid,
+    target_ref: &serde_json::Value,
+    signal_title: &str,
+    signal_body: &str,
+    severity: &str,
+) -> anyhow::Result<()> {
+    let audit_repo = AuditEventRepo::new(state.pool.clone());
+    let peer_repo = PeerRepo::new(state.pool.clone());
+
+    // Resolve the peer_id from target_ref.
+    let peer_id_str = target_ref["peer_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("target_ref.peer_id missing for peer routing"))?;
+    let peer_id = Uuid::parse_str(peer_id_str).context("target_ref.peer_id is not a valid UUID")?;
+
+    let peer = match peer_repo.get(peer_id).await? {
+        Some(p) => p,
+        None => {
+            warn!(routing_id = %routing_id, peer_id = %peer_id, "peer not found");
+            write_peer_audit(
+                &audit_repo,
+                workspace_id,
+                routing_id,
+                peer_id,
+                "peer_delivery_failed",
+                serde_json::json!({ "routing_id": routing_id, "error": "peer not found" }),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // Sharing policy enforcement (outbound).
+    use crate::services::peer::PolicyDecision;
+    match check_sharing_policy(&peer.sharing_policy, severity, workspace_id) {
+        PolicyDecision::Blocked(reason) => {
+            info!(
+                routing_id = %routing_id,
+                peer_id = %peer_id,
+                reason = %reason,
+                "peer_policy_blocked"
+            );
+            write_peer_audit(
+                &audit_repo,
+                workspace_id,
+                routing_id,
+                peer_id,
+                "peer_policy_blocked",
+                serde_json::json!({ "routing_id": routing_id, "reason": reason }),
+            )
+            .await?;
+            return Ok(());
+        }
+        PolicyDecision::Allow => {}
+    }
+
+    // Find the mcp_client connector for this peer in this workspace.
+    let connector_id = match peer_repo
+        .find_mcp_connector_for_peer(workspace_id, peer_id)
+        .await?
+    {
+        Some(id) => id,
+        None => {
+            warn!(
+                routing_id = %routing_id,
+                peer_id = %peer_id,
+                "no mcp connector for peer in workspace — peer_unreachable"
+            );
+            write_peer_audit(
+                &audit_repo,
+                workspace_id,
+                routing_id,
+                peer_id,
+                "peer_delivery_failed",
+                serde_json::json!({
+                    "routing_id": routing_id,
+                    "error": "peer_unreachable: no mcp connector in workspace"
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    let connector_repo = ConnectorRepo::new(state.pool.clone());
+    let connector = connector_repo
+        .get(connector_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("connector {} not found", connector_id))?;
+
+    match build_from_row(&connector) {
+        Ok(impl_) => {
+            // Resolve the peer's own workspace id by calling list_workspaces on it.
+            // For simplicity, pass workspace_id = nil and let the peer use its own default.
+            let args = serde_json::json!({
+                "workspace_id": Uuid::nil().to_string(),
+                "kind": "briefing",
+                "content": {
+                    "title": signal_title,
+                    "body": signal_body,
+                    "severity": severity,
+                },
+                "source_survivor_id": survivor_id.to_string(),
+            });
+
+            // We need a real workspace_id on the peer. Fetch it via list_workspaces.
+            let peer_workspace_id = resolve_peer_workspace_id(&*impl_).await;
+
+            let final_args = serde_json::json!({
+                "workspace_id": peer_workspace_id,
+                "kind": "briefing",
+                "content": {
+                    "title": signal_title,
+                    "body": signal_body,
+                    "severity": severity,
+                },
+                "source_survivor_id": survivor_id.to_string(),
+            });
+            let _ = args; // replaced by final_args
+
+            match impl_.invoke("propose_artifact", final_args).await {
+                Ok(_) => {
+                    info!(
+                        routing_id = %routing_id,
+                        peer_id = %peer_id,
+                        "peer_delivered"
+                    );
+                    write_peer_audit(
+                        &audit_repo,
+                        workspace_id,
+                        routing_id,
+                        peer_id,
+                        "peer_delivered",
+                        serde_json::json!({ "routing_id": routing_id }),
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    warn!(
+                        routing_id = %routing_id,
+                        peer_id = %peer_id,
+                        error = %err_msg,
+                        "peer_delivery_failed"
+                    );
+                    write_peer_audit(
+                        &audit_repo,
+                        workspace_id,
+                        routing_id,
+                        peer_id,
+                        "peer_delivery_failed",
+                        serde_json::json!({ "routing_id": routing_id, "error": err_msg }),
+                    )
+                    .await?;
+
+                    // Mark peer as error if auth/connect failure.
+                    if err_msg.contains("auth error") || err_msg.contains("HTTP 4") {
+                        peer_repo
+                            .update_status(peer_id, PeerStatus::Error)
+                            .await
+                            .context("failed to update peer status to error")?;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let err_msg = format!("failed to build mcp connector: {}", e);
+            warn!(routing_id = %routing_id, peer_id = %peer_id, error = %err_msg);
+            write_peer_audit(
+                &audit_repo,
+                workspace_id,
+                routing_id,
+                peer_id,
+                "peer_delivery_failed",
+                serde_json::json!({ "routing_id": routing_id, "error": err_msg }),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn resolve_peer_workspace_id(impl_: &dyn crate::connectors::ConnectorImpl) -> String {
+    // Call list_workspaces on the peer and return the first workspace id.
+    // If this fails, fall back to nil UUID — propose_artifact will fail with a useful error.
+    match impl_.invoke("list_workspaces", serde_json::json!({})).await {
+        Ok(result) => {
+            let content_text = result["content"][0]["text"].as_str().unwrap_or("{}");
+            let data: serde_json::Value =
+                serde_json::from_str(content_text).unwrap_or_else(|_| serde_json::json!({}));
+            data["workspaces"][0]["id"]
+                .as_str()
+                .unwrap_or(&Uuid::nil().to_string())
+                .to_string()
+        }
+        Err(_) => Uuid::nil().to_string(),
+    }
+}
+
+async fn write_peer_audit(
+    audit_repo: &AuditEventRepo,
+    workspace_id: Uuid,
+    routing_id: Uuid,
+    peer_id: Uuid,
+    verb: &str,
+    payload: serde_json::Value,
+) -> anyhow::Result<()> {
+    audit_repo
+        .insert(
+            Some(workspace_id),
+            ActorKind::System,
+            &format!("peer:{}", peer_id),
+            verb,
+            "peer",
+            Some(peer_id),
+            payload,
+        )
+        .await
+        .with_context(|| format!("failed to write {} audit event", verb))?;
+    let _ = routing_id; // used in payload, keep for clarity
     Ok(())
 }
 

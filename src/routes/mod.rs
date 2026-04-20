@@ -20,6 +20,7 @@ pub mod conversations;
 pub mod feed;
 pub mod health;
 pub mod me;
+pub mod peers;
 pub mod signals;
 pub mod survivors;
 pub mod workspaces;
@@ -84,6 +85,14 @@ pub fn router(state: AppState) -> Router {
             get(approvals::list_approvals),
         )
         .route("/api/v1/approvals/:id", post(approvals::decide_approval))
+        .route(
+            "/api/v1/peers",
+            get(peers::list_peers).post(peers::create_peer),
+        )
+        .route(
+            "/api/v1/workspaces/:id/peers/:peerId/subscribe",
+            post(peers::subscribe_peer),
+        )
         .route("/api/v1/me", get(me::me))
         .route_layer(from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state.clone());

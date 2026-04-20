@@ -3,6 +3,7 @@ pub mod critic;
 pub mod delivery;
 pub mod generator;
 pub mod ollama;
+pub mod peer;
 pub mod router;
 pub mod rules;
 pub mod scheduler;
