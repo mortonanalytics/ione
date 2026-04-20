@@ -9,7 +9,20 @@
 <body>
   <div id="layout">
     <nav id="sidebar" aria-label="Conversations">
+
+      <!-- Workspace switcher -->
+      <div id="workspace-switcher">
+        <button id="workspace-trigger" aria-haspopup="true" aria-expanded="false" aria-label="Switch workspace">
+          <span id="workspace-name">Loading…</span>
+          <span id="workspace-domain" class="workspace-domain"></span>
+          <span class="workspace-caret" aria-hidden="true">▾</span>
+        </button>
+        <ul id="workspace-menu" role="menu" aria-label="Workspaces" hidden></ul>
+      </div>
+
+      <button id="new-workspace-btn" aria-label="Create new workspace">+ New workspace</button>
       <button id="new-chat-btn" aria-label="New chat">+ New chat</button>
+      <p id="workspace-closed-notice" hidden>This workspace is closed.</p>
       <ul id="conv-list" role="list"></ul>
     </nav>
     <div id="main">
@@ -21,6 +34,32 @@
       <p id="status"></p>
     </div>
   </div>
+
+  <!-- New workspace modal -->
+  <dialog id="new-workspace-dialog" aria-labelledby="nw-dialog-title">
+    <form id="new-workspace-form" method="dialog">
+      <h2 id="nw-dialog-title">New Workspace</h2>
+      <label for="nw-name">Name <span aria-hidden="true">*</span></label>
+      <input id="nw-name" type="text" required placeholder="My workspace" autocomplete="off" />
+
+      <label for="nw-domain">Domain</label>
+      <input id="nw-domain" type="text" placeholder="generic" autocomplete="off" />
+
+      <label for="nw-lifecycle">Lifecycle</label>
+      <select id="nw-lifecycle">
+        <option value="continuous">continuous</option>
+        <option value="bounded">bounded</option>
+      </select>
+
+      <p id="nw-error" class="nw-error" hidden></p>
+
+      <div class="nw-actions">
+        <button type="button" id="nw-cancel-btn">Cancel</button>
+        <button type="submit" id="nw-submit-btn">Create</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/app.js"></script>
 </body>
 </html>

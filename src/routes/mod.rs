@@ -13,6 +13,7 @@ use crate::state::AppState;
 pub mod chat;
 pub mod conversations;
 pub mod health;
+pub mod workspaces;
 
 pub fn router(state: AppState) -> Router {
     let static_dir = state.config.static_dir.clone();
@@ -31,6 +32,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/conversations/:id/messages",
             post(conversations::post_message),
+        )
+        .route(
+            "/api/v1/workspaces",
+            get(workspaces::list_workspaces).post(workspaces::create_workspace),
+        )
+        .route("/api/v1/workspaces/:id", get(workspaces::get_workspace))
+        .route(
+            "/api/v1/workspaces/:id/close",
+            post(workspaces::close_workspace),
         )
         .with_state(state);
 

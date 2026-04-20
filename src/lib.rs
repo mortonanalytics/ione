@@ -12,22 +12,28 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Construct the application router with a live database pool.
-/// Runs the idempotent bootstrap (default org + user) on every call.
+/// Runs the idempotent bootstrap (default org + user + workspace + membership)
+/// on every call.
 pub async fn app(pool: PgPool) -> Router {
-    let (_, default_user_id) = repos::bootstrap::ensure_default_org_and_user(&pool)
+    let (org_id, default_user_id) = repos::bootstrap::ensure_default_org_and_user(&pool)
         .await
         .expect("bootstrap failed");
 
+    let default_workspace_id =
+        repos::bootstrap::ensure_default_workspace_and_membership(&pool, org_id, default_user_id)
+            .await
+            .expect("workspace bootstrap failed");
+
     let config = config::Config::from_env();
-    let state = state::AppState::new(config, pool, default_user_id);
+    let state = state::AppState::new(config, pool, default_user_id, default_workspace_id);
     routes::router(state)
 }
 
 /// Phase-1 compatibility shim: boot without an active database connection.
 ///
 /// Uses a lazy pool (never actually connects unless a DB handler is exercised)
-/// and a nil UUID as the default user id. Safe for Phase 1 tests that only hit
-/// `/api/v1/health`, `/api/v1/chat`, and static assets.
+/// and nil UUIDs as the default user/workspace ids. Safe for Phase 1 tests that
+/// only hit `/api/v1/health`, `/api/v1/chat`, and static assets.
 pub async fn app_no_db() -> Router {
     let db_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://ione:ione@localhost:5433/ione".to_string());
@@ -35,6 +41,6 @@ pub async fn app_no_db() -> Router {
         .connect_lazy(&db_url)
         .expect("connect_lazy failed");
     let config = config::Config::from_env();
-    let state = state::AppState::new(config, pool, Uuid::nil());
+    let state = state::AppState::new(config, pool, Uuid::nil(), Uuid::nil());
     routes::router(state)
 }

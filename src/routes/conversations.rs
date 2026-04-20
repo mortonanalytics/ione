@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     error::AppError,
     models::{Message, MessageRole},
-    repos::{ConversationRepo, MessageRepo},
+    repos::{ConversationRepo, MessageRepo, WorkspaceRepo},
     state::AppState,
 };
 
@@ -33,10 +33,25 @@ pub async fn create_conversation(
     State(state): State<AppState>,
     Json(req): Json<CreateConversationRequest>,
 ) -> Result<Json<Value>, AppError> {
+    // Default to the Operations workspace when none is supplied.
+    let workspace_id = match req.workspace_id {
+        Some(id) => {
+            // Validate the workspace exists; return 400 if not.
+            let ws_repo = WorkspaceRepo::new(state.pool.clone());
+            ws_repo
+                .get(id)
+                .await
+                .map_err(AppError::Internal)?
+                .ok_or_else(|| AppError::BadRequest(format!("workspace {} does not exist", id)))?;
+            id
+        }
+        None => state.default_workspace_id,
+    };
+
     let title = req.title.as_deref().unwrap_or("Untitled").to_string();
     let repo = ConversationRepo::new(state.pool.clone());
     let conv = repo
-        .create(state.default_user_id, &title, req.workspace_id)
+        .create(state.default_user_id, &title, Some(workspace_id))
         .await
         .map_err(AppError::Internal)?;
     Ok(Json(

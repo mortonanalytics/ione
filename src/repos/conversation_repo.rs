@@ -19,6 +19,9 @@ impl ConversationRepo {
         title: &str,
         workspace_id: Option<Uuid>,
     ) -> anyhow::Result<Conversation> {
+        // workspace_id is Option here to keep the signature compatible with callers
+        // that may not yet have resolved it; the caller is responsible for ensuring
+        // it is Some after Phase 3.
         sqlx::query_as::<_, Conversation>(
             "INSERT INTO conversations (user_id, title, workspace_id)
              VALUES ($1, $2, $3)

@@ -16,6 +16,14 @@
   --color-error: #cc0000;
   --color-new-chat-bg: #313244;
   --color-new-chat-hover-bg: #45475a;
+  --color-ws-menu-bg: #16162a;
+  --color-ws-menu-hover-bg: #2a2a3e;
+  --color-ws-closed-text: #7f849c;
+  --color-ws-close-btn: #7f849c;
+  --color-ws-close-btn-hover: #cdd6f4;
+  --color-dialog-bg: #ffffff;
+  --color-dialog-border: #cccccc;
+  --color-dialog-overlay: rgba(0, 0, 0, 0.5);
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
@@ -24,6 +32,7 @@
   --sidebar-width: 260px;
   --radius: 4px;
   --font-size-sm: 0.8125rem;
+  --font-size-xs: 0.75rem;
   --font-size-base: 1rem;
 }
 
@@ -53,8 +62,162 @@ body {
   overflow: hidden;
 }
 
+/* ── Workspace switcher ── */
+
+#workspace-switcher {
+  position: relative;
+  flex-shrink: 0;
+  border-bottom: 1px solid #2a2a3e;
+}
+
+#workspace-trigger {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: transparent;
+  color: var(--color-sidebar-text);
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--font-size-sm);
+  transition: background 0.12s;
+}
+
+#workspace-trigger:hover {
+  background: var(--color-sidebar-hover-bg);
+}
+
+#workspace-trigger:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+#workspace-name {
+  font-weight: 600;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#workspace-name.workspace-name--closed {
+  color: var(--color-ws-closed-text);
+}
+
+.workspace-domain {
+  font-size: var(--font-size-xs);
+  color: var(--color-sidebar-muted);
+  white-space: nowrap;
+}
+
+.workspace-caret {
+  flex-shrink: 0;
+  color: var(--color-sidebar-muted);
+  font-size: var(--font-size-xs);
+}
+
+#workspace-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  list-style: none;
+  margin: 0;
+  padding: var(--space-1) 0;
+  background: var(--color-ws-menu-bg);
+  border: 1px solid #2a2a3e;
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.ws-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  color: var(--color-sidebar-text);
+  gap: var(--space-2);
+  transition: background 0.1s;
+}
+
+.ws-menu-item:hover {
+  background: var(--color-ws-menu-hover-bg);
+}
+
+.ws-menu-item:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+.ws-menu-item--closed {
+  color: var(--color-ws-closed-text);
+}
+
+.ws-menu-label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-close-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--color-ws-close-btn);
+  font-size: var(--font-size-sm);
+  padding: 0 var(--space-1);
+  line-height: 1;
+  border-radius: 2px;
+  transition: color 0.1s;
+}
+
+.ws-close-btn:hover {
+  color: var(--color-ws-close-btn-hover);
+}
+
+.ws-close-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+/* ── New workspace button ── */
+
+#new-workspace-btn {
+  margin: var(--space-2) var(--space-4) 0;
+  padding: var(--space-1) var(--space-3);
+  background: transparent;
+  color: var(--color-sidebar-muted);
+  border: 1px dashed #45475a;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+}
+
+#new-workspace-btn:hover {
+  background: var(--color-sidebar-hover-bg);
+  color: var(--color-sidebar-text);
+}
+
+#new-workspace-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* ── New chat button ── */
+
 #new-chat-btn {
-  margin: var(--space-4);
+  margin: var(--space-2) var(--space-4);
   padding: var(--space-2) var(--space-4);
   background: var(--color-new-chat-bg);
   color: var(--color-sidebar-text);
@@ -75,6 +238,20 @@ body {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
 }
+
+/* ── Workspace closed notice ── */
+
+#workspace-closed-notice {
+  margin: var(--space-2) var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--color-ws-closed-text);
+  background: #1a1a28;
+  border-radius: var(--radius);
+  border: 1px solid #2a2a3e;
+}
+
+/* ── Conversation list ── */
 
 #conv-list {
   list-style: none;
@@ -189,3 +366,90 @@ button[type="submit"]:focus-visible {
 button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 #status { color: var(--color-error); font-size: var(--font-size-sm); min-height: 1.25rem; margin: 0; }
+
+/* ── New workspace dialog ── */
+
+#new-workspace-dialog {
+  border: 1px solid var(--color-dialog-border);
+  border-radius: var(--radius);
+  padding: var(--space-6);
+  background: var(--color-dialog-bg);
+  min-width: 320px;
+  max-width: 400px;
+  width: 90vw;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+
+#new-workspace-dialog::backdrop {
+  background: var(--color-dialog-overlay);
+}
+
+#new-workspace-dialog h2 {
+  margin: 0 0 var(--space-4);
+  font-size: var(--font-size-base);
+}
+
+#new-workspace-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+#new-workspace-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+}
+
+#new-workspace-form input,
+#new-workspace-form select {
+  padding: var(--space-2);
+  border: 1px solid var(--color-dialog-border);
+  border-radius: var(--radius);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  background: var(--color-surface);
+}
+
+#new-workspace-form input:focus-visible,
+#new-workspace-form select:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.nw-error {
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+  margin: 0;
+}
+
+.nw-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.nw-actions button {
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+#nw-cancel-btn {
+  background: transparent;
+  border: 1px solid var(--color-dialog-border);
+  color: #444;
+}
+
+#nw-cancel-btn:hover {
+  background: var(--color-bg);
+}
+
+#nw-cancel-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
