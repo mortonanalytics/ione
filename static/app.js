@@ -93,6 +93,15 @@ function closeWorkspace(id) {
   });
 }
 
+function listSignals(workspaceId, source, severity) {
+  let url = '/api/v1/workspaces/' + workspaceId + '/signals';
+  const params = [];
+  if (source) params.push('source=' + encodeURIComponent(source));
+  if (severity) params.push('severity=' + encodeURIComponent(severity));
+  if (params.length) url += '?' + params.join('&');
+  return apiFetch(url);
+}
+
 /* ── Render helpers ── */
 
 function formatDate(iso) {
@@ -159,6 +168,11 @@ function setActiveWorkspace(ws) {
   // If the connectors tab is active, reload connectors for the new workspace.
   if (activeTab === 'connectors') {
     loadConnectors(ws.id);
+  }
+
+  // If the signals tab is active, reload signals for the new workspace.
+  if (activeTab === 'signals') {
+    loadSignals();
   }
 }
 
@@ -516,36 +530,56 @@ newWorkspaceForm.addEventListener('submit', async (e) => {
 
 const tabChat          = document.getElementById('tab-chat');
 const tabConnectors    = document.getElementById('tab-connectors');
+const tabSignals       = document.getElementById('tab-signals');
 const panelChat        = document.getElementById('panel-chat');
 const panelConnectors  = document.getElementById('panel-connectors');
+const panelSignals     = document.getElementById('panel-signals');
 
-let activeTab = 'chat'; // 'chat' | 'connectors'
+let activeTab = 'chat'; // 'chat' | 'connectors' | 'signals'
 
 function switchTab(name) {
+  // Stop signals auto-refresh when leaving the tab.
+  if (activeTab === 'signals' && name !== 'signals') {
+    stopSignalsPolling();
+  }
+
   activeTab = name;
-  const isChat = name === 'chat';
 
-  tabChat.setAttribute('aria-selected', String(isChat));
-  tabChat.classList.toggle('tab--active', isChat);
-  panelChat.hidden = !isChat;
+  tabChat.setAttribute('aria-selected', String(name === 'chat'));
+  tabChat.classList.toggle('tab--active', name === 'chat');
+  panelChat.hidden = name !== 'chat';
 
-  tabConnectors.setAttribute('aria-selected', String(!isChat));
-  tabConnectors.classList.toggle('tab--active', !isChat);
-  panelConnectors.hidden = isChat;
+  tabConnectors.setAttribute('aria-selected', String(name === 'connectors'));
+  tabConnectors.classList.toggle('tab--active', name === 'connectors');
+  panelConnectors.hidden = name !== 'connectors';
 
-  if (!isChat && activeWorkspace) {
+  tabSignals.setAttribute('aria-selected', String(name === 'signals'));
+  tabSignals.classList.toggle('tab--active', name === 'signals');
+  panelSignals.hidden = name !== 'signals';
+
+  if (name === 'connectors' && activeWorkspace) {
     loadConnectors(activeWorkspace.id);
+  }
+
+  if (name === 'signals' && activeWorkspace) {
+    loadSignals();
+    startSignalsPolling();
   }
 }
 
 tabChat.addEventListener('click', () => switchTab('chat'));
 tabConnectors.addEventListener('click', () => switchTab('connectors'));
+tabSignals.addEventListener('click', () => switchTab('signals'));
 
 tabChat.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
 });
 tabConnectors.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); tabChat.focus(); tabChat.click(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabSignals.focus(); tabSignals.click(); }
+});
+tabSignals.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
 });
 
 /* ── Connector + Stream API helpers ── */
@@ -838,6 +872,170 @@ addConnectorForm.addEventListener('submit', async (e) => {
     acSubmitBtn.disabled = false;
   }
 });
+
+/* ── Signals panel ── */
+
+const signalsFilterSource   = document.getElementById('signals-filter-source');
+const signalsFilterSeverity = document.getElementById('signals-filter-severity');
+const signalsRefreshBtn     = document.getElementById('signals-refresh-btn');
+const signalsStatusEl       = document.getElementById('signals-status');
+const signalListEl          = document.getElementById('signal-list');
+
+let signalsPollTimer = null;
+const SIGNALS_POLL_MS = 15000;
+
+function setSignalsStatus(msg, isError) {
+  signalsStatusEl.textContent = msg;
+  signalsStatusEl.className = isError ? 'signals-status--error' : '';
+}
+
+function clearSignalsStatus() {
+  signalsStatusEl.textContent = '';
+  signalsStatusEl.className = '';
+}
+
+function formatDateTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  });
+}
+
+function sourceBadgeClass(source) {
+  if (source === 'rule') return 'signal-source--rule';
+  if (source === 'connector_event') return 'signal-source--connector-event';
+  if (source === 'generator') return 'signal-source--generator';
+  return '';
+}
+
+function sourceLabel(source) {
+  if (source === 'connector_event') return 'connector event';
+  return source;
+}
+
+function buildSignalCard(signal) {
+  const li = document.createElement('li');
+  li.className = 'signal-card';
+
+  // Header row: severity chip + source badge + timestamp
+  const header = document.createElement('div');
+  header.className = 'signal-card-header';
+
+  const severityChip = document.createElement('span');
+  severityChip.className = 'severity-chip severity-chip--' + signal.severity;
+  severityChip.textContent = signal.severity;
+
+  const sourceBadge = document.createElement('span');
+  sourceBadge.className = 'signal-source-badge ' + sourceBadgeClass(signal.source);
+  sourceBadge.textContent = sourceLabel(signal.source);
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'signal-time';
+  timeSpan.textContent = formatDateTime(signal.createdAt);
+
+  header.appendChild(severityChip);
+  header.appendChild(sourceBadge);
+  header.appendChild(timeSpan);
+  li.appendChild(header);
+
+  // Title
+  const titleEl = document.createElement('div');
+  titleEl.className = 'signal-title';
+  titleEl.textContent = signal.title;
+  li.appendChild(titleEl);
+
+  // Body
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'signal-body';
+  bodyEl.textContent = signal.body;
+  li.appendChild(bodyEl);
+
+  // generatorModel secondary line (generator source only)
+  if (signal.source === 'generator' && signal.generatorModel) {
+    const modelEl = document.createElement('div');
+    modelEl.className = 'signal-model';
+    modelEl.textContent = signal.generatorModel;
+    li.appendChild(modelEl);
+  }
+
+  // Evidence disclosure (hide if empty / null)
+  const evidence = signal.evidence;
+  const hasEvidence = evidence && (Array.isArray(evidence) ? evidence.length > 0 : Object.keys(evidence).length > 0);
+  if (hasEvidence) {
+    const details = document.createElement('details');
+    details.className = 'signal-evidence';
+
+    const summary = document.createElement('summary');
+    summary.textContent = 'Evidence';
+    details.appendChild(summary);
+
+    const pre = document.createElement('pre');
+    pre.className = 'signal-evidence-body';
+    pre.textContent = JSON.stringify(evidence, null, 2);
+    details.appendChild(pre);
+
+    li.appendChild(details);
+  }
+
+  return li;
+}
+
+async function loadSignals() {
+  if (!activeWorkspace) return;
+
+  clearSignalsStatus();
+  signalListEl.innerHTML = '';
+
+  const loadingEl = document.createElement('p');
+  loadingEl.className = 'signals-loading';
+  loadingEl.textContent = 'Loading signals…';
+  signalListEl.appendChild(loadingEl);
+
+  const source = signalsFilterSource.value;
+  const severity = signalsFilterSeverity.value;
+
+  try {
+    const data = await listSignals(activeWorkspace.id, source, severity);
+    const items = data.items || [];
+    signalListEl.innerHTML = '';
+
+    if (items.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'signals-empty';
+      empty.textContent = 'No signals match the current filters.';
+      signalListEl.appendChild(empty);
+      return;
+    }
+
+    items.forEach((signal) => {
+      signalListEl.appendChild(buildSignalCard(signal));
+    });
+  } catch (err) {
+    signalListEl.innerHTML = '';
+    setSignalsStatus('Error loading signals: ' + err.message, true);
+  }
+}
+
+function startSignalsPolling() {
+  stopSignalsPolling();
+  signalsPollTimer = setInterval(() => {
+    if (activeTab === 'signals') {
+      loadSignals();
+    }
+  }, SIGNALS_POLL_MS);
+}
+
+function stopSignalsPolling() {
+  if (signalsPollTimer !== null) {
+    clearInterval(signalsPollTimer);
+    signalsPollTimer = null;
+  }
+}
+
+signalsRefreshBtn.addEventListener('click', loadSignals);
+signalsFilterSource.addEventListener('change', loadSignals);
+signalsFilterSeverity.addEventListener('change', loadSignals);
 
 /* ── Init: load workspaces then conversations ── */
 

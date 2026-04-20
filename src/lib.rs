@@ -16,6 +16,12 @@ use uuid::Uuid;
 /// Runs the idempotent bootstrap (default org + user + workspace + membership)
 /// on every call.
 pub async fn app(pool: PgPool) -> Router {
+    let (router, _state) = app_with_state(pool).await;
+    router
+}
+
+/// Like `app`, but also returns the `AppState` so callers can spawn the scheduler.
+pub async fn app_with_state(pool: PgPool) -> (Router, state::AppState) {
     let (org_id, default_user_id) = repos::bootstrap::ensure_default_org_and_user(&pool)
         .await
         .expect("bootstrap failed");
@@ -26,8 +32,9 @@ pub async fn app(pool: PgPool) -> Router {
             .expect("workspace bootstrap failed");
 
     let config = config::Config::from_env();
-    let state = state::AppState::new(config, pool, default_user_id, default_workspace_id);
-    routes::router(state)
+    let app_state = state::AppState::new(config, pool, default_user_id, default_workspace_id);
+    let router = routes::router(app_state.clone());
+    (router, app_state)
 }
 
 /// Phase-1 compatibility shim: boot without an active database connection.

@@ -30,6 +30,7 @@
       <div id="tab-bar" role="tablist" aria-label="Main view">
         <button id="tab-chat" role="tab" aria-selected="true" aria-controls="panel-chat" class="tab tab--active">Chat</button>
         <button id="tab-connectors" role="tab" aria-selected="false" aria-controls="panel-connectors" class="tab">Connectors</button>
+        <button id="tab-signals" role="tab" aria-selected="false" aria-controls="panel-signals" class="tab">Signals</button>
       </div>
 
       <!-- Chat panel -->
@@ -40,6 +41,29 @@
           <button type="submit" id="send-btn">Send</button>
         </form>
         <p id="status"></p>
+      </div>
+
+      <!-- Signals panel -->
+      <div id="panel-signals" role="tabpanel" aria-labelledby="tab-signals" hidden>
+        <div id="signals-toolbar">
+          <label for="signals-filter-source" class="signals-filter-label">Source</label>
+          <select id="signals-filter-source" aria-label="Filter by source">
+            <option value="">All</option>
+            <option value="rule">Rule</option>
+            <option value="connector_event">Connector event</option>
+            <option value="generator">Generator</option>
+          </select>
+          <label for="signals-filter-severity" class="signals-filter-label">Severity</label>
+          <select id="signals-filter-severity" aria-label="Filter by severity">
+            <option value="">All</option>
+            <option value="routine">Routine</option>
+            <option value="flagged">Flagged</option>
+            <option value="command">Command</option>
+          </select>
+          <button id="signals-refresh-btn" type="button" aria-label="Refresh signals">Refresh</button>
+        </div>
+        <div id="signals-status" aria-live="polite"></div>
+        <ul id="signal-list" role="list"></ul>
       </div>
 
       <!-- Connectors panel -->

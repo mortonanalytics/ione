@@ -14,6 +14,7 @@ pub mod chat;
 pub mod connectors;
 pub mod conversations;
 pub mod health;
+pub mod signals;
 pub mod workspaces;
 
 pub fn router(state: AppState) -> Router {
@@ -52,6 +53,7 @@ pub fn router(state: AppState) -> Router {
             get(connectors::list_streams),
         )
         .route("/api/v1/streams/:id/poll", post(connectors::poll_stream))
+        .route("/api/v1/workspaces/:id/signals", get(signals::list_signals))
         .with_state(state);
 
     let cors = CorsLayer::new()

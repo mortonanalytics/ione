@@ -19,7 +19,9 @@ async fn main() -> anyhow::Result<()> {
     let config = ione::config::Config::from_env();
     let bind = config.bind.clone();
 
-    let app = ione::app(pool).await;
+    let (app, state) = ione::app_with_state(pool).await;
+
+    ione::services::scheduler::spawn(state);
 
     let listener = TcpListener::bind(&bind).await?;
     tracing::info!(addr = %bind, "listening");

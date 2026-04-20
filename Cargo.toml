@@ -29,3 +29,4 @@ chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 async-trait = "0.1"
 pgvector = { version = "0.4", features = ["sqlx"] }
+evalexpr = "11"
