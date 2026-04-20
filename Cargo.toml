@@ -3,13 +3,52 @@ name = "ione"
 version = "0.1.0"
 edition = "2021"
 
+# lib target required so integration tests can call `ione::app()`
+[lib]
+name = "ione"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ione"
+path = "src/main.rs"
+
 [dependencies]
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.5", features = ["fs", "trace"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "cookies"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+thiserror = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "macros", "migrate"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+async-trait = "0.1"
+pgvector = { version = "0.4", features = ["sqlx"] }
+evalexpr = "11"
+
+rand = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls"] }
+jsonwebtoken = "9"
+tokio-stream = "0.1"
+csv = "1"
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
+
+[features]
+default = ["s3"]
+s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
+
+[dev-dependencies]
+urlencoding = "2"
+wiremock = "0.6"
+jsonwebtoken = "9"
+base64 = "0.22"

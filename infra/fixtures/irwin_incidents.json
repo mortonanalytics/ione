@@ -1,0 +1,34 @@
+[
+  {
+    "IrwinID": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "IncidentName": "Lolo Complex",
+    "IncidentTypeCategory": "WF",
+    "FireDiscoveryDateTime": "2024-08-14T18:30:00Z",
+    "ModifiedBySystem": "2024-08-15T14:25:00Z",
+    "Latitude": 47.234,
+    "Longitude": -114.876,
+    "IncidentSize": 1450.5,
+    "PercentContained": 15,
+    "TotalIncidentPersonnel": 342,
+    "EstimatedCostToDate": 2100000,
+    "FireBehaviorGeneral": "Active crown fire runs, spotting 1/4 mile",
+    "WeatherConcerns": "Red flag conditions expected Thursday",
+    "CurrentThreat": "Communities of Harper and Granite threatened"
+  },
+  {
+    "IrwinID": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    "IncidentName": "Rattlesnake Fire",
+    "IncidentTypeCategory": "WF",
+    "FireDiscoveryDateTime": "2024-08-15T09:10:00Z",
+    "ModifiedBySystem": "2024-08-15T13:45:00Z",
+    "Latitude": 47.512,
+    "Longitude": -114.231,
+    "IncidentSize": 87.3,
+    "PercentContained": 60,
+    "TotalIncidentPersonnel": 45,
+    "EstimatedCostToDate": 185000,
+    "FireBehaviorGeneral": "Surface fire, short-range spotting",
+    "WeatherConcerns": "Gusty afternoon winds",
+    "CurrentThreat": "No structures threatened"
+  }
+]
