@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SQLX_OFFLINE: true
+  IONE_SKIP_LIVE: "1"
+
+jobs:
+  fmt-clippy-check:
+    name: fmt · clippy · check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo check
+        run: cargo check --all-targets
+
+  test:
+    name: integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ione
+          POSTGRES_PASSWORD: ione
+          POSTGRES_DB: ione
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U ione"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      DATABASE_URL: postgres://ione:ione@localhost:5433/ione
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres --version 0.8 --locked
+      - name: run migrations
+        run: sqlx migrate run
+      - name: unit + phase-1 tests (no DB needed)
+        run: cargo test --test phase01_chat
+      - name: integration tests (serial, live DB, IONE_SKIP_LIVE=1)
+        run: |
+          for p in phase02_conversations phase03_workspaces phase04_nws_connector \
+                   phase05_signals phase06_critic phase07_routing \
+                   phase08_auth phase09_delivery phase10_auto_exec \
+                   phase11_mcp_server phase12_peer phase13_connectors phase13_demo; do
+            echo "=== $p ==="
+            cargo test --test "$p" -- --ignored --test-threads=1
+          done
+
+  build:
+    name: release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin ione
