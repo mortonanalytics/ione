@@ -7,14 +7,19 @@
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <div id="app">
-    <h1>IONe</h1>
-    <div id="transcript" aria-live="polite"></div>
-    <form id="chat-form">
-      <textarea id="prompt" rows="3" placeholder="Type a message…" required></textarea>
-      <button type="submit" id="send-btn">Send</button>
-    </form>
-    <p id="status"></p>
+  <div id="layout">
+    <nav id="sidebar" aria-label="Conversations">
+      <button id="new-chat-btn" aria-label="New chat">+ New chat</button>
+      <ul id="conv-list" role="list"></ul>
+    </nav>
+    <div id="main">
+      <div id="transcript" aria-live="polite"></div>
+      <form id="chat-form">
+        <textarea id="prompt" rows="3" placeholder="Type a message…" required></textarea>
+        <button type="submit" id="send-btn">Send</button>
+      </form>
+      <p id="status"></p>
+    </div>
   </div>
   <script src="/app.js"></script>
 </body>

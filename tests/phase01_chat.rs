@@ -26,7 +26,7 @@ async fn spawn_app() -> String {
         .expect("failed to bind random port");
     let addr: SocketAddr = listener.local_addr().expect("failed to get local addr");
 
-    let app = ione::app().await;
+    let app = ione::app_no_db().await;
 
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("server error");

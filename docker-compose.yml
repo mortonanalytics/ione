@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ione
+      POSTGRES_PASSWORD: ione
+      POSTGRES_DB: ione
+    volumes:
+      - ione-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ione -d ione"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9100:9000"
+      - "9101:9001"
+    environment:
+      MINIO_ROOT_USER: ione
+      MINIO_ROOT_PASSWORD: ioneione
+    command: server /data --console-address ":9001"
+    volumes:
+      - ione-minio:/data
+
+  # ollama:
+  #   # Uncomment if you want Ollama containerized instead of running natively.
+  #   # By default, Ollama is expected to run natively on the host at port 11434.
+  #   image: ollama/ollama:latest
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama-models:/root/.ollama
+  #   # For GPU support on Linux:
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: all
+  #   #           capabilities: [gpu]
+
+volumes:
+  ione-pg: {}
+  ione-minio: {}
+  # ollama-models: {}

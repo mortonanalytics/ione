@@ -1,4 +1,7 @@
-use axum::{routing::get, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use tower_http::{
     cors::{Any, CorsLayer},
     services::ServeDir,
@@ -8,6 +11,7 @@ use tower_http::{
 use crate::state::AppState;
 
 pub mod chat;
+pub mod conversations;
 pub mod health;
 
 pub fn router(state: AppState) -> Router {
@@ -15,7 +19,19 @@ pub fn router(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/api/v1/health", get(health::health))
-        .route("/api/v1/chat", axum::routing::post(chat::chat))
+        .route("/api/v1/chat", post(chat::chat))
+        .route(
+            "/api/v1/conversations",
+            get(conversations::list_conversations).post(conversations::create_conversation),
+        )
+        .route(
+            "/api/v1/conversations/:id",
+            get(conversations::get_conversation),
+        )
+        .route(
+            "/api/v1/conversations/:id/messages",
+            post(conversations::post_message),
+        )
         .with_state(state);
 
     let cors = CorsLayer::new()
