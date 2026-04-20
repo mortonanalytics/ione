@@ -6,6 +6,7 @@ use crate::{
     connectors::build_from_row,
     models::{ActorKind, ApprovalStatus, ArtifactKind, ConnectorStatus},
     repos::{ApprovalRepo, ArtifactRepo, AuditEventRepo, ConnectorRepo},
+    services::auto_exec::{self, AutoExecOutcome},
     state::AppState,
 };
 
@@ -267,6 +268,28 @@ async fn process_draft(
     signal_title: &str,
     signal_body: &str,
 ) -> anyhow::Result<()> {
+    // Phase 10: try auto-exec first. If a policy matches, skip the approval path
+    // entirely — auto_exec writes its own audit trail (auto_authorized +
+    // delivered/delivery_failed). Any non-match outcome falls through to the
+    // standard draft→approval path.
+    match auto_exec::evaluate_and_invoke(state, survivor_id).await {
+        Ok(AutoExecOutcome::Delivered { .. }) | Ok(AutoExecOutcome::DeliveryFailed { .. }) => {
+            info!(
+                routing_id = %routing_id,
+                survivor_id = %survivor_id,
+                "auto_exec consumed the draft path; skipping approval creation"
+            );
+            return Ok(());
+        }
+        Ok(_) => {
+            // NoMatch, RateLimited, ConnectorMissing, TemplateError — fall through
+            // to the human-approval draft.
+        }
+        Err(e) => {
+            warn!(routing_id = %routing_id, error = %e, "auto_exec evaluation failed; falling back to draft");
+        }
+    }
+
     let artifact_repo = ArtifactRepo::new(state.pool.clone());
     let approval_repo = ApprovalRepo::new(state.pool.clone());
     let audit_repo = AuditEventRepo::new(state.pool.clone());
