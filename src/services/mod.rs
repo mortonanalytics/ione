@@ -1,4 +1,5 @@
 pub mod critic;
+pub mod delivery;
 pub mod generator;
 pub mod ollama;
 pub mod router;

@@ -222,6 +222,14 @@ function setActiveWorkspace(ws) {
   if (activeTab === 'survivors') {
     loadRolesIntoFilter(ws.id).then(() => loadSurvivors());
   }
+
+  // If the approvals tab is active, reload approvals for the new workspace.
+  if (activeTab === 'approvals') {
+    loadApprovals();
+  }
+
+  // Always update the pending badge count.
+  updateApprovalsBadge(ws.id);
 }
 
 /* ── Workspace menu ── */
@@ -580,12 +588,14 @@ const tabChat          = document.getElementById('tab-chat');
 const tabConnectors    = document.getElementById('tab-connectors');
 const tabSignals       = document.getElementById('tab-signals');
 const tabSurvivors     = document.getElementById('tab-survivors');
+const tabApprovals     = document.getElementById('tab-approvals');
 const panelChat        = document.getElementById('panel-chat');
 const panelConnectors  = document.getElementById('panel-connectors');
 const panelSignals     = document.getElementById('panel-signals');
 const panelSurvivors   = document.getElementById('panel-survivors');
+const panelApprovals   = document.getElementById('panel-approvals');
 
-let activeTab = 'chat'; // 'chat' | 'connectors' | 'signals' | 'survivors'
+let activeTab = 'chat'; // 'chat' | 'connectors' | 'signals' | 'survivors' | 'approvals'
 
 function switchTab(name) {
   // Stop auto-refresh when leaving a polling tab.
@@ -594,6 +604,9 @@ function switchTab(name) {
   }
   if (activeTab === 'survivors' && name !== 'survivors') {
     stopSurvivorsPolling();
+  }
+  if (activeTab === 'approvals' && name !== 'approvals') {
+    stopApprovalsPolling();
   }
 
   activeTab = name;
@@ -614,6 +627,10 @@ function switchTab(name) {
   tabSurvivors.classList.toggle('tab--active', name === 'survivors');
   panelSurvivors.hidden = name !== 'survivors';
 
+  tabApprovals.setAttribute('aria-selected', String(name === 'approvals'));
+  tabApprovals.classList.toggle('tab--active', name === 'approvals');
+  panelApprovals.hidden = name !== 'approvals';
+
   if (name === 'connectors' && activeWorkspace) {
     loadConnectors(activeWorkspace.id);
   }
@@ -627,12 +644,18 @@ function switchTab(name) {
     loadRolesIntoFilter(activeWorkspace.id).then(() => loadSurvivors());
     startSurvivorsPolling();
   }
+
+  if (name === 'approvals' && activeWorkspace) {
+    loadApprovals();
+    startApprovalsPolling();
+  }
 }
 
 tabChat.addEventListener('click', () => switchTab('chat'));
 tabConnectors.addEventListener('click', () => switchTab('connectors'));
 tabSignals.addEventListener('click', () => switchTab('signals'));
 tabSurvivors.addEventListener('click', () => switchTab('survivors'));
+tabApprovals.addEventListener('click', () => switchTab('approvals'));
 
 tabChat.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
@@ -647,6 +670,10 @@ tabSignals.addEventListener('keydown', (e) => {
 });
 tabSurvivors.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); tabSignals.focus(); tabSignals.click(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabApprovals.focus(); tabApprovals.click(); }
+});
+tabApprovals.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabSurvivors.focus(); tabSurvivors.click(); }
 });
 
 /* ── Connector + Stream API helpers ── */
@@ -1370,6 +1397,224 @@ survivorsRefreshBtn.addEventListener('click', loadSurvivors);
 survivorsFilterRole.addEventListener('change', loadSurvivors);
 survivorsFilterVerdict.addEventListener('change', loadSurvivors);
 
+/* ── Approvals panel ── */
+
+const approvalsFilterStatus = document.getElementById('approvals-filter-status');
+const approvalsRefreshBtn   = document.getElementById('approvals-refresh-btn');
+const approvalsStatusEl     = document.getElementById('approvals-status');
+const approvalListEl        = document.getElementById('approval-list');
+const approvalsBadgeEl      = document.getElementById('approvals-badge');
+
+let approvalsPollTimer = null;
+const APPROVALS_POLL_MS = 10000;
+
+function listApprovals(workspaceId, status) {
+  let url = '/api/v1/workspaces/' + workspaceId + '/approvals';
+  if (status) url += '?status=' + encodeURIComponent(status);
+  return apiFetch(url);
+}
+
+function decideApproval(approvalId, decision, comment) {
+  return apiFetch('/api/v1/approvals/' + approvalId, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision, comment: comment || undefined }),
+  });
+}
+
+function setApprovalsStatus(msg, isError) {
+  approvalsStatusEl.textContent = msg;
+  approvalsStatusEl.className = isError ? 'approvals-status--error' : '';
+}
+
+function clearApprovalsStatus() {
+  approvalsStatusEl.textContent = '';
+  approvalsStatusEl.className = '';
+}
+
+async function updateApprovalsBadge(workspaceId) {
+  try {
+    const data = await listApprovals(workspaceId, 'pending');
+    const count = (data.items || []).length;
+    if (count > 0) {
+      approvalsBadgeEl.textContent = count;
+      approvalsBadgeEl.hidden = false;
+    } else {
+      approvalsBadgeEl.hidden = true;
+    }
+  } catch (_) {
+    approvalsBadgeEl.hidden = true;
+  }
+}
+
+async function loadApprovals() {
+  if (!activeWorkspace) return;
+  clearApprovalsStatus();
+  const status = approvalsFilterStatus.value;
+  try {
+    const data = await listApprovals(activeWorkspace.id, status);
+    const items = data.items || [];
+    renderApprovals(items);
+    updateApprovalsBadge(activeWorkspace.id);
+  } catch (err) {
+    setApprovalsStatus('Error loading approvals: ' + err.message, true);
+  }
+}
+
+function severityBadgeClass(severity) {
+  if (severity === 'command') return 'severity-badge--command';
+  if (severity === 'flagged') return 'severity-badge--flagged';
+  return 'severity-badge--routine';
+}
+
+function renderApprovals(items) {
+  approvalListEl.innerHTML = '';
+
+  if (items.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'approval-item approval-item--empty';
+    empty.textContent = 'No approvals to show.';
+    approvalListEl.appendChild(empty);
+    return;
+  }
+
+  items.forEach((approval) => {
+    const li = document.createElement('li');
+    li.className = 'approval-item';
+    li.dataset.approvalId = approval.id;
+
+    const content = approval.artifactContent || {};
+    const title = content.title || '(untitled)';
+    const body = content.body || '';
+    const severity = content.severity || '';
+    const rationale = content.rationale || '';
+
+    const header = document.createElement('div');
+    header.className = 'approval-header';
+
+    const kindSpan = document.createElement('span');
+    kindSpan.className = 'approval-kind';
+    kindSpan.textContent = approval.kind || 'notification_draft';
+    header.appendChild(kindSpan);
+
+    if (severity) {
+      const sevBadge = document.createElement('span');
+      sevBadge.className = 'severity-badge ' + severityBadgeClass(severity);
+      sevBadge.textContent = severity;
+      header.appendChild(sevBadge);
+    }
+
+    const statusSpan = document.createElement('span');
+    statusSpan.className = 'approval-status approval-status--' + approval.status;
+    statusSpan.textContent = approval.status;
+    header.appendChild(statusSpan);
+
+    li.appendChild(header);
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'approval-title';
+    titleEl.textContent = title;
+    li.appendChild(titleEl);
+
+    if (body) {
+      const bodyEl = document.createElement('div');
+      bodyEl.className = 'approval-body';
+      bodyEl.textContent = body;
+      li.appendChild(bodyEl);
+    }
+
+    if (rationale) {
+      const rationaleEl = document.createElement('div');
+      rationaleEl.className = 'approval-rationale';
+      rationaleEl.textContent = 'Rationale: ' + rationale;
+      li.appendChild(rationaleEl);
+    }
+
+    if (approval.status === 'pending') {
+      const commentArea = document.createElement('textarea');
+      commentArea.className = 'approval-comment';
+      commentArea.placeholder = 'Comment (optional)';
+      commentArea.rows = 2;
+      li.appendChild(commentArea);
+
+      const actions = document.createElement('div');
+      actions.className = 'approval-actions';
+
+      const approveBtn = document.createElement('button');
+      approveBtn.className = 'approval-btn approval-btn--approve';
+      approveBtn.type = 'button';
+      approveBtn.textContent = 'Approve';
+      approveBtn.addEventListener('click', async () => {
+        approveBtn.disabled = true;
+        rejectBtn.disabled = true;
+        try {
+          await decideApproval(approval.id, 'approved', commentArea.value);
+          setApprovalsStatus('Sent.', false);
+          await loadApprovals();
+        } catch (err) {
+          setApprovalsStatus('Delivery failed: ' + err.message, true);
+          approveBtn.disabled = false;
+          rejectBtn.disabled = false;
+        }
+      });
+
+      const rejectBtn = document.createElement('button');
+      rejectBtn.className = 'approval-btn approval-btn--reject';
+      rejectBtn.type = 'button';
+      rejectBtn.textContent = 'Reject';
+      rejectBtn.addEventListener('click', async () => {
+        approveBtn.disabled = true;
+        rejectBtn.disabled = true;
+        try {
+          await decideApproval(approval.id, 'rejected', commentArea.value);
+          setApprovalsStatus('Rejected.', false);
+          await loadApprovals();
+        } catch (err) {
+          setApprovalsStatus('Error: ' + err.message, true);
+          approveBtn.disabled = false;
+          rejectBtn.disabled = false;
+        }
+      });
+
+      actions.appendChild(approveBtn);
+      actions.appendChild(rejectBtn);
+      li.appendChild(actions);
+    } else if (approval.decidedAt) {
+      const decidedEl = document.createElement('div');
+      decidedEl.className = 'approval-decided-at';
+      decidedEl.textContent = 'Decided: ' + new Date(approval.decidedAt).toLocaleString();
+      li.appendChild(decidedEl);
+      if (approval.comment) {
+        const commentEl = document.createElement('div');
+        commentEl.className = 'approval-comment-display';
+        commentEl.textContent = 'Comment: ' + approval.comment;
+        li.appendChild(commentEl);
+      }
+    }
+
+    approvalListEl.appendChild(li);
+  });
+}
+
+function startApprovalsPolling() {
+  stopApprovalsPolling();
+  approvalsPollTimer = setInterval(() => {
+    if (activeTab === 'approvals') {
+      loadApprovals();
+    }
+  }, APPROVALS_POLL_MS);
+}
+
+function stopApprovalsPolling() {
+  if (approvalsPollTimer !== null) {
+    clearInterval(approvalsPollTimer);
+    approvalsPollTimer = null;
+  }
+}
+
+approvalsRefreshBtn.addEventListener('click', loadApprovals);
+approvalsFilterStatus.addEventListener('change', loadApprovals);
+
 /* ── Init: load workspaces then conversations ── */
 
 (async function init() {
@@ -1394,6 +1639,8 @@ survivorsFilterVerdict.addEventListener('change', loadSurvivors);
       const isClosed = workspaceIsClosed(initial);
       newChatBtn.hidden = isClosed;
       workspaceClosedNotice.hidden = !isClosed;
+      // Seed the pending approvals badge.
+      updateApprovalsBadge(initial.id);
     } else {
       workspaceNameEl.textContent = 'No workspaces';
     }

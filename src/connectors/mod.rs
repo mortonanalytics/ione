@@ -1,4 +1,6 @@
 pub mod nws;
+pub mod slack;
+pub mod smtp;
 
 use crate::models::{Connector, ConnectorKind};
 
@@ -43,26 +45,42 @@ pub trait ConnectorImpl: Send + Sync {
 }
 
 /// Build a boxed connector implementation from a `Connector` DB row.
-/// Phase 4 only handles `ConnectorKind::RustNative` with name-based dispatch.
+///
+/// Dispatch priority:
+/// 1. config["kind"] field if present (explicit kind hint).
+/// 2. name prefix matching (case-insensitive): "slack*" → Slack, "smtp*" → SMTP, "nws*" → NWS.
 pub fn build_from_row(conn: &Connector) -> anyhow::Result<Box<dyn ConnectorImpl>> {
     match conn.kind {
         ConnectorKind::RustNative => {
+            // Check for an explicit kind hint in config first.
+            let kind_hint = conn.config["kind"].as_str().unwrap_or("").to_lowercase();
             let name_lower = conn.name.to_lowercase();
-            if name_lower == "nws" || name_lower.starts_with("nws ") {
-                let c = nws::NwsConnector::from_config(&conn.config)?;
-                Ok(Box::new(c))
-            } else {
-                anyhow::bail!(
-                    "unknown rust_native connector name '{}'; expected name starting with 'nws'",
-                    conn.name
-                )
+
+            if kind_hint == "slack" || name_lower.starts_with("slack") {
+                let c = slack::SlackConnector::from_config(&conn.config)?;
+                return Ok(Box::new(c));
             }
+
+            if kind_hint == "smtp" || name_lower.starts_with("smtp") {
+                let c = smtp::SmtpConnector::from_config(&conn.config)?;
+                return Ok(Box::new(c));
+            }
+
+            if kind_hint == "nws" || name_lower == "nws" || name_lower.starts_with("nws ") {
+                let c = nws::NwsConnector::from_config(&conn.config)?;
+                return Ok(Box::new(c));
+            }
+
+            anyhow::bail!(
+                "unknown rust_native connector name '{}'; set config.kind to 'slack', 'smtp', or 'nws'",
+                conn.name
+            )
         }
         ConnectorKind::Mcp => {
-            anyhow::bail!("MCP connectors not yet implemented (Phase 9)")
+            anyhow::bail!("MCP connectors not yet implemented (Phase 11)")
         }
         ConnectorKind::Openapi => {
-            anyhow::bail!("OpenAPI connectors not yet implemented (Phase 9)")
+            anyhow::bail!("OpenAPI connectors not yet implemented")
         }
     }
 }

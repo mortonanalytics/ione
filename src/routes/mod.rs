@@ -11,6 +11,8 @@ use tower_http::{
 
 use crate::{auth::auth_middleware, state::AppState};
 
+pub mod approvals;
+pub mod artifacts;
 pub mod auth_routes;
 pub mod chat;
 pub mod connectors;
@@ -73,6 +75,15 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/workspaces/:id/feed", get(feed::get_feed))
         .route("/api/v1/workspaces/:id/roles", get(workspaces::list_roles))
+        .route(
+            "/api/v1/workspaces/:id/artifacts",
+            get(artifacts::list_artifacts),
+        )
+        .route(
+            "/api/v1/workspaces/:id/approvals",
+            get(approvals::list_approvals),
+        )
+        .route("/api/v1/approvals/:id", post(approvals::decide_approval))
         .route("/api/v1/me", get(me::me))
         .route_layer(from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state);

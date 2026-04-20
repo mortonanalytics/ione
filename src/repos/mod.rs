@@ -1,3 +1,6 @@
+pub mod approval_repo;
+pub mod artifact_repo;
+pub mod audit_event_repo;
 pub mod bootstrap;
 pub mod connector_repo;
 pub mod conversation_repo;
@@ -13,6 +16,9 @@ pub mod trust_issuer_repo;
 pub mod user_repo;
 pub mod workspace_repo;
 
+pub use approval_repo::ApprovalRepo;
+pub use artifact_repo::ArtifactRepo;
+pub use audit_event_repo::AuditEventRepo;
 pub use connector_repo::ConnectorRepo;
 pub use conversation_repo::ConversationRepo;
 pub use membership_repo::MembershipRepo;

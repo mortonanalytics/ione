@@ -1,3 +1,6 @@
+pub mod approval;
+pub mod artifact;
+pub mod audit_event;
 pub mod connector;
 pub mod conversation;
 pub mod membership;
@@ -13,6 +16,9 @@ pub mod trust_issuer;
 pub mod user;
 pub mod workspace;
 
+pub use approval::{Approval, ApprovalStatus};
+pub use artifact::{Artifact, ArtifactKind};
+pub use audit_event::{ActorKind, AuditEvent};
 pub use connector::{Connector, ConnectorKind, ConnectorStatus};
 pub use conversation::Conversation;
 pub use membership::Membership;
