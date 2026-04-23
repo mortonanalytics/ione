@@ -907,13 +907,16 @@ const connectorsStatusEl  = document.getElementById('connectors-status');
 const connectorListEl     = document.getElementById('connector-list');
 const addConnectorBtn     = document.getElementById('add-connector-btn');
 const addConnectorDialog  = document.getElementById('add-connector-dialog');
-const addConnectorForm    = document.getElementById('add-connector-form');
-const acKindSelect        = document.getElementById('ac-kind');
-const acNameInput         = document.getElementById('ac-name');
-const acConfigTextarea    = document.getElementById('ac-config');
+const acStepProvider      = document.getElementById('ac-step-provider');
+const acStepConfigure     = document.getElementById('ac-step-configure');
+const acConfigureTitle    = document.getElementById('ac-configure-title');
+const acFormFields        = document.getElementById('ac-form-fields');
+const acTestResultEl      = document.getElementById('ac-test-result');
 const acErrorEl           = document.getElementById('ac-error');
-const acCancelBtn         = document.getElementById('ac-cancel-btn');
+const acBackBtn           = document.getElementById('ac-back-btn');
+const acTestBtn           = document.getElementById('ac-test-btn');
 const acSubmitBtn         = document.getElementById('ac-submit-btn');
+const acProviderCancelBtn = document.getElementById('ac-step-provider-cancel');
 
 // connectorStreams: Map<connectorId, Stream[]>
 const connectorStreams = new Map();
@@ -1104,19 +1107,177 @@ async function loadConnectors(workspaceId) {
 
 /* ── Add connector dialog ── */
 
-addConnectorBtn.addEventListener('click', () => {
-  acKindSelect.value = 'rust_native';
-  acNameInput.value = '';
-  acConfigTextarea.value = '';
+const ACProvider = {
+  nws: {
+    title: 'NWS — weather alerts',
+    fields: [
+      { key: 'lat', label: 'Latitude', type: 'number', step: 'any', placeholder: '46.87', required: true, hint: 'Decimal degrees, -90 to 90.' },
+      { key: 'lon', label: 'Longitude', type: 'number', step: 'any', placeholder: '-113.99', required: true, hint: 'Decimal degrees, -180 to 180.' },
+      { key: 'pollIntervalSecs', label: 'Poll interval (seconds)', type: 'number', placeholder: '300', required: false },
+    ],
+    build: (vals) => ({ lat: Number(vals.lat), lon: Number(vals.lon), pollIntervalSecs: vals.pollIntervalSecs ? Number(vals.pollIntervalSecs) : undefined }),
+  },
+  firms: {
+    title: 'FIRMS — fire detections',
+    fields: [
+      { key: 'mapKey', label: 'MAP_KEY', type: 'password', required: true, hint: 'Request a key at firms.modaps.eosdis.nasa.gov/api.' },
+      { key: 'country', label: 'Country code', type: 'text', placeholder: 'USA', required: false },
+    ],
+    build: (vals) => ({ mapKey: vals.mapKey, country: vals.country || undefined }),
+  },
+  s3: {
+    title: 'S3 — bucket',
+    fields: [
+      { key: 'endpoint', label: 'Endpoint URL', type: 'url', placeholder: 'https://s3.amazonaws.com', required: true },
+      { key: 'bucket', label: 'Bucket', type: 'text', required: true },
+      { key: 'prefix', label: 'Prefix', type: 'text', placeholder: 'data/', required: false },
+      { key: 'accessKey', label: 'Access key ID', type: 'text', required: false },
+      { key: 'secretKey', label: 'Secret access key', type: 'password', required: false },
+      { key: 'region', label: 'Region', type: 'text', placeholder: 'us-east-1', required: false },
+    ],
+    build: (vals) => ({ endpoint: vals.endpoint, bucket: vals.bucket, prefix: vals.prefix || undefined, accessKey: vals.accessKey || undefined, secretKey: vals.secretKey || undefined, region: vals.region || undefined }),
+  },
+  slack: {
+    title: 'Slack — webhook delivery',
+    fields: [
+      { key: 'webhookUrl', label: 'Webhook URL', type: 'url', required: true, placeholder: 'https://hooks.slack.com/services/...' },
+    ],
+    build: (vals) => ({ webhookUrl: vals.webhookUrl }),
+  },
+  irwin: {
+    title: 'IRWIN — incident endpoint',
+    fields: [
+      { key: 'endpoint', label: 'Endpoint URL', type: 'url', required: true },
+    ],
+    build: (vals) => ({ endpoint: vals.endpoint }),
+  },
+  custom: {
+    title: 'Custom JSON',
+    fields: [
+      { key: '_kind', label: 'Kind', type: 'text', required: true, placeholder: 'rust_native' },
+      { key: '_name', label: 'Name', type: 'text', required: true },
+      { key: '_config', label: 'Config (JSON)', type: 'textarea', placeholder: '{}' },
+    ],
+    build: (vals) => {
+      let cfg = {};
+      try { cfg = vals._config ? JSON.parse(vals._config) : {}; } catch (_e) { throw new Error('Config is not valid JSON.'); }
+      return cfg;
+    },
+    kindOverride: (vals) => vals._kind,
+    nameOverride: (vals) => vals._name,
+  },
+};
+
+let acState = { kind: null, name: null, provider: null };
+
+function openAddConnectorWizard() {
+  acStepProvider.hidden = false;
+  acStepConfigure.hidden = true;
+  acState = { kind: null, name: null, provider: null };
   acErrorEl.hidden = true;
   acErrorEl.textContent = '';
-  acSubmitBtn.disabled = false;
-  addConnectorDialog.showModal();
-  acNameInput.focus();
+  acTestResultEl.textContent = '';
+  acTestResultEl.className = 'ac-test-result';
+  acSubmitBtn.disabled = true;
+  addConnectorDialog?.showModal?.();
+}
+
+function renderACFields(fields) {
+  acFormFields.innerHTML = '';
+  fields.forEach((f) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'ac-field';
+    const label = document.createElement('label');
+    label.setAttribute('for', `ac-f-${f.key}`);
+    label.textContent = f.label + (f.required ? ' *' : '');
+    wrap.appendChild(label);
+
+    let input;
+    if (f.type === 'textarea') {
+      input = document.createElement('textarea');
+      input.rows = 4;
+    } else {
+      input = document.createElement('input');
+      input.type = f.type || 'text';
+      if (f.step) input.step = f.step;
+    }
+    input.id = `ac-f-${f.key}`;
+    input.name = f.key;
+    if (f.placeholder) input.placeholder = f.placeholder;
+    if (f.required) input.required = true;
+    input.addEventListener('input', () => {
+      if (acState.name !== 'custom') {
+        acSubmitBtn.disabled = true;
+        acTestResultEl.textContent = '';
+        acTestResultEl.className = 'ac-test-result';
+      }
+      acErrorEl.hidden = true;
+    });
+    wrap.appendChild(input);
+
+    if (f.hint) {
+      const hint = document.createElement('small');
+      hint.className = 'ac-hint';
+      hint.textContent = f.hint;
+      wrap.appendChild(hint);
+    }
+
+    acFormFields.appendChild(wrap);
+  });
+}
+
+function readACFields() {
+  const vals = {};
+  document.querySelectorAll('#ac-form-fields [name]').forEach((el) => {
+    vals[el.name] = el.value;
+  });
+  return vals;
+}
+
+function buildACPayload() {
+  const { kind, name, provider } = acState;
+  if (!provider) throw new Error('Choose a provider first.');
+  const vals = readACFields();
+  const effectiveKind = provider.kindOverride ? provider.kindOverride(vals) : kind;
+  const effectiveName = provider.nameOverride ? provider.nameOverride(vals) : name;
+  const config = provider.build(vals);
+  return { kind: effectiveKind, name: effectiveName, config };
+}
+
+document.querySelectorAll('#ac-step-provider .provider-tile').forEach((tile) => {
+  tile.addEventListener('click', () => {
+    const kind = tile.dataset.kind;
+    const name = tile.dataset.name;
+    const provider = ACProvider[name];
+    if (!provider) return;
+    acState = { kind, name, provider };
+    acConfigureTitle.textContent = provider.title;
+    renderACFields(provider.fields);
+    acStepProvider.hidden = true;
+    acStepConfigure.hidden = false;
+    acSubmitBtn.disabled = name !== 'custom';
+    acErrorEl.hidden = true;
+    acErrorEl.textContent = '';
+    acTestResultEl.textContent = '';
+    acTestResultEl.className = 'ac-test-result';
+    const firstField = acFormFields.querySelector('[name]');
+    if (firstField) firstField.focus();
+  });
 });
 
-acCancelBtn.addEventListener('click', () => {
-  addConnectorDialog.close();
+addConnectorBtn.addEventListener('click', openAddConnectorWizard);
+
+acBackBtn?.addEventListener('click', () => {
+  acStepProvider.hidden = false;
+  acStepConfigure.hidden = true;
+});
+
+acProviderCancelBtn?.addEventListener('click', () => {
+  addConnectorDialog?.close?.();
+});
+
+addConnectorDialog.addEventListener('close', () => {
+  addConnectorBtn.focus();
 });
 
 addConnectorDialog.addEventListener('keydown', (e) => {
@@ -1125,46 +1286,66 @@ addConnectorDialog.addEventListener('keydown', (e) => {
   }
 });
 
-addConnectorForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-
-  const name = acNameInput.value.trim();
-  const kind = acKindSelect.value;
-  const configRaw = acConfigTextarea.value.trim();
-
-  if (!name) {
-    acErrorEl.textContent = 'Name is required.';
-    acErrorEl.hidden = false;
-    return;
-  }
-
-  let config = {};
-  if (configRaw) {
-    try {
-      config = JSON.parse(configRaw);
-    } catch (_) {
-      acErrorEl.textContent = 'Config is not valid JSON.';
-      acErrorEl.hidden = false;
-      return;
+acTestBtn?.addEventListener('click', async () => {
+  if (!acStepConfigure.reportValidity()) return;
+  acTestResultEl.textContent = 'Testing…';
+  acTestResultEl.className = 'ac-test-result';
+  acErrorEl.hidden = true;
+  try {
+    const payload = buildACPayload();
+    const res = await fetch('/api/v1/connectors/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json();
+    if (res.ok && body.ok) {
+      acTestResultEl.textContent = `✓ ${JSON.stringify(body.sample || {})}`;
+      acTestResultEl.className = 'ac-test-result ac-test-result--ok';
+      acSubmitBtn.disabled = false;
+    } else {
+      const hint = body.hint ? ` — ${body.hint}` : '';
+      acTestResultEl.textContent = `✗ ${body.message || body.error || 'Validation failed'}${hint}`;
+      acTestResultEl.className = 'ac-test-result ac-test-result--error';
+      acSubmitBtn.disabled = true;
     }
+  } catch (err) {
+    acTestResultEl.textContent = `✗ ${err.message || String(err)}`;
+    acTestResultEl.className = 'ac-test-result ac-test-result--error';
+    acSubmitBtn.disabled = true;
   }
+});
 
+async function submitAddConnectorWizard(e) {
+  e.preventDefault();
+  if (!acStepConfigure.reportValidity()) return;
   acSubmitBtn.disabled = true;
   acErrorEl.hidden = true;
 
   try {
-    const connector = await createConnector(activeWorkspace.id, kind, name, config);
-    addConnectorDialog.close();
-    // Append new card without full reload.
-    const emptyNotice = connectorListEl.querySelector('.streams-empty');
-    if (emptyNotice) connectorListEl.removeChild(emptyNotice);
-    connectorListEl.appendChild(buildConnectorCard(connector));
+    const ws = window.activeWorkspace;
+    if (!ws) throw new Error('No active workspace.');
+    const payload = buildACPayload();
+    const res = await fetch(`/api/v1/workspaces/${ws.id}/connectors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const hint = body.hint ? ` — ${body.hint}` : '';
+      throw new Error(`${body.message || body.error || res.statusText}${hint}`);
+    }
+    addConnectorDialog?.close?.();
+    if (typeof loadConnectors === 'function') loadConnectors(ws.id);
   } catch (err) {
-    acErrorEl.textContent = 'Error: ' + err.message;
+    acErrorEl.textContent = err.message || String(err);
     acErrorEl.hidden = false;
     acSubmitBtn.disabled = false;
   }
-});
+}
+
+acStepConfigure?.addEventListener('submit', submitAddConnectorWizard);
 
 /* ── Signals panel ── */
 

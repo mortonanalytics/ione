@@ -180,27 +180,49 @@
 
   <!-- Add connector dialog -->
   <dialog id="add-connector-dialog" aria-labelledby="ac-dialog-title">
-    <form id="add-connector-form" method="dialog">
+    <div id="ac-step-provider">
       <h2 id="ac-dialog-title">Add Connector</h2>
-
-      <label for="ac-kind">Kind <span aria-hidden="true">*</span></label>
-      <select id="ac-kind" required>
-        <option value="rust_native">rust_native</option>
-        <option value="openapi">openapi</option>
-        <option value="mcp">mcp</option>
-      </select>
-
-      <label for="ac-name">Name <span aria-hidden="true">*</span></label>
-      <input id="ac-name" type="text" required placeholder="My connector" autocomplete="off" />
-
-      <label for="ac-config">Config (JSON)</label>
-      <textarea id="ac-config" rows="4" placeholder='{"lat": 46.87, "lon": -113.99}'></textarea>
-
-      <p id="ac-error" class="ac-error" hidden></p>
-
+      <p>Pick a source:</p>
+      <div class="provider-grid">
+        <button type="button" class="provider-tile" data-kind="rust_native" data-name="nws">
+          <strong>NWS</strong>
+          <span>US weather alerts for a coordinate</span>
+        </button>
+        <button type="button" class="provider-tile" data-kind="rust_native" data-name="firms">
+          <strong>FIRMS</strong>
+          <span>NASA fire detections (needs MAP_KEY)</span>
+        </button>
+        <button type="button" class="provider-tile" data-kind="rust_native" data-name="s3">
+          <strong>S3</strong>
+          <span>Bucket listing / objects</span>
+        </button>
+        <button type="button" class="provider-tile" data-kind="rust_native" data-name="slack">
+          <strong>Slack</strong>
+          <span>Webhook delivery only</span>
+        </button>
+        <button type="button" class="provider-tile" data-kind="rust_native" data-name="irwin">
+          <strong>IRWIN</strong>
+          <span>Incident reporting endpoint</span>
+        </button>
+        <button type="button" class="provider-tile" data-kind="custom" data-name="custom">
+          <strong>Custom JSON</strong>
+          <span>Paste a config directly</span>
+        </button>
+      </div>
       <div class="ac-actions">
-        <button type="button" id="ac-cancel-btn">Cancel</button>
-        <button type="submit" id="ac-submit-btn">Create</button>
+        <button type="button" id="ac-step-provider-cancel">Cancel</button>
+      </div>
+    </div>
+
+    <form id="ac-step-configure" method="dialog" hidden>
+      <h2><span id="ac-configure-title">Configure</span></h2>
+      <div id="ac-form-fields"></div>
+      <div id="ac-test-result" class="ac-test-result" aria-live="polite"></div>
+      <p id="ac-error" class="ac-error" hidden></p>
+      <div class="ac-actions">
+        <button type="button" id="ac-back-btn">Back</button>
+        <button type="button" id="ac-test-btn">Test connection</button>
+        <button type="submit" id="ac-submit-btn" disabled>Create</button>
       </div>
     </form>
   </dialog>

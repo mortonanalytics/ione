@@ -882,41 +882,109 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   font-size: var(--font-size-base);
 }
 
-#add-connector-form {
+#ac-step-provider[hidden],
+#ac-step-configure[hidden] {
+  display: none;
+}
+
+#ac-step-configure {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
 }
 
-#add-connector-form label {
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.provider-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 12px 14px;
+  background: transparent;
+  border: 1px solid var(--border, #d0d0d0);
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  gap: 4px;
+}
+
+.provider-tile:hover {
+  background: var(--hover, #f4f4f4);
+}
+
+.provider-tile:focus-visible {
+  outline: 2px solid var(--focus, #1f6feb);
+  outline-offset: 2px;
+}
+
+.provider-tile strong {
+  font-size: 0.95rem;
+}
+
+.provider-tile span {
+  font-size: 0.8rem;
+  color: #555;
+}
+
+.ac-field {
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ac-field label {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  font-size: var(--font-size-sm);
+  font-size: 0.85rem;
   font-weight: 500;
 }
 
-#add-connector-form input,
-#add-connector-form select,
-#add-connector-form textarea {
-  padding: var(--space-2);
-  border: 1px solid var(--color-dialog-border);
-  border-radius: var(--radius);
-  font-size: var(--font-size-sm);
-  font-family: inherit;
+.ac-field input,
+.ac-field textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--border, #d0d0d0);
+  border-radius: 4px;
+  font: inherit;
+  min-height: 44px;
   background: var(--color-surface);
 }
 
-#add-connector-form textarea {
+.ac-field textarea {
   resize: vertical;
   font-family: ui-monospace, monospace;
 }
 
-#add-connector-form input:focus-visible,
-#add-connector-form select:focus-visible,
-#add-connector-form textarea:focus-visible {
+.ac-field input:focus-visible,
+.ac-field textarea:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 1px;
+}
+
+.ac-hint {
+  color: #555;
+  font-size: 0.75rem;
+}
+
+.ac-test-result {
+  margin: 8px 0;
+  font-size: 0.85rem;
+  min-height: 1em;
+}
+
+.ac-test-result--ok {
+  color: #0a6d34;
+}
+
+.ac-test-result--error {
+  color: #7a1f1f;
 }
 
 .ac-error {
@@ -939,19 +1007,31 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   cursor: pointer;
 }
 
-#ac-cancel-btn {
+#ac-step-provider-cancel,
+#ac-back-btn,
+#ac-test-btn {
   background: transparent;
   border: 1px solid var(--color-dialog-border);
   color: #444;
 }
 
-#ac-cancel-btn:hover {
+#ac-step-provider-cancel:hover,
+#ac-back-btn:hover,
+#ac-test-btn:hover {
   background: var(--color-bg);
 }
 
-#ac-cancel-btn:focus-visible {
+#ac-step-provider-cancel:focus-visible,
+#ac-back-btn:focus-visible,
+#ac-test-btn:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
+}
+
+@media (hover: hover) {
+  .provider-tile:hover {
+    background: var(--hover, #f4f4f4);
+  }
 }
 
 /* ── Signals panel ── */
