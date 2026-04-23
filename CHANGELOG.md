@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — complete-product work
+
+### Added
+
+- Demo Workspace with `IONE_SEED_DEMO` seeder + canned-chat layer.
+- Ollama preflight (`GET /api/v1/health/ollama`) + chat remediation card.
+- Guided connector setup: 5 per-provider validators + `POST /connectors/validate`.
+- Pipeline events: table, broadcast bus, scheduler stage emission, list endpoint, SSE stream (`/events/stream`).
+- Split activation tracking (demo walkthrough + real activation) with CTA handoff.
+- Funnel telemetry: `funnel_events` table, session cookie middleware, `POST /telemetry/events`, `GET /admin/funnel`.
+- MCP OAuth 2.1: discovery, register, authorize, token, revoke; bearer middleware on `/mcp/*`; CIMD advertised.
+- Peer federation: OAuth client, well-known client metadata, federation routes, allowlist enforcement.
+- Connect-to-MCP UI panel with per-client tiles (Cursor, Claude Desktop, Claude Code, VS Code, raw JSON).
+- Connected MCP clients panel with revoke.
+- Demo UI: chat chips, lock glyph, `Sample —` connector prefix, 403 toast.
+- Activation tracker UI with demo→real CTA.
+- Connector timeline UI + post-create progress view via SSE.
+- Guided connector wizard UI (provider grid + Test connection).
+
+### Changed
+
+- `AppError` envelope enforced to `{ error, message, hint?, field?, ... }`.
+- Connector create now runs validate inline (422 on failure) and emits publish_started + first_event synchronously.
+- Demo-workspace writes return 403 `demo_read_only`; demo-conversation messages return canned replies.
+
+### Migrations
+
+- 0012_pipeline_events
+- 0013_activation
+- 0014_funnel_events
+- 0015_oauth
+- 0016_peers_oauth
+
 ## [0.1.0] — 2026-04-20
 
 First public release.
