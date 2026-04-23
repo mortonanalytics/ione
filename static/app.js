@@ -151,6 +151,44 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
+const PIPELINE_STAGE_LABELS = {
+  publish_started: 'Publishing',
+  first_event: 'First event',
+  first_signal: 'First signal',
+  first_survivor: 'First survivor',
+  first_decision: 'First decision',
+  stall: 'Waiting',
+  error: 'Error',
+};
+
+function formatRelativeTime(isoString) {
+  const then = new Date(isoString);
+  const deltaMs = Date.now() - then.getTime();
+  const s = Math.round(deltaMs / 1000);
+  if (s < 5) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.round(h / 24);
+  return `${d}d ago`;
+}
+
+function renderTimelineItem(event) {
+  const li = document.createElement('li');
+  li.className = `pe-item pe-item--${event.stage}`;
+  const label = PIPELINE_STAGE_LABELS[event.stage] || event.stage;
+  const time = event.occurredAt ? formatRelativeTime(event.occurredAt) : '';
+  const detailTxt = event.detail ? JSON.stringify(event.detail).slice(0, 80) : '';
+  li.innerHTML = `
+    <span class="pe-stage">${escapeHtml(label)}</span>
+    <span class="pe-time">${escapeHtml(time)}</span>
+    ${detailTxt ? `<span class="pe-detail">${escapeHtml(detailTxt)}</span>` : ''}
+  `;
+  return li;
+}
+
 function renderChatRemediation(health, activeWorkspace) {
   const el = document.getElementById('chat-remediation');
   const promptEl = document.getElementById('prompt');
@@ -366,6 +404,11 @@ function workspaceLabel(ws) {
 }
 
 function setActiveWorkspace(ws) {
+  if (workspaceEventSource) {
+    workspaceEventSource.close();
+    workspaceEventSource = null;
+  }
+
   activeWorkspace = ws;
   window.activeWorkspace = ws;
   localStorage.setItem(ACTIVE_WORKSPACE_KEY, ws.id);
@@ -917,9 +960,14 @@ const acBackBtn           = document.getElementById('ac-back-btn');
 const acTestBtn           = document.getElementById('ac-test-btn');
 const acSubmitBtn         = document.getElementById('ac-submit-btn');
 const acProviderCancelBtn = document.getElementById('ac-step-provider-cancel');
+const acStepProgress      = document.getElementById('ac-step-progress');
+const acProgressHint      = document.getElementById('ac-progress-hint');
+const acProgressDoneBtn   = document.getElementById('ac-progress-done');
 
 // connectorStreams: Map<connectorId, Stream[]>
 const connectorStreams = new Map();
+let workspaceEventSource = null;
+let acProgressConnectorId = null;
 
 function setConnectorsStatus(msg, isError) {
   connectorsStatusEl.textContent = msg;
@@ -928,6 +976,67 @@ function setConnectorsStatus(msg, isError) {
 
 function clearConnectorsStatus() {
   connectorsStatusEl.textContent = '';
+}
+
+async function loadConnectorTimeline(workspaceId, connectorId, listEl) {
+  try {
+    const res = await fetch(`/api/v1/workspaces/${workspaceId}/events?connector_id=${connectorId}&connectorId=${connectorId}&limit=10`);
+    if (!res.ok) return;
+    const data = await res.json();
+    listEl.innerHTML = '';
+    (data.items || []).forEach((ev) => listEl.appendChild(renderTimelineItem(ev)));
+  } catch (_err) {
+    // Timeline is supplemental; connector cards still render without it.
+  }
+}
+
+function subscribeWorkspaceEvents(workspaceId) {
+  if (workspaceEventSource) {
+    workspaceEventSource.close();
+    workspaceEventSource = null;
+  }
+  try {
+    const url = `/api/v1/workspaces/${workspaceId}/events/stream`;
+    const es = new EventSource(url, { withCredentials: true });
+    es.addEventListener('pipeline_event', (msg) => {
+      try {
+        const ev = JSON.parse(msg.data);
+        handlePipelineEvent(ev);
+      } catch (_) {}
+    });
+    es.onerror = () => {
+      const indicator = document.getElementById('sse-reconnect');
+      if (indicator) indicator.hidden = false;
+    };
+    es.onopen = () => {
+      const indicator = document.getElementById('sse-reconnect');
+      if (indicator) indicator.hidden = true;
+    };
+    workspaceEventSource = es;
+  } catch (_err) {
+    // EventSource unsupported or blocked; the static timeline fetch is enough to degrade gracefully.
+  }
+}
+
+function handlePipelineEvent(ev) {
+  if (ev.connectorId) {
+    const list = document.querySelector(`.conn-timeline[data-connector-id="${ev.connectorId}"]`);
+    if (list) {
+      list.insertBefore(renderTimelineItem(ev), list.firstChild);
+      while (list.children.length > 10) list.removeChild(list.lastChild);
+    }
+  }
+
+  if (acStepProgress && !acStepProgress.hidden && acProgressConnectorId === ev.connectorId) {
+    const li = acStepProgress.querySelector(`li[data-stage="${ev.stage}"]`);
+    if (li) li.classList.add('done');
+    if (ev.stage === 'error' && acProgressHint) {
+      acProgressHint.textContent = `Error: ${ev.detail && ev.detail.error ? ev.detail.error : 'see server logs'}`;
+    }
+    if (ev.stage === 'stall' && acProgressHint) {
+      acProgressHint.textContent = 'Still waiting — this can take up to a minute on a cold Ollama.';
+    }
+  }
 }
 
 /* ── Build stream sub-list ── */
@@ -1043,6 +1152,12 @@ function buildConnectorCard(connector) {
   header.appendChild(statusChip);
   li.appendChild(header);
 
+  const timeline = document.createElement('ul');
+  timeline.className = 'conn-timeline';
+  timeline.dataset.connectorId = connector.id;
+  timeline.setAttribute('aria-label', 'Recent pipeline events');
+  li.appendChild(timeline);
+
   // Streams container (async-filled).
   const streamsContainer = document.createElement('div');
   streamsContainer.className = 'connector-streams';
@@ -1053,6 +1168,10 @@ function buildConnectorCard(connector) {
   streamsContainer.appendChild(loadingP);
 
   li.appendChild(streamsContainer);
+
+  if (activeWorkspace) {
+    loadConnectorTimeline(activeWorkspace.id, connector.id, timeline);
+  }
 
   // Load streams.
   listStreams(connector.id).then((data) => {
@@ -1075,6 +1194,7 @@ function buildConnectorCard(connector) {
 
 async function loadConnectors(workspaceId) {
   clearConnectorsStatus();
+  subscribeWorkspaceEvents(workspaceId);
   connectorListEl.innerHTML = '';
   connectorStreams.clear();
 
@@ -1173,6 +1293,8 @@ let acState = { kind: null, name: null, provider: null };
 function openAddConnectorWizard() {
   acStepProvider.hidden = false;
   acStepConfigure.hidden = true;
+  if (acStepProgress) acStepProgress.hidden = true;
+  acProgressConnectorId = null;
   acState = { kind: null, name: null, provider: null };
   acErrorEl.hidden = true;
   acErrorEl.textContent = '';
@@ -1180,6 +1302,15 @@ function openAddConnectorWizard() {
   acTestResultEl.className = 'ac-test-result';
   acSubmitBtn.disabled = true;
   addConnectorDialog?.showModal?.();
+}
+
+function showAcProgress(connector) {
+  acProgressConnectorId = connector.id;
+  acStepConfigure.hidden = true;
+  if (!acStepProgress) return;
+  acStepProgress.hidden = false;
+  acStepProgress.querySelectorAll('li').forEach((li) => li.classList.remove('done'));
+  if (acProgressHint) acProgressHint.textContent = '';
 }
 
 function renderACFields(fields) {
@@ -1255,6 +1386,7 @@ document.querySelectorAll('#ac-step-provider .provider-tile').forEach((tile) => 
     renderACFields(provider.fields);
     acStepProvider.hidden = true;
     acStepConfigure.hidden = false;
+    if (acStepProgress) acStepProgress.hidden = true;
     acSubmitBtn.disabled = name !== 'custom';
     acErrorEl.hidden = true;
     acErrorEl.textContent = '';
@@ -1270,10 +1402,16 @@ addConnectorBtn.addEventListener('click', openAddConnectorWizard);
 acBackBtn?.addEventListener('click', () => {
   acStepProvider.hidden = false;
   acStepConfigure.hidden = true;
+  if (acStepProgress) acStepProgress.hidden = true;
 });
 
 acProviderCancelBtn?.addEventListener('click', () => {
   addConnectorDialog?.close?.();
+});
+
+acProgressDoneBtn?.addEventListener('click', () => {
+  addConnectorDialog?.close?.();
+  acProgressConnectorId = null;
 });
 
 addConnectorDialog.addEventListener('close', () => {
@@ -1336,8 +1474,11 @@ async function submitAddConnectorWizard(e) {
       const hint = body.hint ? ` — ${body.hint}` : '';
       throw new Error(`${body.message || body.error || res.statusText}${hint}`);
     }
-    addConnectorDialog?.close?.();
+    const body = await res.json();
+    const connector = body.connector || body;
+    showAcProgress(connector);
     if (typeof loadConnectors === 'function') loadConnectors(ws.id);
+    (body.events || body.pipelineEvents || []).forEach((ev) => handlePipelineEvent(ev));
   } catch (err) {
     acErrorEl.textContent = err.message || String(err);
     acErrorEl.hidden = false;
