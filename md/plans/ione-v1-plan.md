@@ -5,6 +5,18 @@
 **Team:** 2 analyst-programmers
 **Stack:** Rust (axum, tokio, reqwest, tower-http, sqlx) · Postgres 16 + pgvector · MinIO/S3 · Ollama · vanilla HTML/JS served by the Rust binary · Apache 2.0 · docker-compose for local dev
 
+## Status snapshot (2026-04-22)
+
+This plan is now a record of the shipped `v0.1.0` implementation, not an active task queue. Phases 1-14 landed on `main`, the OSS release was cut on 2026-04-20, and the task manifest below should be read as completed delivery history.
+
+Local runtime validation on 2026-04-22:
+- `cargo run --release` booted successfully against local Postgres + MinIO with runtime migrations applied on startup.
+- `GET /api/v1/health` returned `{"status":"ok","version":"0.1.0"}`.
+- Local-auth `GET /api/v1/me` returned the default bootstrap user and membership.
+- A smoke workspace + conversation successfully round-tripped a live Ollama reply (`Pong.`) through `/api/v1/conversations/:id/messages`.
+
+Immediate follow-on work should live in a new post-`v0.1.0` plan rather than reopening this document.
+
 ## Phasing principle
 
 Vertical slices only — each phase lands DB + API + UI (where applicable) + integration test for one feature, and ends with a working system a human can try. No layer-only phases.
@@ -746,23 +758,23 @@ P8 can begin after P3 (it needs memberships). P11 can begin after P8 (it needs a
 
 | Task | Agent | Files | Depends On | Gate | Status |
 |------|-------|-------|------------|------|--------|
-| T1: Phase 1 scaffold + chat proxy + static UI | claude-code | `Cargo.toml`, `src/main.rs`, `src/config.rs`, `src/error.rs`, `src/state.rs`, `src/routes/{mod.rs,health.rs,chat.rs}`, `src/services/ollama.rs`, `static/{index.html,app.js,style.css}`, `tests/phase01_chat.rs`, `README.md`, `LICENSE` | — | `cargo check && cargo clippy -- -D warnings && cargo test --test phase01_chat -- --ignored` | pending |
-| T2: Phase 2 Postgres + migrations 0001 + conversations | claude-code | `docker-compose.yml`, `.env.example`, `migrations/0001_initial.sql`, `src/routes/conversations.rs`, `src/state.rs`, `static/app.js` | T1 | `sqlx migrate run && cargo test --test phase02_conversations` | pending |
-| T3: Phase 3 workspaces + roles + memberships migration 0002 | sql-coder | `migrations/0002_workspaces.sql`, `src/routes/workspaces.rs`, `static/app.js` | T2 | `sqlx migrate run && cargo test --test phase03_workspaces` | pending |
-| T4: Phase 4 NWS connector + migration 0003 | codex | `migrations/0003_connectors.sql`, `src/connectors/{mod.rs,nws.rs}`, `src/routes/connectors.rs`, `tests/phase04_nws_connector.rs`, `static/app.js` | T3 | `cargo test --test phase04_nws_connector` | pending |
-| T5: Phase 5 rules + generator + scheduler + migration 0004 | claude-code | `migrations/0004_signals.sql`, `src/services/{rules.rs,generator.rs}`, `src/routes/signals.rs`, `src/main.rs`, `tests/phase05_signals.rs`, `static/app.js` | T4 | `cargo test --test phase05_signals` | pending |
-| T6: Phase 6 critic + migration 0005 | codex | `migrations/0005_survivors.sql`, `src/services/critic.rs`, `src/routes/survivors.rs`, `tests/phase06_critic.rs`, `static/app.js` | T5 | `cargo test --test phase06_critic` | pending |
-| T7: Phase 7 routing classifier + migration 0006 | claude-code | `migrations/0006_routing.sql`, `src/services/router.rs`, `src/routes/signals.rs` (feed endpoint), `tests/phase07_routing.rs`, `static/app.js` | T6 | `cargo test --test phase07_routing` | pending |
-| T8: Phase 8 OIDC auth + migration 0007 + Keycloak compose | claude-code | `migrations/0007_trust_issuers.sql`, `src/auth.rs`, `src/routes/auth.rs`, `docker-compose.yml`, `infra/keycloak/realm.json`, `tests/phase08_auth.rs`, `static/app.js` | T3 | `cargo test --test phase08_auth` | pending |
-| T9: Phase 9 delivery (Slack+SMTP) + artifacts/approvals/audit migration 0008 | claude-code | `migrations/0008_artifacts_approvals_audit.sql`, `src/connectors/{slack.rs,smtp.rs}`, `src/routes/{artifacts.rs,approvals.rs}`, `src/services/router.rs` (delivery), `src/audit.rs`, `tests/phase09_delivery.rs`, `static/app.js` | T7 | `cargo test --test phase09_delivery` | pending |
-| T10: Phase 10 auto-exec policies | codex | `src/services/approvals.rs`, `tests/phase10_auto_exec.rs`, `static/app.js` | T9 | `cargo test --test phase10_auto_exec` | pending |
-| T11: Phase 11 IONe-as-MCP-server | claude-code | `Cargo.toml`, `src/mcp_server.rs`, `src/main.rs`, `tests/phase11_mcp_server.rs` | T8 | `cargo test --test phase11_mcp_server` | pending |
-| T12: Phase 12 peer federation + MCP client + migration 0009 | claude-code | `migrations/0009_peers.sql`, `src/connectors/mcp_client.rs`, `src/routes/peers.rs`, `tests/phase12_peer.rs`, `static/app.js` | T11 | `cargo test --test phase12_peer` | pending |
-| T13a: Phase 13 FIRMS connector | codex | `src/connectors/firms.rs`, test fixtures | T12 | `cargo test --test phase13_firms` | pending |
-| T13b: Phase 13 S3 connector | codex | `Cargo.toml`, `src/connectors/fs_s3.rs`, test fixtures | T12 | `cargo test --test phase13_s3` | pending |
-| T13c: Phase 13 IRWIN-read connector | codex | `src/connectors/irwin.rs`, fixtures | T12 | `cargo test --test phase13_irwin` | pending |
-| T13d: Phase 13 two-node demo script | claude-code | `scripts/demo.sh`, `tests/phase13_demo.rs` | T13a, T13b, T13c | `./scripts/demo.sh` | pending |
-| T14: Phase 14 OSS release (CI + README + docs + tag) | claude-code | `.github/workflows/ci.yml`, `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` | T13d | `gh workflow run ci` green on `v0.1.0` tag | pending |
+| T1: Phase 1 scaffold + chat proxy + static UI | claude-code | `Cargo.toml`, `src/main.rs`, `src/config.rs`, `src/error.rs`, `src/state.rs`, `src/routes/{mod.rs,health.rs,chat.rs}`, `src/services/ollama.rs`, `static/{index.html,app.js,style.css}`, `tests/phase01_chat.rs`, `README.md`, `LICENSE` | — | `cargo check && cargo clippy -- -D warnings && cargo test --test phase01_chat -- --ignored` | completed |
+| T2: Phase 2 Postgres + migrations 0001 + conversations | claude-code | `docker-compose.yml`, `.env.example`, `migrations/0001_initial.sql`, `src/routes/conversations.rs`, `src/state.rs`, `static/app.js` | T1 | `sqlx migrate run && cargo test --test phase02_conversations` | completed |
+| T3: Phase 3 workspaces + roles + memberships migration 0002 | sql-coder | `migrations/0002_workspaces.sql`, `src/routes/workspaces.rs`, `static/app.js` | T2 | `sqlx migrate run && cargo test --test phase03_workspaces` | completed |
+| T4: Phase 4 NWS connector + migration 0003 | codex | `migrations/0003_connectors.sql`, `src/connectors/{mod.rs,nws.rs}`, `src/routes/connectors.rs`, `tests/phase04_nws_connector.rs`, `static/app.js` | T3 | `cargo test --test phase04_nws_connector` | completed |
+| T5: Phase 5 rules + generator + scheduler + migration 0004 | claude-code | `migrations/0004_signals.sql`, `src/services/{rules.rs,generator.rs}`, `src/routes/signals.rs`, `src/main.rs`, `tests/phase05_signals.rs`, `static/app.js` | T4 | `cargo test --test phase05_signals` | completed |
+| T6: Phase 6 critic + migration 0005 | codex | `migrations/0005_survivors.sql`, `src/services/critic.rs`, `src/routes/survivors.rs`, `tests/phase06_critic.rs`, `static/app.js` | T5 | `cargo test --test phase06_critic` | completed |
+| T7: Phase 7 routing classifier + migration 0006 | claude-code | `migrations/0006_routing.sql`, `src/services/router.rs`, `src/routes/signals.rs` (feed endpoint), `tests/phase07_routing.rs`, `static/app.js` | T6 | `cargo test --test phase07_routing` | completed |
+| T8: Phase 8 OIDC auth + migration 0007 + Keycloak compose | claude-code | `migrations/0007_trust_issuers.sql`, `src/auth.rs`, `src/routes/auth.rs`, `docker-compose.yml`, `infra/keycloak/realm.json`, `tests/phase08_auth.rs`, `static/app.js` | T3 | `cargo test --test phase08_auth` | completed |
+| T9: Phase 9 delivery (Slack+SMTP) + artifacts/approvals/audit migration 0008 | claude-code | `migrations/0008_artifacts_approvals_audit.sql`, `src/connectors/{slack.rs,smtp.rs}`, `src/routes/{artifacts.rs,approvals.rs}`, `src/services/router.rs` (delivery), `src/audit.rs`, `tests/phase09_delivery.rs`, `static/app.js` | T7 | `cargo test --test phase09_delivery` | completed |
+| T10: Phase 10 auto-exec policies | codex | `src/services/approvals.rs`, `tests/phase10_auto_exec.rs`, `static/app.js` | T9 | `cargo test --test phase10_auto_exec` | completed |
+| T11: Phase 11 IONe-as-MCP-server | claude-code | `Cargo.toml`, `src/mcp_server.rs`, `src/main.rs`, `tests/phase11_mcp_server.rs` | T8 | `cargo test --test phase11_mcp_server` | completed |
+| T12: Phase 12 peer federation + MCP client + migration 0009 | claude-code | `migrations/0009_peers.sql`, `src/connectors/mcp_client.rs`, `src/routes/peers.rs`, `tests/phase12_peer.rs`, `static/app.js` | T11 | `cargo test --test phase12_peer` | completed |
+| T13a: Phase 13 FIRMS connector | codex | `src/connectors/firms.rs`, test fixtures | T12 | `cargo test --test phase13_firms` | completed |
+| T13b: Phase 13 S3 connector | codex | `Cargo.toml`, `src/connectors/fs_s3.rs`, test fixtures | T12 | `cargo test --test phase13_s3` | completed |
+| T13c: Phase 13 IRWIN-read connector | codex | `src/connectors/irwin.rs`, fixtures | T12 | `cargo test --test phase13_irwin` | completed |
+| T13d: Phase 13 two-node demo script | claude-code | `scripts/demo.sh`, `tests/phase13_demo.rs` | T13a, T13b, T13c | `./scripts/demo.sh` | completed |
+| T14: Phase 14 OSS release (CI + README + docs + tag) | claude-code | `.github/workflows/ci.yml`, `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` | T13d | `gh workflow run ci` green on `v0.1.0` tag | completed |
 
 Independent-parallelizable groups (for /co-code):
 - Under T12: **T13a, T13b, T13c** are independent (no shared files), all `codex`, can dispatch in parallel.
