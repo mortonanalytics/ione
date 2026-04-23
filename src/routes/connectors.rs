@@ -1,6 +1,6 @@
 use axum::{
+    extract::{Extension, Path, State},
     http::StatusCode,
-    extract::{Path, State},
     response::{IntoResponse, Json, Response},
 };
 use serde::Deserialize;
@@ -9,9 +9,12 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
+    auth::AuthContext,
     connectors,
     error::AppError,
-    models::{ConnectorKind, PipelineEventInput, PipelineEventStage},
+    models::{
+        ActivationStepKey, ActivationTrack, ConnectorKind, PipelineEventInput, PipelineEventStage,
+    },
     repos::{ConnectorRepo, PipelineEventRepo, StreamEventRepo, StreamRepo},
     state::AppState,
 };
@@ -45,6 +48,7 @@ pub async fn list_connectors(
 pub async fn create_connector(
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<CreateConnectorRequest>,
 ) -> Response {
     let kind = match &req.kind {
@@ -60,7 +64,7 @@ pub async fn create_connector(
         }
     }
 
-    match do_create_connector(state, workspace_id, req).await {
+    match do_create_connector(state, auth, workspace_id, req).await {
         Ok(resp) => resp.into_response(),
         Err(err) => err.into_response(),
     }
@@ -75,6 +79,7 @@ pub(crate) async fn validate_connector(Json(body): Json<ValidateBody>) -> Respon
 
 async fn do_create_connector(
     state: AppState,
+    auth: AuthContext,
     workspace_id: Uuid,
     req: CreateConnectorRequest,
 ) -> Result<Json<Value>, AppError> {
@@ -130,6 +135,18 @@ async fn do_create_connector(
     }
 
     run_initial_connector_poll(&state, workspace_id, connector.id, impl_.as_ref(), streams).await;
+
+    if workspace_id != crate::demo::DEMO_WORKSPACE_ID {
+        let activation_repo = crate::repos::ActivationRepo::new(state.pool.clone());
+        let _ = activation_repo
+            .mark(
+                auth.user_id,
+                workspace_id,
+                ActivationTrack::RealActivation,
+                ActivationStepKey::AddedConnector,
+            )
+            .await;
+    }
 
     Ok(Json(connector_json))
 }

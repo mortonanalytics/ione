@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthContext,
     error::AppError,
-    models::{ActorKind, ApprovalStatus},
+    models::{ActivationStepKey, ActivationTrack, ActorKind, ApprovalStatus},
     repos::{ApprovalRepo, AuditEventRepo},
     services::delivery,
     state::AppState,
@@ -125,6 +125,20 @@ pub async fn decide_approval(
         )
         .await
         .map_err(AppError::Internal)?;
+
+    if let Some(workspace_id) = workspace_id {
+        if workspace_id != crate::demo::DEMO_WORKSPACE_ID {
+            let activation_repo = crate::repos::ActivationRepo::new(state.pool.clone());
+            let _ = activation_repo
+                .mark(
+                    auth.user_id,
+                    workspace_id,
+                    ActivationTrack::RealActivation,
+                    ActivationStepKey::FirstApprovalDecided,
+                )
+                .await;
+        }
+    }
 
     // On approval, deliver the artifact.
     if decision == ApprovalStatus::Approved {

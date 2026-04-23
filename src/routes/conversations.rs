@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     error::AppError,
-    models::{Message, MessageRole},
+    models::{ActivationStepKey, ActivationTrack, Message, MessageRole},
     repos::{ConversationRepo, MessageRepo, WorkspaceRepo},
     state::AppState,
 };
@@ -120,6 +120,15 @@ pub(crate) async fn post_message(
             .append(id, MessageRole::Assistant, reply, Some("canned"))
             .await
             .map_err(AppError::Internal)?;
+        let activation_repo = crate::repos::ActivationRepo::new(state.pool.clone());
+        let _ = activation_repo
+            .mark(
+                state.default_user_id,
+                conv.workspace_id,
+                ActivationTrack::DemoWalkthrough,
+                ActivationStepKey::AskedDemoQuestion,
+            )
+            .await;
         return Ok(Json(assistant_msg));
     }
 

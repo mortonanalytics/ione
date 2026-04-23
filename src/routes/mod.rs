@@ -4,15 +4,17 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use tower_http::{cors::{Any, CorsLayer}, services::ServeDir, trace::TraceLayer};
-
-use crate::{
-    auth::auth_middleware,
-    mcp_server,
-    middleware::demo_guard::demo_write_guard,
-    state::AppState,
+use tower_http::{
+    cors::{Any, CorsLayer},
+    services::ServeDir,
+    trace::TraceLayer,
 };
 
+use crate::{
+    auth::auth_middleware, mcp_server, middleware::demo_guard::demo_write_guard, state::AppState,
+};
+
+pub mod activation;
 pub mod approvals;
 pub mod artifacts;
 pub mod audit_events;
@@ -43,6 +45,9 @@ pub fn router(state: AppState) -> Router {
 
     // Routes that run through the auth middleware.
     let protected = Router::new()
+        .route("/api/v1/activation", get(activation::list))
+        .route("/api/v1/activation/events", post(activation::mark))
+        .route("/api/v1/activation/dismiss", post(activation::dismiss))
         .route("/api/v1/chat", post(chat::chat))
         .route(
             "/api/v1/conversations",
