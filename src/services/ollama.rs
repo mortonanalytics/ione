@@ -26,6 +26,29 @@ struct ModelTag {
     name: String,
 }
 
+#[derive(Debug)]
+pub enum OllamaError {
+    Unreachable(String),
+    ModelMissing(String),
+    Other(String),
+}
+
+impl OllamaError {
+    pub fn into_app_error(self, base_url: &str) -> AppError {
+        match self {
+            Self::Unreachable(error) => AppError::OllamaUnreachable {
+                base_url: base_url.to_string(),
+                error,
+            },
+            Self::ModelMissing(found_model) => AppError::OllamaModelMissing {
+                model: found_model.clone(),
+                pull_command: format!("ollama pull {found_model}"),
+            },
+            Self::Other(message) => AppError::OllamaUpstream(message),
+        }
+    }
+}
+
 impl OllamaClient {
     pub fn new(base_url: String) -> Self {
         let http = reqwest::Client::builder()
@@ -37,6 +60,13 @@ impl OllamaClient {
 
     #[instrument(skip(self), fields(model = %model))]
     pub async fn generate(&self, model: &str, prompt: &str) -> Result<String, AppError> {
+        self.generate_rich(model, prompt)
+            .await
+            .map_err(|e| e.into_app_error(&self.base_url))
+    }
+
+    #[instrument(skip(self), fields(model = %model))]
+    pub async fn generate_rich(&self, model: &str, prompt: &str) -> Result<String, OllamaError> {
         let url = format!("{}/api/generate", self.base_url);
         let start = std::time::Instant::now();
 
@@ -46,12 +76,19 @@ impl OllamaClient {
             .json(&json!({ "model": model, "prompt": prompt, "stream": false }))
             .send()
             .await
-            .map_err(|e| AppError::OllamaUpstream(format!("request failed: {e}")))?;
+            .map_err(|e| OllamaError::Unreachable(e.to_string()))?;
 
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AppError::OllamaUpstream(format!(
+            let body_lower = body.to_ascii_lowercase();
+            if status == reqwest::StatusCode::NOT_FOUND
+                || body_lower.contains("not found")
+                || body_lower.contains("pull model")
+            {
+                return Err(OllamaError::ModelMissing(model.to_string()));
+            }
+            return Err(OllamaError::Other(format!(
                 "upstream returned {status}: {body}"
             )));
         }
@@ -59,7 +96,7 @@ impl OllamaClient {
         let parsed: GenerateResponse = resp
             .json()
             .await
-            .map_err(|e| AppError::OllamaUpstream(format!("failed to parse response: {e}")))?;
+            .map_err(|e| OllamaError::Other(format!("failed to parse response: {e}")))?;
 
         info!(model = %model, elapsed_ms = start.elapsed().as_millis(), "ollama generate complete");
 
