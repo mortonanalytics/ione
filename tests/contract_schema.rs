@@ -117,12 +117,11 @@ async fn schema_activation_progress_pk_composite() {
     // PK over (user_id, workspace_id, track, step_key): inserting a duplicate
     // must fail with a unique/pk violation.
     let pool = pool().await;
-    let uid = Uuid::new_v4();
-    let ws = Uuid::new_v4();
+    let (uid, ws) = seed_user_and_workspace(&pool).await;
 
     sqlx::query(
         "INSERT INTO activation_progress (user_id, workspace_id, track, step_key, completed_at)
-         VALUES ($1, $2, 'demo_walkthrough'::activation_track, 'connector_created'::activation_step_key, now())",
+         VALUES ($1, $2, 'demo_walkthrough', 'asked_demo_question', now())",
     )
     .bind(uid)
     .bind(ws)
@@ -132,7 +131,7 @@ async fn schema_activation_progress_pk_composite() {
 
     let second = sqlx::query(
         "INSERT INTO activation_progress (user_id, workspace_id, track, step_key, completed_at)
-         VALUES ($1, $2, 'demo_walkthrough'::activation_track, 'connector_created'::activation_step_key, now())",
+         VALUES ($1, $2, 'demo_walkthrough', 'asked_demo_question', now())",
     )
     .bind(uid)
     .bind(ws)
@@ -186,12 +185,11 @@ async fn schema_activation_dismissals_columns() {
 #[ignore]
 async fn schema_activation_dismissals_pk_composite() {
     let pool = pool().await;
-    let uid = Uuid::new_v4();
-    let ws = Uuid::new_v4();
+    let (uid, ws) = seed_user_and_workspace(&pool).await;
 
     sqlx::query(
         "INSERT INTO activation_dismissals (user_id, workspace_id, track, dismissed_at)
-         VALUES ($1, $2, 'real_activation'::activation_track, now())",
+         VALUES ($1, $2, 'real_activation', now())",
     )
     .bind(uid)
     .bind(ws)
@@ -201,7 +199,7 @@ async fn schema_activation_dismissals_pk_composite() {
 
     let second = sqlx::query(
         "INSERT INTO activation_dismissals (user_id, workspace_id, track, dismissed_at)
-         VALUES ($1, $2, 'real_activation'::activation_track, now())",
+         VALUES ($1, $2, 'real_activation', now())",
     )
     .bind(uid)
     .bind(ws)
@@ -572,72 +570,68 @@ async fn schema_peers_extended_column_status_new_variants() {
     );
 }
 
-// ─── activation_track enum ────────────────────────────────────────────────────
+// ─── activation_track enum (TEXT + CHECK constraint) ─────────────────────────
+
+async fn seed_user_and_workspace(pool: &PgPool) -> (Uuid, Uuid) {
+    let org_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let ws_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name) VALUES ($1, 'activation-test-org')")
+        .bind(org_id).execute(pool).await.expect("insert org");
+    sqlx::query("INSERT INTO users (id, org_id, email, display_name) VALUES ($1, $2, $3, 'test')")
+        .bind(user_id).bind(org_id).bind(format!("test-{user_id}@example.com"))
+        .execute(pool).await.expect("insert user");
+    sqlx::query("INSERT INTO workspaces (id, org_id, name, domain, lifecycle) VALUES ($1, $2, 'act-test-ws', 'generic', 'continuous')")
+        .bind(ws_id).bind(org_id).execute(pool).await.expect("insert workspace");
+    (user_id, ws_id)
+}
+
+async fn try_insert_activation_track(pool: &PgPool, track: &str) -> Result<(), sqlx::Error> {
+    let (uid, ws) = seed_user_and_workspace(pool).await;
+    sqlx::query("INSERT INTO activation_progress (user_id, workspace_id, track, step_key) VALUES ($1, $2, $3, 'asked_demo_question')")
+        .bind(uid).bind(ws).bind(track).execute(pool).await.map(|_| ())
+}
 
 #[tokio::test]
 #[ignore]
 async fn schema_enum_activation_track_demo_walkthrough() {
     let pool = pool().await;
-    let result: Result<_, sqlx::Error> =
-        sqlx::query("SELECT 'demo_walkthrough'::activation_track AS t")
-            .execute(&pool)
-            .await;
-    assert!(
-        result.is_ok(),
-        "activation_track must have variant 'demo_walkthrough'"
-    );
+    try_insert_activation_track(&pool, "demo_walkthrough").await
+        .expect("activation_track must accept 'demo_walkthrough'");
 }
 
 #[tokio::test]
 #[ignore]
 async fn schema_enum_activation_track_real_activation() {
     let pool = pool().await;
-    let result: Result<_, sqlx::Error> =
-        sqlx::query("SELECT 'real_activation'::activation_track AS t")
-            .execute(&pool)
-            .await;
-    assert!(
-        result.is_ok(),
-        "activation_track must have variant 'real_activation'"
-    );
+    try_insert_activation_track(&pool, "real_activation").await
+        .expect("activation_track must accept 'real_activation'");
 }
 
 #[tokio::test]
 #[ignore]
 async fn schema_enum_activation_track_rejects_junk() {
     let pool = pool().await;
-    let result: Result<_, sqlx::Error> =
-        sqlx::query("SELECT 'not_a_track'::activation_track AS t")
-            .execute(&pool)
-            .await;
-    assert!(
-        result.is_err(),
-        "activation_track must reject unknown variant 'not_a_track'"
-    );
+    let result = try_insert_activation_track(&pool, "not_a_track").await;
+    assert!(result.is_err(), "activation_track must reject unknown variant");
 }
 
-// ─── activation_step_key enum ────────────────────────────────────────────────
+// ─── activation_step_key CHECK constraint ────────────────────────────────────
+
+async fn try_insert_step_key(pool: &PgPool, step: &str) -> Result<(), sqlx::Error> {
+    let (uid, ws) = seed_user_and_workspace(pool).await;
+    let track = if step.contains("demo") { "demo_walkthrough" } else { "real_activation" };
+    sqlx::query("INSERT INTO activation_progress (user_id, workspace_id, track, step_key) VALUES ($1, $2, $3, $4)")
+        .bind(uid).bind(ws).bind(track).bind(step).execute(pool).await.map(|_| ())
+}
 
 #[tokio::test]
 #[ignore]
 async fn schema_enum_activation_step_key_demo_variants() {
     let pool = pool().await;
-    // 4 demo step keys from contract
-    for variant in &[
-        "connector_created",
-        "stream_polled",
-        "signal_generated",
-        "artifact_approved",
-    ] {
-        let result: Result<_, sqlx::Error> =
-            sqlx::query(&format!("SELECT '{}'::activation_step_key AS k", variant))
-                .execute(&pool)
-                .await;
-        assert!(
-            result.is_ok(),
-            "activation_step_key must have demo variant '{}'",
-            variant
-        );
+    for variant in &["asked_demo_question", "opened_demo_survivor", "reviewed_demo_approval", "viewed_demo_audit"] {
+        try_insert_step_key(&pool, variant).await
+            .unwrap_or_else(|_| panic!("activation_step_key must accept demo variant '{variant}'"));
     }
 }
 
@@ -645,22 +639,9 @@ async fn schema_enum_activation_step_key_demo_variants() {
 #[ignore]
 async fn schema_enum_activation_step_key_real_variants() {
     let pool = pool().await;
-    // 4 real_activation step keys from contract
-    for variant in &[
-        "workspace_configured",
-        "first_live_connector",
-        "first_live_signal",
-        "first_peer_connected",
-    ] {
-        let result: Result<_, sqlx::Error> =
-            sqlx::query(&format!("SELECT '{}'::activation_step_key AS k", variant))
-                .execute(&pool)
-                .await;
-        assert!(
-            result.is_ok(),
-            "activation_step_key must have real variant '{}'",
-            variant
-        );
+    for variant in &["added_connector", "first_signal", "first_approval_decided", "first_audit_viewed"] {
+        try_insert_step_key(&pool, variant).await
+            .unwrap_or_else(|_| panic!("activation_step_key must accept real variant '{variant}'"));
     }
 }
 
@@ -668,14 +649,8 @@ async fn schema_enum_activation_step_key_real_variants() {
 #[ignore]
 async fn schema_enum_activation_step_key_rejects_junk() {
     let pool = pool().await;
-    let result: Result<_, sqlx::Error> =
-        sqlx::query("SELECT 'not_a_step'::activation_step_key AS k")
-            .execute(&pool)
-            .await;
-    assert!(
-        result.is_err(),
-        "activation_step_key must reject unknown variant"
-    );
+    let result = try_insert_step_key(&pool, "not_a_step").await;
+    assert!(result.is_err(), "activation_step_key must reject unknown variant");
 }
 
 // ─── pipeline_event_stage enum ────────────────────────────────────────────────
