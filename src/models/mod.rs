@@ -1,3 +1,4 @@
+pub mod activation;
 pub mod approval;
 pub mod artifact;
 pub mod audit_event;
@@ -18,6 +19,7 @@ pub mod trust_issuer;
 pub mod user;
 pub mod workspace;
 
+pub use activation::*;
 pub use approval::{Approval, ApprovalStatus};
 pub use artifact::{Artifact, ArtifactKind};
 pub use audit_event::{ActorKind, AuditEvent};

@@ -1,3 +1,4 @@
+pub mod activation_repo;
 pub mod approval_repo;
 pub mod artifact_repo;
 pub mod audit_event_repo;
@@ -18,6 +19,7 @@ pub mod trust_issuer_repo;
 pub mod user_repo;
 pub mod workspace_repo;
 
+pub use activation_repo::*;
 pub use approval_repo::ApprovalRepo;
 pub use artifact_repo::ArtifactRepo;
 pub use audit_event_repo::AuditEventRepo;
