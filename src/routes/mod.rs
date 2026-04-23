@@ -31,6 +31,7 @@ pub mod pipeline_events;
 pub mod signals;
 pub mod survivors;
 pub mod telemetry;
+pub mod well_known;
 pub mod workspaces;
 
 pub fn router(state: AppState) -> Router {
@@ -41,6 +42,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth::discovery),
+        )
+        .route(
+            "/.well-known/mcp-client",
+            get(well_known::mcp_client_metadata),
         )
         .route("/mcp/oauth/register", post(oauth::register))
         .route("/mcp/oauth/token", post(oauth::token))
