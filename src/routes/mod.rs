@@ -1,16 +1,17 @@
 use axum::{
+    Router,
     middleware::from_fn,
     middleware::from_fn_with_state,
     routing::{get, post},
-    Router,
 };
-use tower_http::{cors::{Any, CorsLayer}, services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    services::ServeDir,
+    trace::TraceLayer,
+};
 
 use crate::{
-    auth::auth_middleware,
-    mcp_server,
-    middleware::demo_guard::demo_write_guard,
-    state::AppState,
+    auth::auth_middleware, mcp_server, middleware::demo_guard::demo_write_guard, state::AppState,
 };
 
 pub mod approvals;
@@ -134,4 +135,7 @@ pub fn router(state: AppState) -> Router {
         .nest_service("/", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        .layer(axum::middleware::from_fn(
+            crate::middleware::session_cookie::session_cookie,
+        ))
 }
