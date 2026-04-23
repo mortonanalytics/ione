@@ -80,7 +80,10 @@ async fn seed_is_reentrant() {
     std::env::set_var("IONE_SEED_DEMO", "1");
 
     let pool = make_pool().await;
-    sqlx::migrate!("./migrations").run(&pool).await.expect("migration failed");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migration failed");
     truncate_all(&pool).await;
 
     // First seed
@@ -94,13 +97,11 @@ async fn seed_is_reentrant() {
         .expect("second seed failed");
 
     // Exactly one demo workspace row
-    let ws_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM workspaces WHERE id = $1",
-    )
-    .bind(DEMO_WORKSPACE_ID)
-    .fetch_one(&pool)
-    .await
-    .expect("workspace count query failed");
+    let ws_count: i64 = sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE id = $1")
+        .bind(DEMO_WORKSPACE_ID)
+        .fetch_one(&pool)
+        .await
+        .expect("workspace count query failed");
 
     assert_eq!(
         ws_count, 1,
@@ -185,7 +186,10 @@ async fn demo_blocks_writes_with_demo_read_only_error() {
         body
     );
     assert!(
-        body["message"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        body["message"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "message field must be a non-empty string, got: {}",
         body
     );
@@ -344,7 +348,10 @@ async fn demo_purge_removes_workspace_and_audit_events() {
     std::env::set_var("IONE_SEED_DEMO", "1");
 
     let pool = make_pool().await;
-    sqlx::migrate!("./migrations").run(&pool).await.expect("migration failed");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migration failed");
     truncate_all(&pool).await;
 
     // Seed the demo workspace.
@@ -353,13 +360,12 @@ async fn demo_purge_removes_workspace_and_audit_events() {
         .expect("seed failed");
 
     // Verify at least one audit_events row exists for the demo workspace.
-    let audit_before: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM audit_events WHERE workspace_id = $1",
-    )
-    .bind(DEMO_WORKSPACE_ID)
-    .fetch_one(&pool)
-    .await
-    .expect("audit before count failed");
+    let audit_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE workspace_id = $1")
+            .bind(DEMO_WORKSPACE_ID)
+            .fetch_one(&pool)
+            .await
+            .expect("audit before count failed");
 
     assert!(
         audit_before > 0,
@@ -372,13 +378,11 @@ async fn demo_purge_removes_workspace_and_audit_events() {
         .expect("purge_demo failed");
 
     // Workspace must be gone.
-    let ws_after: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM workspaces WHERE id = $1",
-    )
-    .bind(DEMO_WORKSPACE_ID)
-    .fetch_one(&pool)
-    .await
-    .expect("workspace after count failed");
+    let ws_after: i64 = sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE id = $1")
+        .bind(DEMO_WORKSPACE_ID)
+        .fetch_one(&pool)
+        .await
+        .expect("workspace after count failed");
 
     assert_eq!(
         ws_after, 0,
@@ -387,13 +391,12 @@ async fn demo_purge_removes_workspace_and_audit_events() {
     );
 
     // Audit events must also be gone.
-    let audit_after: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM audit_events WHERE workspace_id = $1",
-    )
-    .bind(DEMO_WORKSPACE_ID)
-    .fetch_one(&pool)
-    .await
-    .expect("audit after count failed");
+    let audit_after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE workspace_id = $1")
+            .bind(DEMO_WORKSPACE_ID)
+            .fetch_one(&pool)
+            .await
+            .expect("audit after count failed");
 
     assert_eq!(
         audit_after, 0,

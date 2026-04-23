@@ -60,7 +60,11 @@ pub fn build_from_row(conn: &Connector) -> anyhow::Result<Box<dyn ConnectorImpl>
 }
 
 /// Build a connector implementation from request/DB fields.
-pub fn build(kind: ConnectorKind, name: &str, config: &serde_json::Value) -> anyhow::Result<Box<dyn ConnectorImpl>> {
+pub fn build(
+    kind: ConnectorKind,
+    name: &str,
+    config: &serde_json::Value,
+) -> anyhow::Result<Box<dyn ConnectorImpl>> {
     match kind {
         ConnectorKind::RustNative => {
             // Check for an explicit kind hint in config first.

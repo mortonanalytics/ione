@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::Request,
-    http::{HeaderValue, header},
+    http::{header, HeaderValue},
     middleware::Next,
     response::Response,
 };

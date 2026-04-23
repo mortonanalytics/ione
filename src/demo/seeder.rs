@@ -18,13 +18,11 @@ pub async fn seed_demo_if_enabled(pool: &PgPool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspaces WHERE id = $1)",
-    )
-    .bind(DEMO_WORKSPACE_ID)
-    .fetch_one(pool)
-    .await
-    .context("failed to check demo workspace existence")?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workspaces WHERE id = $1)")
+        .bind(DEMO_WORKSPACE_ID)
+        .fetch_one(pool)
+        .await
+        .context("failed to check demo workspace existence")?;
 
     if exists {
         return Ok(());
@@ -107,13 +105,12 @@ async fn resolve_default_org_and_user(
             .context("failed to query Default Org")?
             .context("Default Org does not exist — run app bootstrap first")?;
 
-    let user_id: Uuid =
-        sqlx::query_scalar("SELECT id FROM users WHERE org_id = $1 LIMIT 1")
-            .bind(org_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .context("failed to query default user")?
-            .context("no users found in Default Org — run app bootstrap first")?;
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE org_id = $1 LIMIT 1")
+        .bind(org_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .context("failed to query default user")?
+        .context("no users found in Default Org — run app bootstrap first")?;
 
     Ok((org_id, user_id))
 }
@@ -158,9 +155,7 @@ async fn seed_roles(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::R
     Ok(())
 }
 
-async fn seed_connectors(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> anyhow::Result<()> {
+async fn seed_connectors(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {
     for c in f::connectors() {
         sqlx::query(
             "INSERT INTO connectors (id, workspace_id, kind, name, config)
@@ -194,9 +189,7 @@ async fn seed_streams(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow:
     Ok(())
 }
 
-async fn seed_stream_events(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> anyhow::Result<()> {
+async fn seed_stream_events(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {
     for ev in f::stream_events() {
         let observed_at = Utc::now() - Duration::minutes(ev.offset_minutes);
         sqlx::query(
@@ -214,9 +207,7 @@ async fn seed_stream_events(
     Ok(())
 }
 
-async fn seed_signals(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> anyhow::Result<()> {
+async fn seed_signals(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {
     for s in f::signals() {
         sqlx::query(
             "INSERT INTO signals (id, workspace_id, source, title, body, evidence, severity)
@@ -237,9 +228,7 @@ async fn seed_signals(
     Ok(())
 }
 
-async fn seed_survivors(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> anyhow::Result<()> {
+async fn seed_survivors(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {
     for sv in f::survivors() {
         sqlx::query(
             "INSERT INTO survivors
@@ -280,9 +269,7 @@ async fn seed_routing_decisions(
     Ok(())
 }
 
-async fn seed_artifacts(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> anyhow::Result<()> {
+async fn seed_artifacts(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {
     for art in f::artifacts() {
         let kind_str = artifact_kind_str(art.kind);
         sqlx::query(
@@ -352,9 +339,7 @@ async fn seed_approvals(
     Ok(())
 }
 
-async fn seed_audit_events(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> anyhow::Result<()> {
+async fn seed_audit_events(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {
     for ev in f::audit_events() {
         let actor_kind_str = actor_kind_str(ev.actor_kind);
         sqlx::query(

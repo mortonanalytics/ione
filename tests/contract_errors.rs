@@ -130,18 +130,20 @@ async fn demo_conversation_messages_return_canned_reply() {
     std::env::set_var("OLLAMA_BASE_URL", "http://127.0.0.1:1");
     let _ = ione::demo::seeder::seed_demo_if_enabled(&pool).await;
 
-    let conv_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM conversations WHERE workspace_id = $1 LIMIT 1",
-    )
-    .bind(DEMO_WORKSPACE_ID)
-    .fetch_optional(&pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_else(Uuid::new_v4);
+    let conv_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM conversations WHERE workspace_id = $1 LIMIT 1")
+            .bind(DEMO_WORKSPACE_ID)
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(Uuid::new_v4);
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/v1/conversations/{}/messages", base, conv_id))
+        .post(format!(
+            "{}/api/v1/conversations/{}/messages",
+            base, conv_id
+        ))
         .json(&serde_json::json!({ "content": "What approvals are pending and why?" }))
         .send()
         .await
@@ -299,7 +301,10 @@ async fn error_nws_out_of_range_on_connector_validate() {
     assert!(!hint.is_empty(), "hint field must be present and non-empty");
 
     let field = body["field"].as_str().unwrap_or("");
-    assert!(!field.is_empty(), "field field must be present and non-empty");
+    assert!(
+        !field.is_empty(),
+        "field field must be present and non-empty"
+    );
     assert_eq!(
         field, "lat",
         "field must identify the offending field ('lat'), got: {}",

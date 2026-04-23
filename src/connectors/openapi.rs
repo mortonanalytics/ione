@@ -185,13 +185,19 @@ impl OpenApiConnector {
             .with_context(|| format!("openapi spec fetch failed for {}", url))?;
 
         if resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN {
-            bail!("openapi spec fetch auth failed: HTTP {}", resp.status().as_u16());
+            bail!(
+                "openapi spec fetch auth failed: HTTP {}",
+                resp.status().as_u16()
+            );
         }
         if !resp.status().is_success() {
             bail!("openapi spec fetch failed: HTTP {}", resp.status().as_u16());
         }
 
-        let bytes = resp.bytes().await.context("failed to read openapi spec response")?;
+        let bytes = resp
+            .bytes()
+            .await
+            .context("failed to read openapi spec response")?;
         if bytes.len() > MAX_RESPONSE_BYTES {
             bail!("openapi spec fetch failed: response too large");
         }
@@ -279,13 +285,16 @@ impl OpenApiConnector {
             bail!("openapi request failed: HTTP {}", resp.status().as_u16());
         }
 
-        let bytes = resp.bytes().await.context("failed to read openapi response body")?;
+        let bytes = resp
+            .bytes()
+            .await
+            .context("failed to read openapi response body")?;
         if bytes.len() > MAX_RESPONSE_BYTES {
             bail!("openapi response too large");
         }
 
-        let body: Value = serde_json::from_slice(&bytes)
-            .context("openapi response is not valid JSON")?;
+        let body: Value =
+            serde_json::from_slice(&bytes).context("openapi response is not valid JSON")?;
         extract_events_from_response(stream, &body)
     }
 
@@ -298,8 +307,8 @@ impl OpenApiConnector {
         let mut headers = HeaderMap::new();
 
         for (key, value) in merged {
-            let header_name =
-                HeaderName::from_str(&key).with_context(|| format!("invalid header name '{}'", key))?;
+            let header_name = HeaderName::from_str(&key)
+                .with_context(|| format!("invalid header name '{}'", key))?;
             let rendered = render_scalar(&value, cursor_ctx)
                 .with_context(|| format!("failed to render header '{}'", key))?;
             let header_value = HeaderValue::from_str(&rendered)
@@ -334,8 +343,9 @@ impl OpenApiConnector {
                     ApiKeyLocation::Header => {
                         let header_name = HeaderName::from_str(name)
                             .with_context(|| format!("invalid api_key header '{}'", name))?;
-                        let header_value = HeaderValue::from_str(&value)
-                            .with_context(|| format!("invalid api_key header value for '{}'", name))?;
+                        let header_value = HeaderValue::from_str(&value).with_context(|| {
+                            format!("invalid api_key header value for '{}'", name)
+                        })?;
                         req = req.header(header_name, header_value);
                     }
                     ApiKeyLocation::Query => {
@@ -395,7 +405,9 @@ impl ConnectorImpl for OpenApiConnector {
 impl OpenApiConfig {
     fn validate(&self) -> anyhow::Result<()> {
         match (&self.spec_url, &self.spec_inline) {
-            (Some(_), Some(_)) => bail!("openapi config must not set both 'spec_url' and 'spec_inline'"),
+            (Some(_), Some(_)) => {
+                bail!("openapi config must not set both 'spec_url' and 'spec_inline'")
+            }
             (None, None) => bail!("openapi config must set one of 'spec_url' or 'spec_inline'"),
             _ => {}
         }
@@ -435,7 +447,9 @@ impl AuthConfig {
                 token_env, token, ..
             } => {
                 if token.is_some() {
-                    bail!("openapi auth.bearer requires 'token_env'; literal 'token' is not allowed");
+                    bail!(
+                        "openapi auth.bearer requires 'token_env'; literal 'token' is not allowed"
+                    );
                 }
                 let _ = env_value(token_env)?;
                 Ok(())
@@ -447,7 +461,9 @@ impl AuthConfig {
                 ..
             } => {
                 if value.is_some() {
-                    bail!("openapi auth.api_key requires 'value_env'; literal 'value' is not allowed");
+                    bail!(
+                        "openapi auth.api_key requires 'value_env'; literal 'value' is not allowed"
+                    );
                 }
                 if name.trim().is_empty() {
                     bail!("openapi auth.api_key requires non-empty 'name'");
@@ -486,12 +502,17 @@ impl StreamConfig {
 
         validate_json_pointer(&self.items_json_pointer)
             .with_context(|| format!("stream '{}' has invalid items_json_pointer", self.name))?;
-        validate_json_pointer(&self.observed_at_json_pointer)
-            .with_context(|| format!("stream '{}' has invalid observed_at_json_pointer", self.name))?;
+        validate_json_pointer(&self.observed_at_json_pointer).with_context(|| {
+            format!(
+                "stream '{}' has invalid observed_at_json_pointer",
+                self.name
+            )
+        })?;
 
         if let Some(ptr) = &self.event_id_json_pointer {
-            validate_json_pointer(ptr)
-                .with_context(|| format!("stream '{}' has invalid event_id_json_pointer", self.name))?;
+            validate_json_pointer(ptr).with_context(|| {
+                format!("stream '{}' has invalid event_id_json_pointer", self.name)
+            })?;
         }
 
         if let Some(kind) = &self.cursor.kind {
@@ -530,7 +551,10 @@ fn parse_method(method: &str) -> anyhow::Result<Method> {
     match method.to_ascii_uppercase().as_str() {
         "GET" => Ok(Method::GET),
         "POST" => Ok(Method::POST),
-        other => bail!("unsupported openapi method '{}'; expected GET or POST", other),
+        other => bail!(
+            "unsupported openapi method '{}'; expected GET or POST",
+            other
+        ),
     }
 }
 
@@ -539,7 +563,9 @@ fn resolve_base_url_from_spec(doc: &Value) -> anyhow::Result<Url> {
         .as_array()
         .and_then(|servers| servers.first())
         .and_then(|server| server["url"].as_str())
-        .ok_or_else(|| anyhow!("openapi spec missing servers[0].url; set connector base_url explicitly"))?;
+        .ok_or_else(|| {
+            anyhow!("openapi spec missing servers[0].url; set connector base_url explicitly")
+        })?;
 
     parse_and_validate_url(server_url, "spec.servers[0].url")
 }
@@ -551,28 +577,32 @@ fn validate_operation(doc: &Value, stream: &StreamConfig) -> anyhow::Result<()> 
 
 fn find_operation<'a>(doc: &'a Value, stream: &StreamConfig) -> anyhow::Result<&'a Value> {
     let method = stream.method.to_ascii_lowercase();
-    let path_item = doc["paths"]
-        .get(&stream.path)
-        .ok_or_else(|| anyhow!("openapi operation mismatch: path '{}' not found for stream '{}'", stream.path, stream.name))?;
+    let path_item = doc["paths"].get(&stream.path).ok_or_else(|| {
+        anyhow!(
+            "openapi operation mismatch: path '{}' not found for stream '{}'",
+            stream.path,
+            stream.name
+        )
+    })?;
 
-    let op = path_item
-        .get(&method)
-        .ok_or_else(|| anyhow!(
+    let op = path_item.get(&method).ok_or_else(|| {
+        anyhow!(
             "openapi operation mismatch: method '{}' not found at path '{}' for stream '{}'",
             stream.method,
             stream.path,
             stream.name
-        ))?;
+        )
+    })?;
 
     if let Some(expected) = &stream.operation_id {
-        let actual = op["operationId"]
-            .as_str()
-            .ok_or_else(|| anyhow!(
+        let actual = op["operationId"].as_str().ok_or_else(|| {
+            anyhow!(
                 "openapi operation mismatch: operation at {} {} has no operationId; expected '{}'",
                 stream.method,
                 stream.path,
                 expected
-            ))?;
+            )
+        })?;
         if actual != expected {
             bail!(
                 "openapi operation mismatch: {} {} has operationId '{}', expected '{}'",
@@ -612,7 +642,10 @@ fn ensure_safe_url(url: &Url, label: &str) -> anyhow::Result<()> {
                 .host_str()
                 .ok_or_else(|| anyhow!("unsafe URL in {}: missing host", label))?;
             if !host_is_http_allowed(host) {
-                bail!("unsafe URL in {}: http is only allowed for localhost or private IP hosts", label);
+                bail!(
+                    "unsafe URL in {}: http is only allowed for localhost or private IP hosts",
+                    label
+                );
             }
         }
         other => bail!("unsafe URL in {}: unsupported scheme '{}'", label, other),
@@ -634,9 +667,7 @@ fn host_is_http_allowed(host: &str) -> bool {
     }
 
     match IpAddr::from_str(host) {
-        Ok(IpAddr::V4(ip)) => {
-            ip.is_private() || ip.is_loopback() || ip.is_link_local()
-        }
+        Ok(IpAddr::V4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
         Ok(IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unique_local(),
         Err(_) => false,
     }
@@ -650,7 +681,11 @@ fn merge_maps(base: &Map<String, Value>, overlay: &Map<String, Value>) -> Map<St
     merged
 }
 
-fn render_path(path: &str, path_params: &Map<String, Value>, cursor_ctx: &CursorContext) -> anyhow::Result<String> {
+fn render_path(
+    path: &str,
+    path_params: &Map<String, Value>,
+    cursor_ctx: &CursorContext,
+) -> anyhow::Result<String> {
     let mut rendered = path.to_string();
     for (key, value) in path_params {
         let placeholder = format!("{{{}}}", key);
@@ -702,7 +737,10 @@ fn render_scalar(value: &Value, cursor_ctx: &CursorContext) -> anyhow::Result<St
         Value::Number(n) => Ok(n.to_string()),
         Value::Bool(b) => Ok(if b { "true" } else { "false" }.to_string()),
         Value::Null => Ok(String::new()),
-        other => bail!("templated scalar value must resolve to string/number/bool, got {}", other),
+        other => bail!(
+            "templated scalar value must resolve to string/number/bool, got {}",
+            other
+        ),
     }
 }
 
@@ -719,10 +757,9 @@ fn render_template_string(input: &str, cursor_ctx: &CursorContext) -> anyhow::Re
             .ok_or_else(|| anyhow!("unterminated template expression in '{}'", input))?;
         let expr = rest[..end_rel].trim();
         let replacement = match expr {
-            "cursor.observed_at" => cursor_ctx
-                .observed_at
-                .clone()
-                .ok_or_else(|| anyhow!("template requires cursor.observed_at but no cursor was provided"))?,
+            "cursor.observed_at" => cursor_ctx.observed_at.clone().ok_or_else(|| {
+                anyhow!("template requires cursor.observed_at but no cursor was provided")
+            })?,
             other => bail!("unsupported template expression '{}'", other),
         };
         let end = start + 2 + end_rel + 2;
@@ -865,7 +902,8 @@ mod tests {
     fn config_rejects_literal_secrets() {
         std::env::set_var("OPENAPI_TOKEN_ENV", "secret");
         let mut cfg = valid_config();
-        cfg["auth"] = json!({ "type": "bearer", "token_env": "OPENAPI_TOKEN_ENV", "token": "literal" });
+        cfg["auth"] =
+            json!({ "type": "bearer", "token_env": "OPENAPI_TOKEN_ENV", "token": "literal" });
         let err = OpenApiConnector::from_config(&cfg).expect_err("literal secret must fail");
         assert!(err.to_string().contains("literal 'token' is not allowed"));
     }
@@ -930,7 +968,8 @@ mod tests {
         let ctx = CursorContext {
             observed_at: Some("2026-04-23T12:00:00Z".to_string()),
         };
-        let rendered = render_template_string("since={{cursor.observed_at}}", &ctx).expect("render");
+        let rendered =
+            render_template_string("since={{cursor.observed_at}}", &ctx).expect("render");
         assert_eq!(rendered, "since=2026-04-23T12:00:00Z");
     }
 
@@ -1029,9 +1068,18 @@ mod tests {
             .await;
 
         for (auth, path_name) in [
-            (json!({ "type": "api_key", "in": "header", "name": "X-API-Key", "value_env": "OPENAPI_KEY" }), "/header"),
-            (json!({ "type": "api_key", "in": "query", "name": "api_key", "value_env": "OPENAPI_KEY" }), "/query"),
-            (json!({ "type": "basic", "username_env": "OPENAPI_USER", "password_env": "OPENAPI_PASS" }), "/basic"),
+            (
+                json!({ "type": "api_key", "in": "header", "name": "X-API-Key", "value_env": "OPENAPI_KEY" }),
+                "/header",
+            ),
+            (
+                json!({ "type": "api_key", "in": "query", "name": "api_key", "value_env": "OPENAPI_KEY" }),
+                "/query",
+            ),
+            (
+                json!({ "type": "basic", "username_env": "OPENAPI_USER", "password_env": "OPENAPI_PASS" }),
+                "/basic",
+            ),
         ] {
             let cfg = json!({
                 "spec_inline": {

@@ -71,10 +71,13 @@ pub(crate) async fn stream_events(
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let stream = state.pipeline_bus.subscribe_workspace(workspace_id).map(|ev| {
-        let data = serde_json::to_string(&ev).unwrap_or_else(|_| "{}".to_string());
-        Ok(Event::default().event("pipeline_event").data(data))
-    });
+    let stream = state
+        .pipeline_bus
+        .subscribe_workspace(workspace_id)
+        .map(|ev| {
+            let data = serde_json::to_string(&ev).unwrap_or_else(|_| "{}".to_string());
+            Ok(Event::default().event("pipeline_event").data(data))
+        });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

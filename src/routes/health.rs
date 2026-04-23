@@ -37,7 +37,11 @@ pub(crate) async fn health_ollama(State(state): State<AppState>) -> Json<OllamaH
         Ok(available) => {
             let missing: Vec<String> = required
                 .iter()
-                .filter(|model| !available.iter().any(|available_model| available_model == *model))
+                .filter(|model| {
+                    !available
+                        .iter()
+                        .any(|available_model| available_model == *model)
+                })
                 .cloned()
                 .collect();
 

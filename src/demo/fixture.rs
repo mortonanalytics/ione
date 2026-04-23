@@ -455,7 +455,9 @@ pub fn approvals() -> Vec<ApprovalFixture> {
             id: APPR_4,
             artifact_id: ART_3,
             decided: Some(false),
-            comment: Some("Notification copy needs revision — Red Flag expired 30 min ago. Regenerate."),
+            comment: Some(
+                "Notification copy needs revision — Red Flag expired 30 min ago. Regenerate.",
+            ),
         },
     ]
 }

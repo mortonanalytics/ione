@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git worktree add *)",
+      "Bash(git worktree remove *)",
+      "Bash(git worktree prune *)",
+      "Bash(git worktree lock *)",
+      "Bash(git worktree unlock *)",
+      "Bash(git branch -D *)",
+      "Bash(git branch -d *)",
+      "Bash(git add *)",
+      "Bash(git add -A)",
+      "Bash(git commit -m *)",
+      "Bash(git commit -am *)",
+      "Bash(git stash *)",
+      "Bash(git restore *)",
+      "Bash(git checkout -b *)",
+      "Bash(git cherry-pick *)",
+      "Bash(git fetch *)",
+      "Bash(cp *)",
+      "Bash(mkdir -p *)",
+      "Bash(mv /tmp/*)",
+      "Bash(rm /tmp/co-code-*)",
+      "Bash(rm -rf /tmp/co-code-*)",
+      "Bash(cargo check*)",
+      "Bash(cargo clippy*)",
+      "Bash(cargo fmt*)",
+      "Bash(cargo test*)",
+      "Bash(cargo sqlx*)",
+      "Bash(DATABASE_URL=* cargo *)",
+      "Bash(IONE_SEED_DEMO=* cargo *)",
+      "Bash(CODEX=*)"
+    ]
+  }
+}

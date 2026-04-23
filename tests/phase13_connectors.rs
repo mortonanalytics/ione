@@ -543,10 +543,14 @@ async fn openapi_default_streams_returns_declared_streams() {
         ]
     });
 
-    let connector = ione::connectors::openapi::OpenApiConnector::from_config(&config)
-        .expect("from_config");
+    let connector =
+        ione::connectors::openapi::OpenApiConnector::from_config(&config).expect("from_config");
     let streams = connector.default_streams().await.expect("default_streams");
-    assert_eq!(streams.len(), 2, "must create one default stream per configured stream");
+    assert_eq!(
+        streams.len(),
+        2,
+        "must create one default stream per configured stream"
+    );
 }
 
 #[tokio::test]
@@ -615,12 +619,15 @@ async fn openapi_poll_get_and_post_emit_source_metadata_and_record() {
         ]
     });
 
-    let connector = ione::connectors::openapi::OpenApiConnector::from_config(&config)
-        .expect("from_config");
+    let connector =
+        ione::connectors::openapi::OpenApiConnector::from_config(&config).expect("from_config");
     let get_result = connector.poll("incidents", None).await.expect("get poll");
     assert_eq!(get_result.events.len(), 1);
     assert_eq!(get_result.events[0].payload["source"]["id"], "INC-1");
-    assert_eq!(get_result.events[0].payload["source"]["connector"], "openapi");
+    assert_eq!(
+        get_result.events[0].payload["source"]["connector"],
+        "openapi"
+    );
     assert_eq!(get_result.events[0].payload["record"]["status"], "active");
 
     let post_result = connector.poll("search", None).await.expect("post poll");
@@ -690,10 +697,17 @@ async fn openapi_poll_honors_max_items_and_rejects_invalid_timestamps() {
         ]
     });
 
-    let connector = ione::connectors::openapi::OpenApiConnector::from_config(&config)
-        .expect("from_config");
-    let limited = connector.poll("incidents", None).await.expect("limited poll");
-    assert_eq!(limited.events.len(), 1, "max_items must cap returned events");
+    let connector =
+        ione::connectors::openapi::OpenApiConnector::from_config(&config).expect("from_config");
+    let limited = connector
+        .poll("incidents", None)
+        .await
+        .expect("limited poll");
+    assert_eq!(
+        limited.events.len(),
+        1,
+        "max_items must cap returned events"
+    );
 
     let err = connector
         .poll("broken", None)
@@ -843,7 +857,10 @@ async fn openapi_invalid_create_returns_400_and_persists_nothing() {
         .fetch_one(&pool)
         .await
         .expect("count connectors");
-    assert_eq!(count, 0, "invalid openapi create must not persist connector");
+    assert_eq!(
+        count, 0,
+        "invalid openapi create must not persist connector"
+    );
 }
 
 #[tokio::test]
@@ -899,7 +916,8 @@ async fn openapi_poll_failure_sets_connector_error_status() {
 
     assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
     let connector: Value = create_resp.json().await.expect("connector json");
-    let connector_id = Uuid::parse_str(connector["id"].as_str().expect("connector id")).expect("uuid");
+    let connector_id =
+        Uuid::parse_str(connector["id"].as_str().expect("connector id")).expect("uuid");
     let stream_id: Uuid = sqlx::query_scalar("SELECT id FROM streams WHERE connector_id = $1")
         .bind(connector_id)
         .fetch_one(&pool)
@@ -914,13 +932,12 @@ async fn openapi_poll_failure_sets_connector_error_status() {
         .expect("poll stream");
     assert_eq!(poll_resp.status(), reqwest::StatusCode::BAD_GATEWAY);
 
-    let status_and_error: (String, Option<String>) = sqlx::query_as(
-        "SELECT status::text, last_error FROM connectors WHERE id = $1",
-    )
-    .bind(connector_id)
-    .fetch_one(&pool)
-    .await
-    .expect("fetch connector status");
+    let status_and_error: (String, Option<String>) =
+        sqlx::query_as("SELECT status::text, last_error FROM connectors WHERE id = $1")
+            .bind(connector_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch connector status");
     assert_eq!(status_and_error.0, "error");
     assert!(
         status_and_error
