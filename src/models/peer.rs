@@ -2,11 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::Type, Serialize, Deserialize)]
-#[sqlx(type_name = "peer_status", rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "peer_status", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum PeerStatus {
+    PendingOauth,
+    PendingAllowlist,
     Active,
+    Revoked,
     Paused,
     Error,
 }
@@ -21,4 +24,11 @@ pub struct Peer {
     pub sharing_policy: serde_json::Value,
     pub status: PeerStatus,
     pub created_at: DateTime<Utc>,
+    pub oauth_client_id: Option<String>,
+    #[serde(skip_serializing)]
+    pub access_token_hash: Option<String>,
+    #[serde(skip_serializing)]
+    pub refresh_token_hash: Option<String>,
+    pub token_expires_at: Option<DateTime<Utc>>,
+    pub tool_allowlist: serde_json::Value,
 }
