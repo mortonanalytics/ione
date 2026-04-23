@@ -5,6 +5,7 @@ pub mod funnel;
 pub mod generator;
 pub mod ollama;
 pub mod peer;
+pub mod peer_oauth;
 pub mod pipeline_bus;
 pub mod router;
 pub mod rules;
