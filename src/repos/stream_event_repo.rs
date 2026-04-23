@@ -56,4 +56,21 @@ impl StreamEventRepo {
         .await
         .context("failed to list recent stream events")
     }
+
+    pub async fn latest_observed_at(
+        &self,
+        stream_id: Uuid,
+    ) -> anyhow::Result<Option<DateTime<Utc>>> {
+        sqlx::query_scalar(
+            "SELECT observed_at
+             FROM stream_events
+             WHERE stream_id = $1
+             ORDER BY observed_at DESC
+             LIMIT 1",
+        )
+        .bind(stream_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch latest observed_at for stream")
+    }
 }

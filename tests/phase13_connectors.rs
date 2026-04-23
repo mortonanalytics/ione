@@ -16,6 +16,8 @@ use std::net::SocketAddr;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::net::TcpListener;
 use uuid::Uuid;
+use wiremock::matchers::{header, method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
 
@@ -448,4 +450,485 @@ async fn audit_events_list_returns_items() {
     let body: Value = resp.json().await.expect("response not JSON");
     let items = body["items"].as_array().expect("items must be array");
     assert!(!items.is_empty(), "items must not be empty after seeding");
+}
+
+// ─── OpenAPI connector tests ────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn openapi_build_from_row_dispatches_successfully() {
+    let (_, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+
+    let connector_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO connectors (workspace_id, kind, name, config)
+         VALUES ($1, 'openapi'::connector_kind, 'example-api',
+                 $2::jsonb)
+         RETURNING id",
+    )
+    .bind(ws)
+    .bind(json!({
+        "spec_inline": {
+            "openapi": "3.0.0",
+            "servers": [{ "url": "http://127.0.0.1:3000" }],
+            "paths": {
+                "/incidents": { "get": { "operationId": "listIncidents" } }
+            }
+        },
+        "base_url": "http://127.0.0.1:3000",
+        "auth": { "type": "none" },
+        "streams": [{
+            "name": "incidents",
+            "method": "GET",
+            "path": "/incidents",
+            "operation_id": "listIncidents",
+            "items_json_pointer": "/items",
+            "observed_at_json_pointer": "/updated_at"
+        }]
+    }))
+    .fetch_one(&pool)
+    .await
+    .expect("insert connector");
+
+    let row: ione::models::Connector = sqlx::query_as(
+        "SELECT id, workspace_id, kind, name, config, status, last_error, created_at
+         FROM connectors WHERE id = $1",
+    )
+    .bind(connector_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch connector");
+
+    ione::connectors::build_from_row(&row).expect("openapi dispatch should build");
+}
+
+#[tokio::test]
+#[ignore]
+async fn openapi_default_streams_returns_declared_streams() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/openapi.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "openapi": "3.0.0",
+            "servers": [{ "url": mock_server.uri() }],
+            "paths": {
+                "/incidents": { "get": { "operationId": "listIncidents", "summary": "List incidents" } },
+                "/search": { "post": { "operationId": "searchIncidents" } }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let config = json!({
+        "spec_url": format!("{}/openapi.json", mock_server.uri()),
+        "base_url": mock_server.uri(),
+        "auth": { "type": "none" },
+        "streams": [
+            {
+                "name": "incidents",
+                "method": "GET",
+                "path": "/incidents",
+                "operation_id": "listIncidents",
+                "items_json_pointer": "/items",
+                "observed_at_json_pointer": "/updated_at"
+            },
+            {
+                "name": "search",
+                "method": "POST",
+                "path": "/search",
+                "operation_id": "searchIncidents",
+                "items_json_pointer": "",
+                "observed_at_json_pointer": "/updated_at"
+            }
+        ]
+    });
+
+    let connector = ione::connectors::openapi::OpenApiConnector::from_config(&config)
+        .expect("from_config");
+    let streams = connector.default_streams().await.expect("default_streams");
+    assert_eq!(streams.len(), 2, "must create one default stream per configured stream");
+}
+
+#[tokio::test]
+#[ignore]
+async fn openapi_poll_get_and_post_emit_source_metadata_and_record() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/openapi.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "openapi": "3.0.0",
+            "servers": [{ "url": mock_server.uri() }],
+            "paths": {
+                "/incidents": { "get": { "operationId": "listIncidents" } },
+                "/search": { "post": { "operationId": "searchIncidents" } }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/incidents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{
+                "id": "INC-1",
+                "updated_at": "2026-04-23T12:00:00Z",
+                "status": "active"
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "INC-2",
+            "updated_at": "2026-04-23T12:05:00Z",
+            "status": "active"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let config = json!({
+        "spec_url": format!("{}/openapi.json", mock_server.uri()),
+        "base_url": mock_server.uri(),
+        "auth": { "type": "none" },
+        "streams": [
+            {
+                "name": "incidents",
+                "method": "GET",
+                "path": "/incidents",
+                "operation_id": "listIncidents",
+                "items_json_pointer": "/items",
+                "observed_at_json_pointer": "/updated_at",
+                "event_id_json_pointer": "/id"
+            },
+            {
+                "name": "search",
+                "method": "POST",
+                "path": "/search",
+                "operation_id": "searchIncidents",
+                "items_json_pointer": "",
+                "observed_at_json_pointer": "/updated_at",
+                "event_id_json_pointer": "/id",
+                "body": { "status": "active" }
+            }
+        ]
+    });
+
+    let connector = ione::connectors::openapi::OpenApiConnector::from_config(&config)
+        .expect("from_config");
+    let get_result = connector.poll("incidents", None).await.expect("get poll");
+    assert_eq!(get_result.events.len(), 1);
+    assert_eq!(get_result.events[0].payload["source"]["id"], "INC-1");
+    assert_eq!(get_result.events[0].payload["source"]["connector"], "openapi");
+    assert_eq!(get_result.events[0].payload["record"]["status"], "active");
+
+    let post_result = connector.poll("search", None).await.expect("post poll");
+    assert_eq!(post_result.events.len(), 1);
+    assert_eq!(post_result.events[0].payload["source"]["id"], "INC-2");
+    assert_eq!(post_result.events[0].payload["record"]["status"], "active");
+}
+
+#[tokio::test]
+#[ignore]
+async fn openapi_poll_honors_max_items_and_rejects_invalid_timestamps() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/openapi.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "openapi": "3.0.0",
+            "servers": [{ "url": mock_server.uri() }],
+            "paths": {
+                "/incidents": { "get": { "operationId": "listIncidents" } },
+                "/broken": { "get": { "operationId": "listBroken" } }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/incidents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                { "id": "INC-1", "updated_at": "2026-04-23T12:00:00Z" },
+                { "id": "INC-2", "updated_at": "2026-04-23T12:01:00Z" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/broken"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{ "id": "BROKEN-1", "updated_at": "not-a-time" }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let config = json!({
+        "spec_url": format!("{}/openapi.json", mock_server.uri()),
+        "base_url": mock_server.uri(),
+        "auth": { "type": "none" },
+        "streams": [
+            {
+                "name": "incidents",
+                "method": "GET",
+                "path": "/incidents",
+                "operation_id": "listIncidents",
+                "items_json_pointer": "/items",
+                "observed_at_json_pointer": "/updated_at",
+                "max_items": 1
+            },
+            {
+                "name": "broken",
+                "method": "GET",
+                "path": "/broken",
+                "operation_id": "listBroken",
+                "items_json_pointer": "/items",
+                "observed_at_json_pointer": "/updated_at"
+            }
+        ]
+    });
+
+    let connector = ione::connectors::openapi::OpenApiConnector::from_config(&config)
+        .expect("from_config");
+    let limited = connector.poll("incidents", None).await.expect("limited poll");
+    assert_eq!(limited.events.len(), 1, "max_items must cap returned events");
+
+    let err = connector
+        .poll("broken", None)
+        .await
+        .err()
+        .expect("invalid timestamp must fail");
+    assert!(
+        err.to_string().contains("timestamp parse failure"),
+        "error must mention timestamp parse failure, got {}",
+        err
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn openapi_route_create_poll_and_cursor_template_work() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/openapi.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "openapi": "3.0.0",
+            "servers": [{ "url": mock_server.uri() }],
+            "paths": {
+                "/incidents": { "get": { "operationId": "listIncidents" } }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/incidents"))
+        .and(query_param("modified_since", "2026-04-23T11:00:00+00:00"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{
+                "id": "INC-2",
+                "updated_at": "2026-04-23T12:00:00Z",
+                "status": "active"
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = reqwest::Client::new();
+    let create_resp = client
+        .post(format!("{}/api/v1/workspaces/{}/connectors", base, ws))
+        .json(&json!({
+            "kind": "openapi",
+            "name": "Example API",
+            "config": {
+                "spec_url": format!("{}/openapi.json", mock_server.uri()),
+                "base_url": mock_server.uri(),
+                "auth": { "type": "none" },
+                "streams": [{
+                    "name": "incidents",
+                    "method": "GET",
+                    "path": "/incidents",
+                    "operation_id": "listIncidents",
+                    "query": { "modified_since": "{{cursor.observed_at}}" },
+                    "items_json_pointer": "/items",
+                    "observed_at_json_pointer": "/updated_at",
+                    "event_id_json_pointer": "/id"
+                }]
+            }
+        }))
+        .send()
+        .await
+        .expect("create connector");
+
+    assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+    let connector: Value = create_resp.json().await.expect("connector json");
+    let connector_id = connector["id"].as_str().expect("connector id");
+
+    let stream_id: Uuid = sqlx::query_scalar("SELECT id FROM streams WHERE connector_id = $1")
+        .bind(Uuid::parse_str(connector_id).expect("uuid"))
+        .fetch_one(&pool)
+        .await
+        .expect("stream id");
+
+    sqlx::query(
+        "INSERT INTO stream_events (stream_id, payload, observed_at)
+         VALUES ($1, '{}'::jsonb, '2026-04-23T11:00:00Z')",
+    )
+    .bind(stream_id)
+    .execute(&pool)
+    .await
+    .expect("seed prior event");
+
+    let poll_resp = client
+        .post(format!("{}/api/v1/streams/{}/poll", base, stream_id))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("poll stream");
+
+    assert_eq!(poll_resp.status(), reqwest::StatusCode::OK);
+    let body: Value = poll_resp.json().await.expect("poll body");
+    assert_eq!(body["ingested"], 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn openapi_invalid_create_returns_400_and_persists_nothing() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/openapi.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "openapi": "3.0.0",
+            "servers": [{ "url": mock_server.uri() }],
+            "paths": {
+                "/incidents": { "get": { "operationId": "listIncidents" } }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v1/workspaces/{}/connectors", base, ws))
+        .json(&json!({
+            "kind": "openapi",
+            "name": "Broken API",
+            "config": {
+                "spec_url": format!("{}/openapi.json", mock_server.uri()),
+                "base_url": mock_server.uri(),
+                "auth": { "type": "none" },
+                "streams": [{
+                    "name": "incidents",
+                    "method": "GET",
+                    "path": "/incidents",
+                    "operation_id": "wrongOperation",
+                    "items_json_pointer": "/items",
+                    "observed_at_json_pointer": "/updated_at"
+                }]
+            }
+        }))
+        .send()
+        .await
+        .expect("create connector");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connectors")
+        .fetch_one(&pool)
+        .await
+        .expect("count connectors");
+    assert_eq!(count, 0, "invalid openapi create must not persist connector");
+}
+
+#[tokio::test]
+#[ignore]
+async fn openapi_poll_failure_sets_connector_error_status() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let mock_server = MockServer::start().await;
+
+    std::env::set_var("OPENAPI_TEST_TOKEN", "secret-token");
+
+    Mock::given(method("GET"))
+        .and(path("/openapi.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "openapi": "3.0.0",
+            "servers": [{ "url": mock_server.uri() }],
+            "paths": {
+                "/incidents": { "get": { "operationId": "listIncidents" } }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/incidents"))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&mock_server)
+        .await;
+
+    let create_resp = reqwest::Client::new()
+        .post(format!("{}/api/v1/workspaces/{}/connectors", base, ws))
+        .json(&json!({
+            "kind": "openapi",
+            "name": "Example API",
+            "config": {
+                "spec_url": format!("{}/openapi.json", mock_server.uri()),
+                "base_url": mock_server.uri(),
+                "auth": { "type": "bearer", "token_env": "OPENAPI_TEST_TOKEN" },
+                "streams": [{
+                    "name": "incidents",
+                    "method": "GET",
+                    "path": "/incidents",
+                    "operation_id": "listIncidents",
+                    "items_json_pointer": "/items",
+                    "observed_at_json_pointer": "/updated_at"
+                }]
+            }
+        }))
+        .send()
+        .await
+        .expect("create connector");
+
+    assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+    let connector: Value = create_resp.json().await.expect("connector json");
+    let connector_id = Uuid::parse_str(connector["id"].as_str().expect("connector id")).expect("uuid");
+    let stream_id: Uuid = sqlx::query_scalar("SELECT id FROM streams WHERE connector_id = $1")
+        .bind(connector_id)
+        .fetch_one(&pool)
+        .await
+        .expect("stream id");
+
+    let poll_resp = reqwest::Client::new()
+        .post(format!("{}/api/v1/streams/{}/poll", base, stream_id))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("poll stream");
+    assert_eq!(poll_resp.status(), reqwest::StatusCode::BAD_GATEWAY);
+
+    let status_and_error: (String, Option<String>) = sqlx::query_as(
+        "SELECT status::text, last_error FROM connectors WHERE id = $1",
+    )
+    .bind(connector_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch connector status");
+    assert_eq!(status_and_error.0, "error");
+    assert!(
+        status_and_error
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("request failed"),
+        "last_error must capture poll failure, got {:?}",
+        status_and_error.1
+    );
 }

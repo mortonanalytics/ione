@@ -189,7 +189,12 @@ async fn poll_workspace_connectors(
         let streams = stream_repo.list(connector.id).await?;
 
         for stream in streams {
-            let poll_result = match impl_.poll(&stream.name, None).await {
+            let cursor = event_repo
+                .latest_observed_at(stream.id)
+                .await?
+                .map(|dt| serde_json::json!({ "observed_at": dt.to_rfc3339() }));
+
+            let poll_result = match impl_.poll(&stream.name, cursor).await {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(

@@ -53,15 +53,17 @@ pub async fn create_connector(
 
     let connector_repo = ConnectorRepo::new(state.pool.clone());
     let stream_repo = StreamRepo::new(state.pool.clone());
+    let impl_ = connectors::build(req.kind.clone(), &req.name, &req.config)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let default_streams = impl_
+        .default_streams()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     let connector = connector_repo
         .create(workspace_id, req.kind, &req.name, req.config)
         .await
         .map_err(AppError::Internal)?;
-
-    // Auto-register default streams for this connector
-    let impl_ = connectors::build_from_row(&connector).map_err(AppError::Internal)?;
-    let default_streams = impl_.default_streams().await.map_err(AppError::Internal)?;
 
     for sd in default_streams {
         stream_repo
@@ -118,8 +120,13 @@ async fn do_poll_stream(state: AppState, stream_id: Uuid) -> Result<Json<Value>,
 
     // Dispatch to the connector implementation
     let impl_ = connectors::build_from_row(&connector).map_err(AppError::Internal)?;
+    let cursor = event_repo
+        .latest_observed_at(stream_id)
+        .await
+        .map_err(AppError::Internal)?
+        .map(|dt| json!({ "observed_at": dt.to_rfc3339() }));
 
-    let poll_result = match impl_.poll(&stream.name, None).await {
+    let poll_result = match impl_.poll(&stream.name, cursor).await {
         Ok(r) => r,
         Err(e) => {
             // Record the error on the connector
