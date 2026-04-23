@@ -29,6 +29,10 @@ pub async fn seed_demo_if_enabled(pool: &PgPool) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    crate::repos::bootstrap::ensure_default_org_and_user(pool)
+        .await
+        .context("demo seeder failed to ensure default org+user bootstrap")?;
+
     seed_demo(pool).await
 }
 

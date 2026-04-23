@@ -684,18 +684,31 @@ async fn schema_enum_activation_step_key_rejects_junk() {
 #[ignore]
 async fn schema_enum_pipeline_event_stage_all_variants() {
     let pool = pool().await;
-    // 7 stages from contract
+    // 7 stages from contract: publish_started, first_event, first_signal,
+    // first_survivor, first_decision, stall, error. Stored as TEXT with a
+    // CHECK constraint (not a Postgres ENUM), so assert by inserting a row
+    // with each stage value and confirming success.
+    use uuid::Uuid;
+    let ws_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name) VALUES ($1, 'stage-test-org') ON CONFLICT DO NOTHING")
+        .bind(Uuid::new_v4()).execute(&pool).await.ok();
+    let org_id: Uuid = sqlx::query_scalar("SELECT id FROM organizations WHERE name = 'stage-test-org'")
+        .fetch_one(&pool).await.expect("create org");
+    sqlx::query("INSERT INTO workspaces (id, org_id, name, domain, lifecycle) VALUES ($1, $2, 'stage-test-ws', 'generic', 'continuous')")
+        .bind(ws_id).bind(org_id).execute(&pool).await.expect("create workspace");
     for variant in &[
-        "ingest",
-        "embed",
-        "rule_eval",
-        "generate",
-        "critic",
-        "route",
-        "deliver",
+        "publish_started",
+        "first_event",
+        "first_signal",
+        "first_survivor",
+        "first_decision",
+        "stall",
+        "error",
     ] {
         let result: Result<_, sqlx::Error> =
-            sqlx::query(&format!("SELECT '{}'::pipeline_event_stage AS s", variant))
+            sqlx::query("INSERT INTO pipeline_events (workspace_id, stage) VALUES ($1, $2)")
+                .bind(ws_id)
+                .bind(*variant)
                 .execute(&pool)
                 .await;
         assert!(

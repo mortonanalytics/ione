@@ -110,10 +110,10 @@ async fn seed_is_reentrant() {
 
     // At least 13 canned stream events scoped to the demo workspace
     let event_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM stream_events
-         WHERE connector_id IN (
-             SELECT id FROM connectors WHERE workspace_id = $1
-         )",
+        "SELECT count(*) FROM stream_events se
+           JOIN streams s ON s.id = se.stream_id
+           JOIN connectors c ON c.id = s.connector_id
+          WHERE c.workspace_id = $1",
     )
     .bind(DEMO_WORKSPACE_ID)
     .fetch_one(&pool)
