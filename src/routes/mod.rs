@@ -25,6 +25,7 @@ pub mod conversations;
 pub mod feed;
 pub mod health;
 pub mod me;
+pub mod oauth;
 pub mod peers;
 pub mod pipeline_events;
 pub mod signals;
@@ -37,6 +38,13 @@ pub fn router(state: AppState) -> Router {
 
     // Routes that are always public (no auth middleware).
     let public = Router::new()
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::discovery),
+        )
+        .route("/mcp/oauth/register", post(oauth::register))
+        .route("/mcp/oauth/token", post(oauth::token))
+        .route("/mcp/oauth/revoke", post(oauth::revoke))
         .route("/api/v1/health", get(health::health))
         .route("/api/v1/health/ollama", get(health::health_ollama))
         .route("/auth/login", get(auth_routes::login))
@@ -46,6 +54,10 @@ pub fn router(state: AppState) -> Router {
 
     // Routes that run through the auth middleware.
     let protected = Router::new()
+        .route(
+            "/mcp/oauth/authorize",
+            get(oauth::authorize).post(oauth::authorize_consent),
+        )
         .route("/api/v1/activation", get(activation::list))
         .route("/api/v1/activation/events", post(activation::mark))
         .route("/api/v1/activation/dismiss", post(activation::dismiss))
