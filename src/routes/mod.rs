@@ -1,7 +1,7 @@
 use axum::{
     middleware::from_fn,
     middleware::from_fn_with_state,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use tower_http::{
@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", get(auth_routes::login))
         .route("/auth/callback", get(auth_routes::callback))
         .route("/auth/logout", post(auth_routes::logout))
+        .route("/api/v1/peers/callback", get(peers::callback))
         .with_state(state.clone());
 
     // Routes that run through the auth middleware.
@@ -141,6 +142,12 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/peers",
             get(peers::list_peers).post(peers::create_peer),
         )
+        .route("/api/v1/peers/:id/manifest", get(peers::get_manifest))
+        .route(
+            "/api/v1/peers/:id/authorize",
+            post(peers::authorize_allowlist),
+        )
+        .route("/api/v1/peers/:id", delete(peers::delete_peer))
         .route(
             "/api/v1/workspaces/:id/peers/:peerId/subscribe",
             post(peers::subscribe_peer),

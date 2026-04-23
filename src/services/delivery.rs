@@ -505,6 +505,31 @@ async fn process_peer(
         }
     };
 
+    let tool_name = "propose_artifact";
+    let allowlist = peer_repo.get_tool_allowlist(peer_id).await?;
+    if !allowlist.iter().any(|allowed| allowed == tool_name) {
+        info!(
+            routing_id = %routing_id,
+            peer_id = %peer_id,
+            tool_name = tool_name,
+            "peer_tool_blocked"
+        );
+        write_peer_audit(
+            &audit_repo,
+            workspace_id,
+            routing_id,
+            peer_id,
+            "peer_tool_blocked",
+            serde_json::json!({
+                "routing_id": routing_id,
+                "tool": tool_name,
+                "reason": "tool not in peer allowlist"
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
+
     // Sharing policy enforcement (outbound).
     use crate::services::peer::PolicyDecision;
     match check_sharing_policy(&peer.sharing_policy, severity, workspace_id) {

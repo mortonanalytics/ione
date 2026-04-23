@@ -1892,6 +1892,7 @@ dependencies = [
  "hmac 0.12.1",
  "jsonwebtoken",
  "lettre",
+ "once_cell",
  "pgvector",
  "phf",
  "rand 0.8.6",
