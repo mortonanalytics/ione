@@ -84,16 +84,113 @@ async function apiFetch(path, options) {
     if (errorBody?.error === 'demo_read_only') {
       showToast('The demo workspace is read-only. Switch to your workspace to make changes.');
     }
-    throw new ApiError(errorBody?.message || `HTTP ${resp.status}`, resp.status);
+    throw new ApiError(errorBody?.message || `HTTP ${resp.status}`, resp.status, errorBody);
   }
   return resp.json();
 }
 
 class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, body = null) {
     super(message);
     this.status = status;
+    this.body = body;
   }
+}
+
+async function pollOllamaHealth() {
+  try {
+    const res = await fetch('/api/v1/health/ollama');
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_err) {
+    return null;
+  }
+}
+
+function renderHealthDot(health) {
+  const btn = document.getElementById('health-dot');
+  if (!btn) return;
+  btn.hidden = false;
+  const ok = !!(health && health.ok);
+  btn.classList.toggle('health-dot--ok', ok);
+  btn.classList.toggle('health-dot--error', !ok);
+  btn.dataset.state = ok ? 'ok' : 'error';
+}
+
+function renderHealthPanel(health) {
+  const body = document.getElementById('health-panel-body');
+  if (!body) return;
+  if (!health) {
+    body.innerHTML = '<p>Could not reach the health endpoint.</p>';
+    return;
+  }
+  const missing = ((health.models && health.models.missing) || []).filter(Boolean);
+  if (health.ok) {
+    body.innerHTML = `<p>Ollama is reachable at <code>${escapeHtml(health.baseUrl)}</code>. All required models are pulled.</p>`;
+    return;
+  }
+  if (missing.length > 0) {
+    const items = missing.map((m) => {
+      const cmd = `ollama pull ${m}`;
+      return `<li><code>${escapeHtml(m)}</code> <button type="button" class="health-copy" data-cmd="${escapeHtml(cmd)}">Copy pull command</button></li>`;
+    }).join('');
+    body.innerHTML = `
+      <p>Ollama is reachable but some models are missing. Run these in a terminal:</p>
+      <ul>${items}</ul>`;
+  } else {
+    body.innerHTML = `
+      <p>Ollama is not reachable at <code>${escapeHtml(health.baseUrl)}</code>.</p>
+      <p>Run <code>ollama serve</code>, or set <code>OLLAMA_BASE_URL</code> to the correct host.</p>
+      ${health.error ? `<pre>${escapeHtml(health.error)}</pre>` : ''}`;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+}
+
+function renderChatRemediation(health, activeWorkspace) {
+  const el = document.getElementById('chat-remediation');
+  const promptEl = document.getElementById('prompt');
+  if (!el) return;
+  const isDemo = activeWorkspace && activeWorkspace.id === '00000000-0000-0000-0000-000000000d30';
+  if (isDemo) {
+    el.hidden = true;
+    if (promptEl) {
+      promptEl.disabled = false;
+      promptEl.removeAttribute('aria-describedby');
+    }
+    return;
+  }
+  if (!health || health.ok) {
+    el.hidden = true;
+    if (promptEl) {
+      promptEl.disabled = false;
+      promptEl.removeAttribute('aria-describedby');
+    }
+    return;
+  }
+  const missing = ((health.models && health.models.missing) || []).filter(Boolean);
+  const modelName = missing[0] || (health.models && health.models.required && health.models.required[0]) || 'llama3.2:latest';
+  const msg = missing.length
+    ? `Chat needs the '${escapeHtml(modelName)}' model. Run <code>ollama pull ${escapeHtml(modelName)}</code>, then click retry.`
+    : `Chat needs Ollama running. Start it with <code>ollama serve</code>, then click retry.`;
+  el.innerHTML = `<p>${msg}</p><button type="button" id="health-retry">Retry</button>`;
+  el.hidden = false;
+  if (promptEl) {
+    promptEl.disabled = true;
+    promptEl.setAttribute('aria-describedby', 'chat-remediation');
+  }
+}
+
+let lastHealth = null;
+
+async function refreshHealth() {
+  lastHealth = await pollOllamaHealth();
+  renderHealthDot(lastHealth);
+  renderChatRemediation(lastHealth, window.activeWorkspace || null);
 }
 
 function listConversations() {
@@ -166,6 +263,56 @@ function appendMessage(role, text) {
   transcript.scrollTop = transcript.scrollHeight;
 }
 
+function appendOllamaFailureCard(errorBody, convId, lastPrompt) {
+  const div = document.createElement('div');
+  div.className = 'message assistant chat-failure-card';
+  const pullCommand = errorBody?.pullCommand || (errorBody?.model ? `ollama pull ${errorBody.model}` : 'ollama serve');
+  const message = errorBody?.message || 'Ollama is unavailable for this chat request.';
+  div.innerHTML = `
+    <p>${escapeHtml(message)}</p>
+    <p>Run <code>${escapeHtml(pullCommand)}</code>, then retry.</p>
+    <button type="button">Retry</button>`;
+  const retryBtn = div.querySelector('button');
+  retryBtn.addEventListener('click', async () => {
+    retryBtn.disabled = true;
+    sendBtn.disabled = true;
+    setStatus('Loading...');
+    try {
+      const assistantMsg = await postMessage(convId, lastPrompt);
+      div.remove();
+      appendMessage(assistantMsg.role, assistantMsg.content);
+      clearStatus();
+      await refreshHealth();
+    } catch (err) {
+      const nextBody = err.body || null;
+      if (nextBody?.error === 'ollama_unreachable' || nextBody?.error === 'ollama_model_missing') {
+        div.remove();
+        handleOllamaChatFailure(nextBody, convId, lastPrompt);
+      } else {
+        setStatus('Error: ' + err.message);
+        retryBtn.disabled = false;
+      }
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+  transcript.appendChild(div);
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
+function handleOllamaChatFailure(errorBody, convId, lastPrompt) {
+  const model = errorBody.model || '';
+  lastHealth = {
+    ok: false,
+    baseUrl: errorBody.baseUrl,
+    models: { required: model ? [model] : [], missing: model ? [model] : [], available: [] },
+    error: errorBody.message,
+  };
+  renderHealthDot(lastHealth);
+  renderChatRemediation(lastHealth, window.activeWorkspace);
+  appendOllamaFailureCard(errorBody, convId, lastPrompt);
+}
+
 function clearTranscript() {
   transcript.innerHTML = '';
 }
@@ -220,12 +367,14 @@ function workspaceLabel(ws) {
 
 function setActiveWorkspace(ws) {
   activeWorkspace = ws;
+  window.activeWorkspace = ws;
   localStorage.setItem(ACTIVE_WORKSPACE_KEY, ws.id);
 
   workspaceNameEl.textContent = workspaceLabel(ws);
   workspaceDomainEl.textContent = ws.domain || '';
   renderChatChips(ws);
   renderWorkspaceLock(ws);
+  renderChatRemediation(lastHealth, ws);
 
   const isClosed = workspaceIsClosed(ws);
   newChatBtn.hidden = isClosed;
@@ -551,6 +700,12 @@ form.addEventListener('submit', async (e) => {
 
     clearStatus();
   } catch (err) {
+    const errorBody = err.body || null;
+    if (errorBody?.error === 'ollama_unreachable' || errorBody?.error === 'ollama_model_missing') {
+      handleOllamaChatFailure(errorBody, convId, content);
+      clearStatus();
+      return;
+    }
     setStatus('Error: ' + err.message);
     // User message stays in transcript so they can retry.
   } finally {
@@ -1677,9 +1832,12 @@ approvalsFilterStatus.addEventListener('change', loadApprovals);
     if (initial) {
       // Call directly (not setActiveWorkspace) to avoid clearing transcript before convs load.
       activeWorkspace = initial;
+      window.activeWorkspace = initial;
       localStorage.setItem(ACTIVE_WORKSPACE_KEY, initial.id);
       workspaceNameEl.textContent = workspaceLabel(initial);
       workspaceDomainEl.textContent = initial.domain || '';
+      renderChatChips(initial);
+      renderWorkspaceLock(initial);
       const isClosed = workspaceIsClosed(initial);
       newChatBtn.hidden = isClosed;
       workspaceClosedNotice.hidden = !isClosed;
@@ -1701,7 +1859,45 @@ approvalsFilterStatus.addEventListener('change', loadApprovals);
   } catch (err) {
     setStatus('Error loading conversations: ' + err.message);
   }
+
+  await refreshHealth();
+  setInterval(refreshHealth, 15000);
 })();
+
+const healthDot = document.getElementById('health-dot');
+const healthPanel = document.getElementById('health-panel');
+const healthPanelClose = document.getElementById('health-panel-close');
+const chatRemediation = document.getElementById('chat-remediation');
+
+if (healthDot && healthPanel) {
+  healthDot.addEventListener('click', () => {
+    const willShow = healthPanel.hidden;
+    if (willShow) renderHealthPanel(lastHealth);
+    healthPanel.hidden = !willShow;
+  });
+}
+
+if (healthPanelClose && healthPanel) {
+  healthPanelClose.addEventListener('click', () => {
+    healthPanel.hidden = true;
+  });
+}
+
+if (healthPanel) {
+  healthPanel.addEventListener('click', async (e) => {
+    const copyBtn = e.target.closest('.health-copy');
+    if (!copyBtn) return;
+    await navigator.clipboard.writeText(copyBtn.dataset.cmd || '');
+  });
+}
+
+if (chatRemediation) {
+  chatRemediation.addEventListener('click', (e) => {
+    if (e.target && e.target.id === 'health-retry') {
+      refreshHealth();
+    }
+  });
+}
 
 /* ── MCP endpoint copy button (Phase 11) ── */
 const mcpCopyBtn = document.getElementById('mcp-copy-btn');

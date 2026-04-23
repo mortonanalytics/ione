@@ -10,6 +10,15 @@
   <!-- Top bar: user identity + auth actions -->
   <header id="top-bar">
     <span id="user-label" aria-live="polite"></span>
+    <button id="health-dot" class="health-dot" aria-label="Ollama health status" aria-live="polite" hidden>
+      <span class="health-dot-indicator" aria-hidden="true"></span>
+      <span class="health-dot-label">Ollama</span>
+    </button>
+    <div id="health-panel" class="health-panel" role="dialog" aria-label="Ollama health details" hidden>
+      <h3 id="health-panel-title">Ollama</h3>
+      <div id="health-panel-body"></div>
+      <button id="health-panel-close" type="button">Close</button>
+    </div>
     <button id="login-btn" hidden>Sign in</button>
     <button id="logout-btn" hidden>Sign out</button>
   </header>
@@ -53,6 +62,7 @@
       <!-- Chat panel -->
       <div id="panel-chat" role="tabpanel" aria-labelledby="tab-chat">
         <div id="transcript" aria-live="polite"></div>
+        <div id="chat-remediation" class="chat-remediation" hidden role="status" aria-live="polite"></div>
         <div id="chat-chips" class="chat-chips" hidden>
           <button type="button" class="chip" data-prompt="What wildfires are active near populated areas right now?">
             What wildfires are active near populated areas right now?
