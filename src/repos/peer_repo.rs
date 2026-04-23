@@ -23,7 +23,9 @@ impl PeerRepo {
         sqlx::query_as::<_, Peer>(
             "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy)
              VALUES ($1, $2, $3, $4)
-             RETURNING id, name, mcp_url, issuer_id, sharing_policy, status, created_at",
+             RETURNING id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+                 oauth_client_id, access_token_hash, refresh_token_hash, token_expires_at,
+                 tool_allowlist",
         )
         .bind(name)
         .bind(mcp_url)
@@ -36,7 +38,9 @@ impl PeerRepo {
 
     pub async fn list(&self) -> anyhow::Result<Vec<Peer>> {
         sqlx::query_as::<_, Peer>(
-            "SELECT id, name, mcp_url, issuer_id, sharing_policy, status, created_at
+            "SELECT id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+                 oauth_client_id, access_token_hash, refresh_token_hash, token_expires_at,
+                 tool_allowlist
              FROM peers
              ORDER BY created_at DESC",
         )
@@ -47,7 +51,9 @@ impl PeerRepo {
 
     pub async fn get(&self, id: Uuid) -> anyhow::Result<Option<Peer>> {
         sqlx::query_as::<_, Peer>(
-            "SELECT id, name, mcp_url, issuer_id, sharing_policy, status, created_at
+            "SELECT id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+                 oauth_client_id, access_token_hash, refresh_token_hash, token_expires_at,
+                 tool_allowlist
              FROM peers
              WHERE id = $1",
         )
@@ -62,13 +68,101 @@ impl PeerRepo {
             "UPDATE peers
              SET status = $2
              WHERE id = $1
-             RETURNING id, name, mcp_url, issuer_id, sharing_policy, status, created_at",
+             RETURNING id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+                 oauth_client_id, access_token_hash, refresh_token_hash, token_expires_at,
+                 tool_allowlist",
         )
         .bind(id)
         .bind(status)
         .fetch_one(&self.pool)
         .await
         .context("failed to update peer status")
+    }
+
+    pub async fn begin_oauth(&self, peer_id: Uuid, oauth_client_id: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE peers
+             SET oauth_client_id = $1,
+                 status = 'pending_oauth'
+             WHERE id = $2",
+        )
+        .bind(oauth_client_id)
+        .bind(peer_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to begin peer oauth")?;
+        Ok(())
+    }
+
+    pub async fn set_tokens(
+        &self,
+        peer_id: Uuid,
+        access_token_hash: &str,
+        refresh_token_hash: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE peers
+             SET access_token_hash = $1,
+                 refresh_token_hash = $2,
+                 token_expires_at = $3,
+                 status = 'pending_allowlist'
+             WHERE id = $4",
+        )
+        .bind(access_token_hash)
+        .bind(refresh_token_hash)
+        .bind(expires_at)
+        .bind(peer_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to set peer oauth tokens")?;
+        Ok(())
+    }
+
+    pub async fn set_allowlist(
+        &self,
+        peer_id: Uuid,
+        tool_allowlist: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE peers
+             SET tool_allowlist = $1,
+                 status = 'active'
+             WHERE id = $2",
+        )
+        .bind(tool_allowlist)
+        .bind(peer_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to set peer tool allowlist")?;
+        Ok(())
+    }
+
+    pub async fn set_status(&self, peer_id: Uuid, status: &str) -> anyhow::Result<()> {
+        sqlx::query("UPDATE peers SET status = $1::peer_status WHERE id = $2")
+            .bind(status)
+            .bind(peer_id)
+            .execute(&self.pool)
+            .await
+            .context("failed to set peer status")?;
+        Ok(())
+    }
+
+    pub async fn get_tool_allowlist(&self, peer_id: Uuid) -> anyhow::Result<Vec<String>> {
+        let val: serde_json::Value =
+            sqlx::query_scalar("SELECT tool_allowlist FROM peers WHERE id = $1")
+                .bind(peer_id)
+                .fetch_one(&self.pool)
+                .await
+                .context("failed to get peer tool allowlist")?;
+
+        Ok(val
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect())
     }
 
     /// Find the mcp connector in a workspace that points at the given peer's mcp_url.
