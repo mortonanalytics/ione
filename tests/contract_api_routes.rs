@@ -1,18 +1,18 @@
-/// Contract API route tests — assert that every route defined in the contract
-/// is registered in the router (i.e., returns anything other than 404 or 405).
-///
-/// These tests do NOT assert success codes or response shape — that belongs to
-/// implementation tests. The sole contract is: the path is registered.
-///
-/// All tests are expected to FAIL until the routes are implemented.
-///
-/// Prerequisites:
-///   docker compose up -d postgres
-///   DATABASE_URL=postgres://ione:ione@localhost:5433/ione
-///
-/// Run:
-///   DATABASE_URL=postgres://ione:ione@localhost:5433/ione \
-///     cargo test --test contract_api_routes -- --ignored --test-threads=1
+//! Contract API route tests — assert that every route defined in the contract
+//! is registered in the router (i.e., returns anything other than 404 or 405).
+//!
+//! These tests do NOT assert success codes or response shape — that belongs to
+//! implementation tests. The sole contract is: the path is registered.
+//!
+//! All tests are expected to FAIL until the routes are implemented.
+//!
+//! Prerequisites:
+//!   docker compose up -d postgres
+//!   DATABASE_URL=postgres://ione:ione@localhost:5433/ione
+//!
+//! Run:
+//!   DATABASE_URL=postgres://ione:ione@localhost:5433/ione \
+//!     cargo test --test contract_api_routes -- --ignored --test-threads=1
 
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::net::SocketAddr;

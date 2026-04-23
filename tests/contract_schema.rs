@@ -1,16 +1,16 @@
-/// Contract schema tests — encode the target DB schema from the ione-complete-contract.
-///
-/// Every test asserts that a table, column, or constraint defined in the contract
-/// exists in the live Postgres database. All tests are expected to FAIL until the
-/// migrations implementing the contract are written.
-///
-/// Prerequisites:
-///   docker compose up -d postgres
-///   DATABASE_URL=postgres://ione:ione@localhost:5433/ione
-///
-/// Run:
-///   DATABASE_URL=postgres://ione:ione@localhost:5433/ione \
-///     cargo test --test contract_schema -- --ignored --test-threads=1
+//! Contract schema tests — encode the target DB schema from the ione-complete-contract.
+//!
+//! Every test asserts that a table, column, or constraint defined in the contract
+//! exists in the live Postgres database. All tests are expected to FAIL until the
+//! migrations implementing the contract are written.
+//!
+//! Prerequisites:
+//!   docker compose up -d postgres
+//!   DATABASE_URL=postgres://ione:ione@localhost:5433/ione
+//!
+//! Run:
+//!   DATABASE_URL=postgres://ione:ione@localhost:5433/ione \
+//!     cargo test --test contract_schema -- --ignored --test-threads=1
 
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;

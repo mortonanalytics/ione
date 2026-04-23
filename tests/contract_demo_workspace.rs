@@ -1,16 +1,16 @@
-/// Contract tests for the "Demo Workspace" slice (Slice 1).
-///
-/// These tests encode the *target* behavior.  Tests 1 and 5 are implemented
-/// (seeder + purge land in T1.1).  Tests 2, 3, 4 remain red until T1.2
-/// (canned chat) and T1.3 (write guard) land.
-///
-/// Prerequisites:
-///   docker compose up -d postgres
-///   DATABASE_URL=postgres://ione:ione@localhost:5433/ione
-///
-/// Run:
-///   DATABASE_URL=postgres://ione:ione@localhost:5433/ione IONE_SEED_DEMO=1 \
-///     cargo test --test contract_demo_workspace -- --ignored --test-threads=1
+//! Contract tests for the "Demo Workspace" slice (Slice 1).
+//!
+//! These tests encode the *target* behavior.  Tests 1 and 5 are implemented
+//! (seeder + purge land in T1.1).  Tests 2, 3, 4 remain red until T1.2
+//! (canned chat) and T1.3 (write guard) land.
+//!
+//! Prerequisites:
+//!   docker compose up -d postgres
+//!   DATABASE_URL=postgres://ione:ione@localhost:5433/ione
+//!
+//! Run:
+//!   DATABASE_URL=postgres://ione:ione@localhost:5433/ione IONE_SEED_DEMO=1 \
+//!     cargo test --test contract_demo_workspace -- --ignored --test-threads=1
 
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool};

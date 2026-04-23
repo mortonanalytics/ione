@@ -1,17 +1,17 @@
-/// Contract error envelope tests — assert the canonical error shape from the contract.
-///
-/// Each test sends a request that MUST produce a specific error code and verifies
-/// the JSON envelope matches `{ error: "<kind>", message: <non-empty string>, ... }`.
-///
-/// All tests are expected to FAIL until the error handling is implemented.
-///
-/// Prerequisites:
-///   docker compose up -d postgres
-///   DATABASE_URL=postgres://ione:ione@localhost:5433/ione
-///
-/// Run:
-///   DATABASE_URL=postgres://ione:ione@localhost:5433/ione \
-///     cargo test --test contract_errors -- --ignored --test-threads=1
+//! Contract error envelope tests — assert the canonical error shape from the contract.
+//!
+//! Each test sends a request that MUST produce a specific error code and verifies
+//! the JSON envelope matches `{ error: "<kind>", message: <non-empty string>, ... }`.
+//!
+//! All tests are expected to FAIL until the error handling is implemented.
+//!
+//! Prerequisites:
+//!   docker compose up -d postgres
+//!   DATABASE_URL=postgres://ione:ione@localhost:5433/ione
+//!
+//! Run:
+//!   DATABASE_URL=postgres://ione:ione@localhost:5433/ione \
+//!     cargo test --test contract_errors -- --ignored --test-threads=1
 
 use serde_json::Value;
 use sqlx::{postgres::PgPoolOptions, PgPool};
