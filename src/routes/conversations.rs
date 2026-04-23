@@ -99,7 +99,7 @@ pub(crate) async fn post_message(
     }
 
     let conv_repo = ConversationRepo::new(state.pool.clone());
-    conv_repo
+    let conv = conv_repo
         .get(id)
         .await
         .map_err(AppError::Internal)?
@@ -112,13 +112,22 @@ pub(crate) async fn post_message(
         .await
         .map_err(AppError::Internal)?;
 
+    let history = msg_repo.list(id).await.map_err(AppError::Internal)?;
+
+    if conv.workspace_id == crate::demo::DEMO_WORKSPACE_ID {
+        let reply = crate::demo::canned_chat::canned_response(&content);
+        let assistant_msg = msg_repo
+            .append(id, MessageRole::Assistant, reply, Some("canned"))
+            .await
+            .map_err(AppError::Internal)?;
+        return Ok(Json(assistant_msg));
+    }
+
     let model = req
         .model
         .as_deref()
         .unwrap_or(&state.config.ollama_model)
         .to_string();
-
-    let history = msg_repo.list(id).await.map_err(AppError::Internal)?;
     let prompt = build_prompt(&history, &model);
 
     let reply = state.ollama.generate(&model, &prompt).await?;
