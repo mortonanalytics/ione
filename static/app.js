@@ -72,22 +72,42 @@ let activeConvId   = null;   // UUID string or null
 let conversations  = [];     // Conversation[] newest-first (all workspaces, filtered client-side)
 let workspaces     = [];     // Workspace[]
 let activeWorkspace = null;  // Workspace | null
+let trackedDemoView = false;
 
 const ACTIVE_WORKSPACE_KEY = 'ione.activeWorkspaceId';
 
 /* ── API helpers ── */
 
-async function apiFetch(path, options) {
-  const resp = await fetch(path, options);
+async function apiFetch(path, options = {}) {
+  const { onFieldError, skipErrorToast = false, ...fetchOptions } = options || {};
+  let resp;
+  try {
+    resp = await fetch(path, fetchOptions);
+  } catch (err) {
+    if (!skipErrorToast) {
+      showError('network_error', 'Network request failed.', 'Check your connection and try again.');
+    }
+    throw new ApiError(err.message || 'Network request failed.', 0, null);
+  }
   if (!resp.ok) {
     let errorBody = null;
     try { errorBody = await resp.json(); } catch (_) {}
     if (errorBody?.error === 'demo_read_only') {
       showToast('The demo workspace is read-only. Switch to your workspace to make changes.');
+    } else if (errorBody?.field && typeof onFieldError === 'function') {
+      onFieldError(errorBody.field, errorBody);
+    } else if (!skipErrorToast) {
+      showError(
+        errorBody?.error || `http_${resp.status}`,
+        errorBody?.message || `HTTP ${resp.status}`,
+        errorBody?.hint
+      );
     }
     throw new ApiError(errorBody?.message || `HTTP ${resp.status}`, resp.status, errorBody);
   }
-  return resp.json();
+  if (resp.status === 204) return null;
+  const text = await resp.text();
+  return text ? JSON.parse(text) : null;
 }
 
 class ApiError extends Error {
@@ -98,11 +118,17 @@ class ApiError extends Error {
   }
 }
 
+function track(eventKind, detail = null, workspaceId = null) {
+  fetch('/api/v1/telemetry/events', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ eventKind, detail, workspaceId }),
+  }).catch(() => {});
+}
+
 async function pollOllamaHealth() {
   try {
-    const res = await fetch('/api/v1/health/ollama');
-    if (!res.ok) return null;
-    return await res.json();
+    return await apiFetch('/api/v1/health/ollama');
   } catch (_err) {
     return null;
   }
@@ -381,14 +407,32 @@ function isDemoWorkspace(ws) {
   return ws && ws.id === DEMO_WORKSPACE_ID;
 }
 
-function showToast(message, { durationMs = 5000 } = {}) {
+function showToast(message, { durationMs = 5000, onRetry = null } = {}) {
   const container = document.getElementById('toast-container');
   if (!container) return;
   const toast = document.createElement('div');
   toast.className = 'toast toast--error';
-  toast.textContent = message;
+  const msg = document.createElement('span');
+  msg.textContent = message;
+  toast.appendChild(msg);
+  if (typeof onRetry === 'function') {
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'toast-retry';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', () => {
+      toast.remove();
+      onRetry();
+    });
+    toast.appendChild(retry);
+  }
   container.appendChild(toast);
   setTimeout(() => toast.remove(), durationMs);
+}
+
+function showError(kind, message, hint, onRetry) {
+  const full = hint ? `${message} ${hint}` : message;
+  showToast(full, { durationMs: 8000, onRetry });
 }
 
 function renderChatChips(ws) {
@@ -404,13 +448,15 @@ function renderWorkspaceLock(ws) {
 }
 
 async function fetchActivation(workspaceId, track) {
-  const res = await fetch(`/api/v1/activation?workspace_id=${encodeURIComponent(workspaceId)}&track=${encodeURIComponent(track)}`);
-  if (!res.ok) return null;
-  return await res.json();
+  try {
+    return await apiFetch(`/api/v1/activation?workspace_id=${encodeURIComponent(workspaceId)}&track=${encodeURIComponent(track)}`);
+  } catch (_err) {
+    return null;
+  }
 }
 
 async function markActivation(workspaceId, track, stepKey) {
-  await fetch('/api/v1/activation/events', {
+  await apiFetch('/api/v1/activation/events', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ workspaceId, track, stepKey }),
@@ -418,7 +464,7 @@ async function markActivation(workspaceId, track, stepKey) {
 }
 
 async function dismissActivation(workspaceId, track) {
-  await fetch('/api/v1/activation/dismiss', {
+  await apiFetch('/api/v1/activation/dismiss', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ workspaceId, track }),
@@ -432,17 +478,17 @@ function trackForWorkspace(ws) {
 async function renderActivationTracker(ws) {
   const section = document.getElementById('activation-tracker');
   if (!section || !ws) return;
-  const track = trackForWorkspace(ws);
-  const state = await fetchActivation(ws.id, track);
+  const activationTrack = trackForWorkspace(ws);
+  const state = await fetchActivation(ws.id, activationTrack);
   if (!activeWorkspace || activeWorkspace.id !== ws.id) return;
   if (!state || state.dismissed) {
     section.hidden = true;
     return;
   }
   section.hidden = false;
-  section.dataset.track = track;
+  section.dataset.track = activationTrack;
   document.getElementById('activation-title').textContent =
-    track === 'demo_walkthrough' ? 'Demo walkthrough' : 'Get started';
+    activationTrack === 'demo_walkthrough' ? 'Demo walkthrough' : 'Get started';
 
   const list = document.getElementById('activation-steps');
   list.innerHTML = '';
@@ -456,9 +502,13 @@ async function renderActivationTracker(ws) {
   });
 
   const cta = document.getElementById('activation-cta');
-  if (allCompleted && track === 'demo_walkthrough') {
+  const wasCtaHidden = cta.hidden;
+  if (allCompleted && activationTrack === 'demo_walkthrough') {
     cta.hidden = false;
     list.hidden = true;
+    if (wasCtaHidden) {
+      track('demo_cta_shown', null, ws.id);
+    }
   } else {
     cta.hidden = true;
     list.hidden = false;
@@ -481,6 +531,10 @@ function setActiveWorkspace(ws) {
 
   activeWorkspace = ws;
   window.activeWorkspace = ws;
+  if (isDemoWorkspace(ws) && !trackedDemoView) {
+    trackedDemoView = true;
+    track('demo_viewed', null, ws.id);
+  }
   localStorage.setItem(ACTIVE_WORKSPACE_KEY, ws.id);
 
   workspaceNameEl.textContent = workspaceLabel(ws);
@@ -844,7 +898,9 @@ document.querySelectorAll('#chat-chips .chip').forEach((btn) => {
   btn.addEventListener('click', () => {
     const promptEl = document.getElementById('prompt');
     if (!promptEl) return;
-    promptEl.value = btn.dataset.prompt || btn.textContent.trim();
+    const prompt = btn.dataset.prompt || btn.textContent.trim();
+    track('demo_prompt_clicked', { prompt }, window.activeWorkspace?.id || null);
+    promptEl.value = prompt;
     const form = document.getElementById('chat-form');
     form?.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
   });
@@ -861,6 +917,7 @@ document.getElementById('activation-dismiss')?.addEventListener('click', async (
 
 // Wire activation CTA.
 document.getElementById('activation-cta-primary')?.addEventListener('click', async () => {
+  track('demo_cta_clicked', null, window.activeWorkspace?.id || null);
   try {
     const created = await createWorkspace('My Workspace', 'generic', 'continuous', null);
     await loadWorkspaces();
@@ -1081,9 +1138,7 @@ function clearConnectorsStatus() {
 
 async function loadConnectorTimeline(workspaceId, connectorId, listEl) {
   try {
-    const res = await fetch(`/api/v1/workspaces/${workspaceId}/events?connector_id=${connectorId}&connectorId=${connectorId}&limit=10`);
-    if (!res.ok) return;
-    const data = await res.json();
+    const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/events?connector_id=${connectorId}&connectorId=${connectorId}&limit=10`);
     listEl.innerHTML = '';
     (data.items || []).forEach((ev) => listEl.appendChild(renderTimelineItem(ev)));
   } catch (_err) {
@@ -1532,13 +1587,17 @@ acTestBtn?.addEventListener('click', async () => {
   acErrorEl.hidden = true;
   try {
     const payload = buildACPayload();
-    const res = await fetch('/api/v1/connectors/validate', {
+    const body = await apiFetch('/api/v1/connectors/validate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      onFieldError: (_field, body) => {
+        const hint = body.hint ? ` - ${body.hint}` : '';
+        acTestResultEl.textContent = `✗ ${body.message || body.error || 'Validation failed'}${hint}`;
+        acTestResultEl.className = 'ac-test-result ac-test-result--error';
+      },
     });
-    const body = await res.json();
-    if (res.ok && body.ok) {
+    if (body.ok) {
       acTestResultEl.textContent = `✓ ${JSON.stringify(body.sample || {})}`;
       acTestResultEl.className = 'ac-test-result ac-test-result--ok';
       acSubmitBtn.disabled = false;
@@ -1565,17 +1624,16 @@ async function submitAddConnectorWizard(e) {
     const ws = window.activeWorkspace;
     if (!ws) throw new Error('No active workspace.');
     const payload = buildACPayload();
-    const res = await fetch(`/api/v1/workspaces/${ws.id}/connectors`, {
+    const body = await apiFetch(`/api/v1/workspaces/${ws.id}/connectors`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      onFieldError: (_field, body) => {
+        const hint = body.hint ? ` - ${body.hint}` : '';
+        acErrorEl.textContent = `${body.message || body.error || 'Connector creation failed'}${hint}`;
+        acErrorEl.hidden = false;
+      },
     });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      const hint = body.hint ? ` — ${body.hint}` : '';
-      throw new Error(`${body.message || body.error || res.statusText}${hint}`);
-    }
-    const body = await res.json();
     const connector = body.connector || body;
     showAcProgress(connector);
     if (typeof loadConnectors === 'function') loadConnectors(ws.id);
@@ -2255,6 +2313,10 @@ approvalsFilterStatus.addEventListener('change', loadApprovals);
       // Call directly (not setActiveWorkspace) to avoid clearing transcript before convs load.
       activeWorkspace = initial;
       window.activeWorkspace = initial;
+      if (isDemoWorkspace(initial) && !trackedDemoView) {
+        trackedDemoView = true;
+        track('demo_viewed', null, initial.id);
+      }
       localStorage.setItem(ACTIVE_WORKSPACE_KEY, initial.id);
       workspaceNameEl.textContent = workspaceLabel(initial);
       workspaceDomainEl.textContent = initial.domain || '';
@@ -2350,9 +2412,7 @@ function buildRawJsonConfig(mcpUrl) {
 
 async function loadMcpClients() {
   try {
-    const res = await fetch('/api/v1/mcp/clients');
-    if (!res.ok) return;
-    const data = await res.json();
+    const data = await apiFetch('/api/v1/mcp/clients');
     const body = document.getElementById('mcp-clients-body');
     if (!body) return;
     if (!data.items || data.items.length === 0) {
@@ -2374,7 +2434,7 @@ async function loadMcpClients() {
       btn.addEventListener('click', async () => {
         const id = btn.dataset.clientRowId;
         if (!id) return;
-        await fetch(`/api/v1/mcp/clients/${id}`, { method: 'DELETE' }).catch(() => {});
+        await apiFetch(`/api/v1/mcp/clients/${id}`, { method: 'DELETE' }).catch(() => {});
         loadMcpClients();
       });
     });
@@ -2382,6 +2442,133 @@ async function loadMcpClients() {
 }
 
 let mcpClientsInterval = null;
+let currentPeerId = null;
+
+document.getElementById('peer-federate-open-btn')?.addEventListener('click', () => {
+  const dialog = document.getElementById('peer-federate-dialog');
+  showPeerStep('url');
+  const input = document.getElementById('peer-federate-url');
+  if (input) input.value = '';
+  const errEl = document.getElementById('peer-federate-allowlist-error');
+  if (errEl) {
+    errEl.hidden = true;
+    errEl.textContent = '';
+  }
+  dialog?.showModal?.();
+});
+
+document.getElementById('peer-federate-close')?.addEventListener('click', closePeerDialog);
+document.getElementById('peer-federate-close-done')?.addEventListener('click', closePeerDialog);
+
+function closePeerDialog() {
+  const dialog = document.getElementById('peer-federate-dialog');
+  dialog?.close?.();
+  currentPeerId = null;
+}
+
+function showPeerStep(step) {
+  ['url', 'waiting', 'allowlist', 'done'].forEach((s) => {
+    const el = document.getElementById(`peer-federate-step-${s}`);
+    if (el) el.hidden = s !== step;
+  });
+}
+
+document.getElementById('peer-federate-start')?.addEventListener('click', async () => {
+  const input = document.getElementById('peer-federate-url');
+  const url = input?.value.trim() || '';
+  if (!url) return;
+  try {
+    const data = await apiFetch('/api/v1/peers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ peerUrl: url }),
+      skipErrorToast: true,
+    });
+    currentPeerId = data.id;
+    track('peer_federation_started', null, window.activeWorkspace?.id || null);
+    window.open(data.authorizeUrl, '_blank', 'noopener,noreferrer');
+    showPeerStep('waiting');
+  } catch (_err) {
+    showError('peer_unreachable', `Couldn't reach ${url}.`, 'Check the URL and try again.');
+  }
+});
+
+document.getElementById('peer-federate-manifest')?.addEventListener('click', async () => {
+  if (!currentPeerId) return;
+  const hint = document.getElementById('peer-federate-waiting-hint');
+  if (hint) hint.textContent = 'Fetching tools...';
+  try {
+    const data = await apiFetch(`/api/v1/peers/${currentPeerId}/manifest`, { skipErrorToast: true });
+    renderPeerTools(data.tools || []);
+    showPeerStep('allowlist');
+  } catch (_err) {
+    if (hint) {
+      hint.textContent = "Couldn't fetch tools. The peer may still be completing sign-in; try again in a moment.";
+    }
+  }
+});
+
+function renderPeerTools(tools) {
+  const fieldset = document.getElementById('peer-federate-tool-list');
+  if (!fieldset) return;
+  const legend = fieldset.querySelector('legend');
+  fieldset.innerHTML = '';
+  if (legend) fieldset.appendChild(legend);
+  if (!tools.length) {
+    const p = document.createElement('p');
+    p.className = 'peer-federate-hint';
+    p.textContent = 'The peer did not return any tools. You can still confirm with no tools allowed (deny-all), or cancel and retry.';
+    fieldset.appendChild(p);
+    return;
+  }
+  tools.forEach((tool) => {
+    const wrap = document.createElement('label');
+    wrap.className = 'peer-federate-tool';
+
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = tool.name || '';
+
+    const name = document.createElement('span');
+    name.className = 'peer-federate-tool-name';
+    name.textContent = tool.name || '(unnamed tool)';
+
+    const desc = document.createElement('span');
+    desc.className = 'peer-federate-tool-desc';
+    desc.textContent = tool.description || '';
+
+    wrap.appendChild(input);
+    wrap.appendChild(name);
+    wrap.appendChild(desc);
+    fieldset.appendChild(wrap);
+  });
+}
+
+document.getElementById('peer-federate-confirm')?.addEventListener('click', async () => {
+  if (!currentPeerId) return;
+  const errEl = document.getElementById('peer-federate-allowlist-error');
+  if (errEl) {
+    errEl.hidden = true;
+    errEl.textContent = '';
+  }
+  const checked = Array.from(document.querySelectorAll('#peer-federate-tool-list input[type=checkbox]:checked'))
+    .map((checkbox) => checkbox.value);
+  try {
+    await apiFetch(`/api/v1/peers/${currentPeerId}/authorize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ toolAllowlist: checked }),
+      skipErrorToast: true,
+    });
+    track('peer_federation_activated', { toolCount: checked.length }, window.activeWorkspace?.id || null);
+    showPeerStep('done');
+  } catch (err) {
+    if (errEl) {
+      errEl.textContent = err.message || String(err);
+      errEl.hidden = false;
+    }
+  }
+});
 
 function openMcpConnectDialog() {
   const dialog = document.getElementById('mcp-connect-dialog');
@@ -2398,10 +2585,28 @@ function openMcpConnectDialog() {
   const rawJson = document.getElementById('mcp-tile-raw-json');
   if (rawJson) rawJson.textContent = buildRawJsonConfig(mcpUrl);
 
+  wireMcpTileTelemetry();
   loadMcpClients();
   if (mcpClientsInterval) clearInterval(mcpClientsInterval);
   mcpClientsInterval = setInterval(loadMcpClients, 15000);
   dialog?.showModal?.();
+}
+
+function wireMcpTileTelemetry() {
+  const tiles = [
+    ['cursor', document.getElementById('mcp-tile-cursor')],
+    ['claudeDesktop', document.getElementById('mcp-tile-claude-desktop-url')?.closest('.mcp-tile')],
+    ['claudeCode', document.getElementById('mcp-tile-claude-code-cmd')?.closest('.mcp-tile')],
+    ['vscode', document.getElementById('mcp-tile-vscode')],
+    ['other', document.getElementById('mcp-tile-raw-json')?.closest('.mcp-tile')],
+  ];
+  tiles.forEach(([client, tile]) => {
+    if (!tile || tile.dataset.telemetryBound === 'true') return;
+    tile.dataset.telemetryBound = 'true';
+    tile.addEventListener('click', () => {
+      track('mcp_install_tile_clicked', { client }, window.activeWorkspace?.id || null);
+    });
+  });
 }
 
 function closeMcpConnectDialog() {

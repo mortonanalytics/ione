@@ -59,6 +59,7 @@
         <span id="mcp-url" class="mcp-url">http://localhost:3000/mcp</span>
         <button id="mcp-copy-btn" type="button" class="mcp-copy-btn" aria-label="Copy MCP URL">Copy</button>
         <button type="button" id="mcp-connect-open-btn">Connect to MCP</button>
+        <button id="peer-federate-open-btn" type="button">+ Federate peer</button>
       </div>
       <p id="workspace-closed-notice" hidden>This workspace is closed.</p>
       <ul id="conv-list" role="list"></ul>
@@ -160,7 +161,7 @@
       <div id="panel-connectors" role="tabpanel" aria-labelledby="tab-connectors" hidden>
         <div id="connectors-header">
           <button id="add-connector-btn" type="button">+ Add connector</button>
-          <span id="sse-reconnect" class="sse-reconnect" hidden>Reconnecting live updates…</span>
+          <span id="sse-reconnect" class="sse-reconnect" aria-live="polite" hidden>Reconnecting live updates…</span>
         </div>
         <div id="connectors-status" aria-live="polite"></div>
         <ul id="connector-list" role="list"></ul>
@@ -315,6 +316,48 @@
           <tr><td colspan="4" class="mcp-clients-empty">No clients connected yet.</td></tr>
         </tbody>
       </table>
+    </section>
+  </dialog>
+
+  <dialog id="peer-federate-dialog" class="peer-federate-dialog" aria-labelledby="peer-federate-title">
+    <header class="peer-federate-header">
+      <h2 id="peer-federate-title">Federate with a peer</h2>
+      <button type="button" id="peer-federate-close" aria-label="Close">×</button>
+    </header>
+
+    <section id="peer-federate-step-url" class="peer-federate-step">
+      <label for="peer-federate-url">Peer URL</label>
+      <input id="peer-federate-url" type="url" placeholder="https://peer.example.com" required />
+      <p class="peer-federate-hint">Paste the base URL of another IONe node. You'll sign in on the peer to grant access.</p>
+      <div class="peer-federate-actions">
+        <button type="button" id="peer-federate-start">Connect</button>
+      </div>
+    </section>
+
+    <section id="peer-federate-step-waiting" class="peer-federate-step" hidden>
+      <p>A new tab opened for you to sign in at the peer. Come back when you're done.</p>
+      <p class="peer-federate-hint" id="peer-federate-waiting-hint">Waiting for sign-in...</p>
+      <div class="peer-federate-actions">
+        <button type="button" id="peer-federate-manifest">I'm done - fetch tools</button>
+      </div>
+    </section>
+
+    <section id="peer-federate-step-allowlist" class="peer-federate-step" hidden>
+      <p>Select the peer's tools this IONe instance is allowed to call:</p>
+      <fieldset id="peer-federate-tool-list" class="peer-federate-tool-list">
+        <legend>Tool allowlist</legend>
+      </fieldset>
+      <p id="peer-federate-allowlist-error" class="peer-federate-error" hidden></p>
+      <div class="peer-federate-actions">
+        <button type="button" id="peer-federate-confirm">Confirm</button>
+      </div>
+    </section>
+
+    <section id="peer-federate-step-done" class="peer-federate-step" hidden>
+      <p>Peer is active. The allowed tools are now callable from this IONe node.</p>
+      <div class="peer-federate-actions">
+        <button type="button" id="peer-federate-close-done">Done</button>
+      </div>
     </section>
   </dialog>
 
