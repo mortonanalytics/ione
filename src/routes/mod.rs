@@ -1,8 +1,8 @@
 use axum::{
-    Router,
     middleware::from_fn,
     middleware::from_fn_with_state,
     routing::{get, post},
+    Router,
 };
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -29,6 +29,7 @@ pub mod peers;
 pub mod pipeline_events;
 pub mod signals;
 pub mod survivors;
+pub mod telemetry;
 pub mod workspaces;
 
 pub fn router(state: AppState) -> Router {
@@ -110,6 +111,8 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces/:id/audit_events",
             get(audit_events::list_audit_events),
         )
+        .route("/api/v1/telemetry/events", post(telemetry::track_event))
+        .route("/api/v1/admin/funnel", get(telemetry::admin_funnel))
         .route("/api/v1/approvals/:id", post(approvals::decide_approval))
         .route(
             "/api/v1/peers",
