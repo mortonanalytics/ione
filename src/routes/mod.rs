@@ -1,15 +1,17 @@
 use axum::{
+    middleware::from_fn,
     middleware::from_fn_with_state,
     routing::{get, post},
     Router,
 };
-use tower_http::{
-    cors::{Any, CorsLayer},
-    services::ServeDir,
-    trace::TraceLayer,
-};
+use tower_http::{cors::{Any, CorsLayer}, services::ServeDir, trace::TraceLayer};
 
-use crate::{auth::auth_middleware, mcp_server, state::AppState};
+use crate::{
+    auth::auth_middleware,
+    mcp_server,
+    middleware::demo_guard::demo_write_guard,
+    state::AppState,
+};
 
 pub mod approvals;
 pub mod artifacts;
@@ -100,6 +102,7 @@ pub fn router(state: AppState) -> Router {
             post(peers::subscribe_peer),
         )
         .route("/api/v1/me", get(me::me))
+        .route_layer(from_fn(demo_write_guard))
         .route_layer(from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state.clone());
 

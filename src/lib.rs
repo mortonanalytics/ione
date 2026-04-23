@@ -5,6 +5,7 @@ pub mod db;
 pub mod demo;
 pub mod error;
 pub mod mcp_server;
+pub mod middleware;
 pub mod models;
 pub mod repos;
 pub mod routes;
