@@ -6,6 +6,7 @@ pub mod nws;
 pub mod openapi;
 pub mod slack;
 pub mod smtp;
+pub mod validate;
 
 use crate::models::{Connector, ConnectorKind};
 
