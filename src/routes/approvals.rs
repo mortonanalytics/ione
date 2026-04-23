@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     response::Json,
 };
 use serde::Deserialize;
@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthContext,
     error::AppError,
+    middleware::session_cookie::SessionId,
     models::{ActivationStepKey, ActivationTrack, ActorKind, ApprovalStatus},
     repos::{ApprovalRepo, AuditEventRepo},
     services::delivery,
@@ -48,7 +49,8 @@ pub struct DecideRequest {
 pub async fn decide_approval(
     State(state): State<AppState>,
     Path(approval_id): Path<Uuid>,
-    axum::Extension(auth): axum::Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(session): Extension<SessionId>,
     Json(req): Json<DecideRequest>,
 ) -> Result<Json<Value>, AppError> {
     let decision = parse_status(&req.decision)
@@ -128,6 +130,17 @@ pub async fn decide_approval(
 
     if let Some(workspace_id) = workspace_id {
         if workspace_id != crate::demo::DEMO_WORKSPACE_ID {
+            crate::services::funnel::track(
+                &state,
+                session.0,
+                Some(auth.user_id),
+                Some(workspace_id),
+                "first_real_approval_decided",
+                Some(json!({
+                    "approvalId": approval_id,
+                    "decision": req.decision,
+                })),
+            );
             let activation_repo = crate::repos::ActivationRepo::new(state.pool.clone());
             let _ = activation_repo
                 .mark(
