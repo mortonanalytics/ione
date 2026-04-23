@@ -4,6 +4,7 @@
 /// `purge_demo(pool)` — removes the demo workspace and its audit events atomically.
 use anyhow::Context;
 use chrono::{Duration, Utc};
+use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -55,6 +56,7 @@ async fn seed_demo(pool: &PgPool) -> anyhow::Result<()> {
     seed_approvals(&mut tx, user_id).await?;
     seed_audit_events(&mut tx).await?;
     seed_conversation(&mut tx, user_id).await?;
+    seed_pipeline_events(&mut tx).await?;
 
     tx.commit()
         .await
@@ -370,6 +372,101 @@ async fn seed_audit_events(
         .await
         .context("failed to insert demo audit_event")?;
     }
+    Ok(())
+}
+
+async fn seed_pipeline_events(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> anyhow::Result<()> {
+    let timelines = [
+        (
+            "NWS",
+            f::CONN_NWS,
+            f::STREAM_NWS,
+            f::SIG_1,
+            f::SURV_1,
+            f::ROUTE_1,
+            "feed",
+        ),
+        (
+            "FIRMS",
+            f::CONN_FIRMS,
+            f::STREAM_FIRMS,
+            f::SIG_2,
+            f::SURV_2,
+            f::ROUTE_2,
+            "notification",
+        ),
+        (
+            "Slack",
+            f::CONN_SLACK,
+            f::STREAM_SLACK,
+            f::SIG_3,
+            f::SURV_3,
+            f::ROUTE_3,
+            "draft",
+        ),
+        (
+            "IRWIN",
+            f::CONN_IRWIN,
+            f::STREAM_IRWIN,
+            f::SIG_3,
+            f::SURV_3,
+            f::ROUTE_3,
+            "draft",
+        ),
+    ];
+
+    for (idx, (name, connector_id, stream_id, signal_id, survivor_id, decision_id, target)) in
+        timelines.into_iter().enumerate()
+    {
+        let base_seconds_ago = 6 * 60 * 60 - (idx as i32 * 15 * 60);
+        let events = [
+            (
+                "publish_started",
+                base_seconds_ago,
+                json!({ "connector_name": name }),
+            ),
+            (
+                "first_event",
+                base_seconds_ago - 10,
+                json!({ "stream_id": stream_id, "count": 5 }),
+            ),
+            (
+                "first_signal",
+                base_seconds_ago - 2 * 60,
+                json!({ "signal_id": signal_id }),
+            ),
+            (
+                "first_survivor",
+                base_seconds_ago - 5 * 60,
+                json!({ "survivor_id": survivor_id, "verdict": "survive" }),
+            ),
+            (
+                "first_decision",
+                base_seconds_ago - 10 * 60,
+                json!({ "decision_id": decision_id, "target": target }),
+            ),
+        ];
+
+        for (stage, seconds_ago, detail) in events {
+            sqlx::query(
+                "INSERT INTO pipeline_events
+                   (workspace_id, connector_id, stream_id, stage, detail, occurred_at)
+                 VALUES ($1, $2, $3, $4, $5, now() - ($6::int * interval '1 second'))",
+            )
+            .bind(DEMO_WORKSPACE_ID)
+            .bind(connector_id)
+            .bind(stream_id)
+            .bind(stage)
+            .bind(detail)
+            .bind(seconds_ago)
+            .execute(&mut **tx)
+            .await
+            .context("failed to insert demo pipeline_event")?;
+        }
+    }
+
     Ok(())
 }
 
