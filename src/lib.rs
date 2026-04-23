@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod connectors;
 pub mod db;
+pub mod demo;
 pub mod error;
 pub mod mcp_server;
 pub mod models;
