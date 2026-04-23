@@ -4,6 +4,7 @@ pub mod delivery;
 pub mod generator;
 pub mod ollama;
 pub mod peer;
+pub mod pipeline_bus;
 pub mod router;
 pub mod rules;
 pub mod scheduler;
