@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
     // Routes that are always public (no auth middleware).
     let public = Router::new()
         .route("/api/v1/health", get(health::health))
+        .route("/api/v1/health/ollama", get(health::health_ollama))
         .route("/auth/login", get(auth_routes::login))
         .route("/auth/callback", get(auth_routes::callback))
         .route("/auth/logout", post(auth_routes::logout))
