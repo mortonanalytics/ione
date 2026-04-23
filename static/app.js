@@ -1,4 +1,6 @@
 /* ── Auth UI ── */
+const DEMO_WORKSPACE_ID = '00000000-0000-0000-0000-000000000d30';
+
 const userLabelEl = document.getElementById('user-label');
 const loginBtn    = document.getElementById('login-btn');
 const logoutBtn   = document.getElementById('logout-btn');
@@ -77,8 +79,12 @@ const ACTIVE_WORKSPACE_KEY = 'ione.activeWorkspaceId';
 async function apiFetch(path, options) {
   const resp = await fetch(path, options);
   if (!resp.ok) {
-    const body = await resp.json().catch(() => ({}));
-    throw new ApiError(body.error || resp.statusText, resp.status);
+    let errorBody = null;
+    try { errorBody = await resp.json(); } catch (_) {}
+    if (errorBody?.error === 'demo_read_only') {
+      showToast('The demo workspace is read-only. Switch to your workspace to make changes.');
+    }
+    throw new ApiError(errorBody?.message || `HTTP ${resp.status}`, resp.status);
   }
   return resp.json();
 }
@@ -178,6 +184,32 @@ function workspaceIsClosed(ws) {
   return ws && ws.closedAt != null;
 }
 
+function isDemoWorkspace(ws) {
+  return ws && ws.id === DEMO_WORKSPACE_ID;
+}
+
+function showToast(message, { durationMs = 5000 } = {}) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = 'toast toast--error';
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), durationMs);
+}
+
+function renderChatChips(ws) {
+  const el = document.getElementById('chat-chips');
+  if (!el) return;
+  el.hidden = !isDemoWorkspace(ws);
+}
+
+function renderWorkspaceLock(ws) {
+  const el = document.getElementById('workspace-lock');
+  if (!el) return;
+  el.hidden = !isDemoWorkspace(ws);
+}
+
 function workspaceLabel(ws) {
   if (workspaceIsClosed(ws)) {
     const date = formatDate(ws.closedAt);
@@ -192,6 +224,8 @@ function setActiveWorkspace(ws) {
 
   workspaceNameEl.textContent = workspaceLabel(ws);
   workspaceDomainEl.textContent = ws.domain || '';
+  renderChatChips(ws);
+  renderWorkspaceLock(ws);
 
   const isClosed = workspaceIsClosed(ws);
   newChatBtn.hidden = isClosed;
@@ -533,6 +567,16 @@ promptEl.addEventListener('keydown', (e) => {
   }
 });
 
+document.querySelectorAll('#chat-chips .chip').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const promptEl = document.getElementById('prompt');
+    if (!promptEl) return;
+    promptEl.value = btn.dataset.prompt || btn.textContent.trim();
+    const form = document.getElementById('chat-form');
+    form?.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+  });
+});
+
 /* ── New workspace modal ── */
 
 newWorkspaceBtn.addEventListener('click', () => {
@@ -823,7 +867,7 @@ function buildConnectorCard(connector) {
 
   const nameSpan = document.createElement('span');
   nameSpan.className = 'connector-name';
-  nameSpan.textContent = connector.name;
+  nameSpan.textContent = isDemoWorkspace(activeWorkspace) ? `Sample — ${connector.name}` : connector.name;
 
   const kindBadge = document.createElement('span');
   kindBadge.className = 'badge-kind';
