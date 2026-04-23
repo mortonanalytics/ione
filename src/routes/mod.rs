@@ -24,6 +24,7 @@ pub mod connectors;
 pub mod conversations;
 pub mod feed;
 pub mod health;
+pub mod mcp_clients;
 pub mod me;
 pub mod oauth;
 pub mod peers;
@@ -66,6 +67,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/activation", get(activation::list))
         .route("/api/v1/activation/events", post(activation::mark))
         .route("/api/v1/activation/dismiss", post(activation::dismiss))
+        .route("/api/v1/mcp/clients", get(mcp_clients::list_clients))
+        .route(
+            "/api/v1/mcp/clients/:id",
+            axum::routing::delete(mcp_clients::revoke_client),
+        )
         .route("/api/v1/chat", post(chat::chat))
         .route(
             "/api/v1/conversations",
