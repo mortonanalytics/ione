@@ -69,6 +69,10 @@ pub fn router(state: AppState) -> Router {
             get(connectors::list_connectors).post(connectors::create_connector),
         )
         .route(
+            "/api/v1/connectors/validate",
+            post(connectors::validate_connector),
+        )
+        .route(
             "/api/v1/connectors/:id/streams",
             get(connectors::list_streams),
         )
