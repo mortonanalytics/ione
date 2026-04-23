@@ -1,3 +1,4 @@
+pub mod canned_chat;
 pub mod fixture;
 pub mod seeder;
 

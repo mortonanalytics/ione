@@ -228,7 +228,52 @@ async fn demo_blocks_writes_with_demo_read_only_error() {
 #[tokio::test]
 #[ignore]
 async fn canned_chat_bypasses_ollama() {
-    todo!("ione::demo::seeder and canned chat not yet implemented — intentionally red")
+    std::env::set_var("IONE_SEED_DEMO", "1");
+    std::env::set_var("OLLAMA_BASE_URL", "http://127.0.0.1:9");
+
+    let (base, pool) = spawn_app().await;
+    ione::demo::seeder::seed_demo_if_enabled(&pool)
+        .await
+        .expect("seed failed");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "{}/api/v1/conversations/{}/messages",
+            base,
+            ione::demo::fixture::CONV_1
+        ))
+        .json(&json!({
+            "content": "What wildfires are active near populated areas right now?"
+        }))
+        .send()
+        .await
+        .expect("POST message request failed");
+
+    let status = resp.status();
+    let body: Value = resp.json().await.expect("message response not JSON");
+
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "known canned prompt must return 200, got {}. Body: {}",
+        status,
+        body
+    );
+    assert_eq!(
+        body["model"].as_str(),
+        Some("canned"),
+        "known canned prompt must persist assistant model='canned', got: {}",
+        body
+    );
+    assert!(
+        body["content"]
+            .as_str()
+            .map(|s| s.starts_with("Three fire detections"))
+            .unwrap_or(false),
+        "known canned prompt must return the wildfire canned response, got: {}",
+        body
+    );
 }
 
 // ─── Test 4: canned_unmatched_returns_stock_reply ────────────────────────────
@@ -240,7 +285,52 @@ async fn canned_chat_bypasses_ollama() {
 #[tokio::test]
 #[ignore]
 async fn canned_unmatched_returns_stock_reply() {
-    todo!("canned chat stock reply not yet implemented — intentionally red")
+    std::env::set_var("IONE_SEED_DEMO", "1");
+    std::env::set_var("OLLAMA_BASE_URL", "http://127.0.0.1:9");
+
+    let (base, pool) = spawn_app().await;
+    ione::demo::seeder::seed_demo_if_enabled(&pool)
+        .await
+        .expect("seed failed");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "{}/api/v1/conversations/{}/messages",
+            base,
+            ione::demo::fixture::CONV_1
+        ))
+        .json(&json!({
+            "content": "something random"
+        }))
+        .send()
+        .await
+        .expect("POST message request failed");
+
+    let status = resp.status();
+    let body: Value = resp.json().await.expect("message response not JSON");
+
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "unmatched canned prompt must return 200, got {}. Body: {}",
+        status,
+        body
+    );
+    assert_eq!(
+        body["model"].as_str(),
+        Some("canned"),
+        "unmatched canned prompt must persist assistant model='canned', got: {}",
+        body
+    );
+    assert!(
+        body["content"]
+            .as_str()
+            .map(|s| s.starts_with("I can answer"))
+            .unwrap_or(false),
+        "unmatched canned prompt must return stock reply, got: {}",
+        body
+    );
 }
 
 // ─── Test 5: demo_purge_removes_workspace_and_audit_events ───────────────────
