@@ -40,6 +40,19 @@
       <button id="new-workspace-btn" aria-label="Create new workspace">+ New workspace</button>
       <button id="new-chat-btn" aria-label="New chat">+ New chat</button>
 
+      <section id="activation-tracker" class="activation-tracker" hidden>
+        <header>
+          <h3 id="activation-title" class="activation-title">Get started</h3>
+          <button type="button" id="activation-dismiss" class="activation-dismiss" aria-label="Dismiss checklist">×</button>
+        </header>
+        <ol id="activation-steps" class="activation-steps" role="list"></ol>
+        <div id="activation-cta" class="activation-cta" hidden>
+          <p>You've seen how IONe works. Ready to set up your own?</p>
+          <button type="button" id="activation-cta-primary">Create your workspace</button>
+          <button type="button" id="activation-cta-secondary">Keep exploring the demo</button>
+        </div>
+      </section>
+
       <!-- MCP endpoint disclosure (Phase 11) -->
       <div id="mcp-endpoint" class="mcp-endpoint">
         <span class="mcp-endpoint-label">MCP</span>

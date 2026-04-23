@@ -1,5 +1,6 @@
 /* ── Auth UI ── */
-const DEMO_WORKSPACE_ID = '00000000-0000-0000-0000-000000000d30';
+const DEMO_WORKSPACE_ID_CONST = '00000000-0000-0000-0000-000000000d30';
+const DEMO_WORKSPACE_ID = DEMO_WORKSPACE_ID_CONST;
 
 const userLabelEl = document.getElementById('user-label');
 const loginBtn    = document.getElementById('login-btn');
@@ -269,6 +270,13 @@ function createWorkspace(name, domain, lifecycle, parentId) {
   });
 }
 
+async function loadWorkspaces() {
+  const data = await listWorkspaces();
+  workspaces = data.items || [];
+  if (!workspaceMenu.hidden) renderWorkspaceMenu();
+  return workspaces;
+}
+
 function closeWorkspace(id) {
   return apiFetch('/api/v1/workspaces/' + id + '/close', {
     method: 'POST',
@@ -395,6 +403,68 @@ function renderWorkspaceLock(ws) {
   el.hidden = !isDemoWorkspace(ws);
 }
 
+async function fetchActivation(workspaceId, track) {
+  const res = await fetch(`/api/v1/activation?workspace_id=${encodeURIComponent(workspaceId)}&track=${encodeURIComponent(track)}`);
+  if (!res.ok) return null;
+  return await res.json();
+}
+
+async function markActivation(workspaceId, track, stepKey) {
+  await fetch('/api/v1/activation/events', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspaceId, track, stepKey }),
+  }).catch(() => {});
+}
+
+async function dismissActivation(workspaceId, track) {
+  await fetch('/api/v1/activation/dismiss', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspaceId, track }),
+  }).catch(() => {});
+}
+
+function trackForWorkspace(ws) {
+  return ws && ws.id === DEMO_WORKSPACE_ID_CONST ? 'demo_walkthrough' : 'real_activation';
+}
+
+async function renderActivationTracker(ws) {
+  const section = document.getElementById('activation-tracker');
+  if (!section || !ws) return;
+  const track = trackForWorkspace(ws);
+  const state = await fetchActivation(ws.id, track);
+  if (!activeWorkspace || activeWorkspace.id !== ws.id) return;
+  if (!state || state.dismissed) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  section.dataset.track = track;
+  document.getElementById('activation-title').textContent =
+    track === 'demo_walkthrough' ? 'Demo walkthrough' : 'Get started';
+
+  const list = document.getElementById('activation-steps');
+  list.innerHTML = '';
+  const items = Array.isArray(state.items) ? state.items : [];
+  const allCompleted = items.length > 0 && items.every((it) => !!it.completedAt);
+  items.forEach((it) => {
+    const li = document.createElement('li');
+    li.className = 'activation-step' + (it.completedAt ? ' activation-step--done' : '');
+    li.innerHTML = `<span class="activation-check" aria-hidden="true"></span><span class="activation-label">${escapeHtml(it.label)}</span>`;
+    list.appendChild(li);
+  });
+
+  const cta = document.getElementById('activation-cta');
+  if (allCompleted && track === 'demo_walkthrough') {
+    cta.hidden = false;
+    list.hidden = true;
+  } else {
+    cta.hidden = true;
+    list.hidden = false;
+  }
+}
+
 function workspaceLabel(ws) {
   if (workspaceIsClosed(ws)) {
     const date = formatDate(ws.closedAt);
@@ -456,7 +526,12 @@ function setActiveWorkspace(ws) {
 
   // Always update the pending badge count.
   updateApprovalsBadge(ws.id);
+  renderActivationTracker(ws);
 }
+
+// TODO: Wire UI-owned activation marks when the UI has explicit survivor detail,
+// approval detail, and audit trail open handlers. The current static UI renders
+// survivor and approval lists only, and has no audit-trail view to hook.
 
 /* ── Workspace menu ── */
 
@@ -773,6 +848,32 @@ document.querySelectorAll('#chat-chips .chip').forEach((btn) => {
     const form = document.getElementById('chat-form');
     form?.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
   });
+});
+
+// Wire activation dismiss button.
+document.getElementById('activation-dismiss')?.addEventListener('click', async () => {
+  const ws = window.activeWorkspace;
+  if (!ws) return;
+  const track = trackForWorkspace(ws);
+  await dismissActivation(ws.id, track);
+  document.getElementById('activation-tracker').hidden = true;
+});
+
+// Wire activation CTA.
+document.getElementById('activation-cta-primary')?.addEventListener('click', async () => {
+  try {
+    const created = await createWorkspace('My Workspace', 'generic', 'continuous', null);
+    await loadWorkspaces();
+    const ws = workspaces.find((item) => item.id === created.id) || created;
+    setActiveWorkspace(ws);
+  } catch (_err) {
+    showToast('Could not create your workspace. Try again.');
+  }
+});
+
+document.getElementById('activation-cta-secondary')?.addEventListener('click', () => {
+  document.getElementById('activation-cta').hidden = true;
+  document.getElementById('activation-steps').hidden = false;
 });
 
 /* ── New workspace modal ── */
@@ -2143,8 +2244,7 @@ approvalsFilterStatus.addEventListener('change', loadApprovals);
   await loadMe();
 
   try {
-    const wsData = await listWorkspaces();
-    workspaces = wsData.items || [];
+    await loadWorkspaces();
 
     // Restore last-active workspace from localStorage, fall back to first.
     const savedId = localStorage.getItem(ACTIVE_WORKSPACE_KEY);
@@ -2165,6 +2265,7 @@ approvalsFilterStatus.addEventListener('change', loadApprovals);
       workspaceClosedNotice.hidden = !isClosed;
       // Seed the pending approvals badge.
       updateApprovalsBadge(initial.id);
+      renderActivationTracker(initial);
     } else {
       workspaceNameEl.textContent = 'No workspaces';
     }
