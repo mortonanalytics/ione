@@ -58,6 +58,7 @@
         <span class="mcp-endpoint-label">MCP</span>
         <span id="mcp-url" class="mcp-url">http://localhost:3000/mcp</span>
         <button id="mcp-copy-btn" type="button" class="mcp-copy-btn" aria-label="Copy MCP URL">Copy</button>
+        <button type="button" id="mcp-connect-open-btn">Connect to MCP</button>
       </div>
       <p id="workspace-closed-notice" hidden>This workspace is closed.</p>
       <ul id="conv-list" role="list"></ul>
@@ -254,6 +255,67 @@
         <button type="button" id="ac-progress-done">Done</button>
       </div>
     </div>
+  </dialog>
+
+  <dialog id="mcp-connect-dialog" class="mcp-connect-dialog" aria-labelledby="mcp-connect-title">
+    <header class="mcp-connect-header">
+      <h2 id="mcp-connect-title">Connect to MCP</h2>
+      <button type="button" id="mcp-connect-close" aria-label="Close">×</button>
+    </header>
+
+    <section class="mcp-connect-tiles" aria-label="Connect a client">
+      <h3>Connect a client</h3>
+      <div class="mcp-tile-grid">
+        <a class="mcp-tile" id="mcp-tile-cursor" href="#" role="link">
+          <strong>Cursor</strong>
+          <span>One-click deep link</span>
+        </a>
+        <div class="mcp-tile">
+          <strong>Claude Desktop (Pro/Max)</strong>
+          <div class="mcp-tile-body">
+            <p class="mcp-tile-url"><code id="mcp-tile-claude-desktop-url"></code>
+              <button type="button" class="mcp-copy-btn" data-copy-target="mcp-tile-claude-desktop-url">Copy</button>
+            </p>
+            <ol>
+              <li>Open Claude → Settings → Customize → Connectors</li>
+              <li>Click "+ Add custom connector"</li>
+              <li>Paste this URL and complete sign-in</li>
+            </ol>
+          </div>
+        </div>
+        <div class="mcp-tile">
+          <strong>Claude Code</strong>
+          <p><code id="mcp-tile-claude-code-cmd"></code>
+            <button type="button" class="mcp-copy-btn" data-copy-target="mcp-tile-claude-code-cmd">Copy</button>
+          </p>
+        </div>
+        <a class="mcp-tile" id="mcp-tile-vscode" href="#" role="link">
+          <strong>VS Code</strong>
+          <span>One-click deep link</span>
+        </a>
+        <details class="mcp-tile mcp-tile--other">
+          <summary><strong>Other</strong> <span>— raw JSON</span></summary>
+          <pre><code id="mcp-tile-raw-json"></code></pre>
+        </details>
+      </div>
+    </section>
+
+    <section class="mcp-connect-clients" aria-label="Connected clients">
+      <h3>Connected clients</h3>
+      <table class="mcp-clients-table">
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col">First connected</th>
+            <th scope="col">Last seen</th>
+            <th scope="col" class="mcp-clients-action"></th>
+          </tr>
+        </thead>
+        <tbody id="mcp-clients-body">
+          <tr><td colspan="4" class="mcp-clients-empty">No clients connected yet.</td></tr>
+        </tbody>
+      </table>
+    </section>
   </dialog>
 
   <script src="/app.js"></script>

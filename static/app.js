@@ -2326,9 +2326,93 @@ if (chatRemediation) {
 const mcpCopyBtn = document.getElementById('mcp-copy-btn');
 const mcpUrlEl   = document.getElementById('mcp-url');
 
+function currentMcpUrl() {
+  return `${window.location.protocol}//${window.location.host}/mcp`;
+}
+
+function buildCursorDeepLink(mcpUrl) {
+  const config = { name: 'ione', transport: 'http', url: mcpUrl };
+  const encoded = btoa(JSON.stringify(config));
+  return `cursor://anysphere.cursor-deeplink/mcp/install?name=ione&config=${encoded}`;
+}
+
+function buildVsCodeDeepLink(mcpUrl) {
+  const config = { name: 'ione', url: mcpUrl, type: 'http' };
+  const encoded = encodeURIComponent(JSON.stringify(config));
+  return `vscode:mcp/install?${encoded}`;
+}
+
+function buildRawJsonConfig(mcpUrl) {
+  return JSON.stringify({
+    mcpServers: { ione: { url: mcpUrl, type: 'http' } },
+  }, null, 2);
+}
+
+async function loadMcpClients() {
+  try {
+    const res = await fetch('/api/v1/mcp/clients');
+    if (!res.ok) return;
+    const data = await res.json();
+    const body = document.getElementById('mcp-clients-body');
+    if (!body) return;
+    if (!data.items || data.items.length === 0) {
+      body.innerHTML = '<tr><td colspan="4" class="mcp-clients-empty">No clients connected yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = '';
+    data.items.forEach((c) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${escapeHtml(c.displayName)}</td>
+        <td>${c.createdAt ? new Date(c.createdAt).toLocaleString() : '—'}</td>
+        <td>${c.lastSeenAt ? new Date(c.lastSeenAt).toLocaleString() : '—'}</td>
+        <td><button type="button" class="mcp-client-revoke" data-client-row-id="${escapeHtml(c.id)}">Revoke</button></td>
+      `;
+      body.appendChild(tr);
+    });
+    body.querySelectorAll('.mcp-client-revoke').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.clientRowId;
+        if (!id) return;
+        await fetch(`/api/v1/mcp/clients/${id}`, { method: 'DELETE' }).catch(() => {});
+        loadMcpClients();
+      });
+    });
+  } catch (_err) { /* ignore */ }
+}
+
+let mcpClientsInterval = null;
+
+function openMcpConnectDialog() {
+  const dialog = document.getElementById('mcp-connect-dialog');
+  const mcpUrl = currentMcpUrl();
+
+  const cursor = document.getElementById('mcp-tile-cursor');
+  if (cursor) cursor.href = buildCursorDeepLink(mcpUrl);
+  const vscode = document.getElementById('mcp-tile-vscode');
+  if (vscode) vscode.href = buildVsCodeDeepLink(mcpUrl);
+  const claudeDesktopUrl = document.getElementById('mcp-tile-claude-desktop-url');
+  if (claudeDesktopUrl) claudeDesktopUrl.textContent = mcpUrl;
+  const claudeCodeCmd = document.getElementById('mcp-tile-claude-code-cmd');
+  if (claudeCodeCmd) claudeCodeCmd.textContent = `claude mcp add --transport http ione ${mcpUrl}`;
+  const rawJson = document.getElementById('mcp-tile-raw-json');
+  if (rawJson) rawJson.textContent = buildRawJsonConfig(mcpUrl);
+
+  loadMcpClients();
+  if (mcpClientsInterval) clearInterval(mcpClientsInterval);
+  mcpClientsInterval = setInterval(loadMcpClients, 15000);
+  dialog?.showModal?.();
+}
+
+function closeMcpConnectDialog() {
+  const dialog = document.getElementById('mcp-connect-dialog');
+  dialog?.close?.();
+  if (mcpClientsInterval) { clearInterval(mcpClientsInterval); mcpClientsInterval = null; }
+}
+
 if (mcpCopyBtn && mcpUrlEl) {
   // Use window.location to derive the correct host/port at runtime.
-  const mcpUrl = window.location.origin + '/mcp';
+  const mcpUrl = currentMcpUrl();
   mcpUrlEl.textContent = mcpUrl;
 
   mcpCopyBtn.addEventListener('click', async () => {
@@ -2346,3 +2430,22 @@ if (mcpCopyBtn && mcpUrlEl) {
     }
   });
 }
+
+document.getElementById('mcp-connect-open-btn')?.addEventListener('click', openMcpConnectDialog);
+document.getElementById('mcp-connect-close')?.addEventListener('click', closeMcpConnectDialog);
+document.getElementById('mcp-connect-dialog')?.addEventListener('close', () => {
+  if (mcpClientsInterval) { clearInterval(mcpClientsInterval); mcpClientsInterval = null; }
+});
+
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest?.('.mcp-copy-btn');
+  if (!btn || !btn.dataset.copyTarget) return;
+  const target = btn.dataset.copyTarget;
+  const el = document.getElementById(target);
+  if (!el) return;
+  const text = el.textContent || '';
+  navigator.clipboard?.writeText(text);
+  const orig = btn.textContent;
+  btn.textContent = 'Copied';
+  setTimeout(() => { btn.textContent = orig; }, 1400);
+});
