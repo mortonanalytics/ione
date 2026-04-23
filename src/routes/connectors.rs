@@ -5,13 +5,14 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     connectors,
     error::AppError,
-    models::ConnectorKind,
-    repos::{ConnectorRepo, StreamEventRepo, StreamRepo},
+    models::{ConnectorKind, PipelineEventInput, PipelineEventStage},
+    repos::{ConnectorRepo, PipelineEventRepo, StreamEventRepo, StreamRepo},
     state::AppState,
 };
 
@@ -106,16 +107,182 @@ async fn do_create_connector(
         .await
         .map_err(AppError::Internal)?;
 
+    let connector_json =
+        serde_json::to_value(&connector).map_err(|e| AppError::Internal(e.into()))?;
+
+    emit_pipeline_stage(
+        &state,
+        workspace_id,
+        Some(connector.id),
+        None,
+        PipelineEventStage::PublishStarted,
+        None,
+    )
+    .await;
+
+    let mut streams = Vec::new();
     for sd in default_streams {
-        stream_repo
+        let stream = stream_repo
             .upsert_named(connector.id, &sd.name, sd.schema)
             .await
             .map_err(AppError::Internal)?;
+        streams.push(stream);
     }
 
-    Ok(Json(
-        serde_json::to_value(connector).map_err(|e| AppError::Internal(e.into()))?,
-    ))
+    run_initial_connector_poll(&state, workspace_id, connector.id, impl_.as_ref(), streams).await;
+
+    Ok(Json(connector_json))
+}
+
+async fn run_initial_connector_poll(
+    state: &AppState,
+    workspace_id: Uuid,
+    connector_id: Uuid,
+    connector: &dyn connectors::ConnectorImpl,
+    streams: Vec<crate::models::Stream>,
+) {
+    let event_repo = StreamEventRepo::new(state.pool.clone());
+    let mut first_event_emitted = false;
+
+    for stream in streams {
+        let cursor = match event_repo.latest_observed_at(stream.id).await {
+            Ok(cursor) => cursor.map(|dt| json!({ "observed_at": dt.to_rfc3339() })),
+            Err(err) => {
+                emit_pipeline_error(
+                    state,
+                    workspace_id,
+                    Some(connector_id),
+                    Some(stream.id),
+                    "poll_cursor",
+                    &err,
+                )
+                .await;
+                warn!(
+                    connector_id = %connector_id,
+                    stream_id = %stream.id,
+                    error = %err,
+                    "failed to load stream cursor during connector create"
+                );
+                continue;
+            }
+        };
+
+        let poll_result = match connector.poll(&stream.name, cursor).await {
+            Ok(result) => result,
+            Err(err) => {
+                emit_pipeline_error(
+                    state,
+                    workspace_id,
+                    Some(connector_id),
+                    Some(stream.id),
+                    "poll",
+                    &err,
+                )
+                .await;
+                warn!(
+                    connector_id = %connector_id,
+                    stream = %stream.name,
+                    error = %err,
+                    "connector initial poll failed"
+                );
+                continue;
+            }
+        };
+
+        let mut inserted_count = 0usize;
+        for evt in poll_result.events {
+            match event_repo
+                .insert_if_absent(stream.id, evt.payload, evt.observed_at)
+                .await
+            {
+                Ok(true) => inserted_count += 1,
+                Ok(false) => {}
+                Err(err) => {
+                    emit_pipeline_error(
+                        state,
+                        workspace_id,
+                        Some(connector_id),
+                        Some(stream.id),
+                        "stream_event_insert",
+                        &err,
+                    )
+                    .await;
+                    warn!(
+                        connector_id = %connector_id,
+                        stream_id = %stream.id,
+                        error = %err,
+                        "failed to insert stream event during connector create"
+                    );
+                    break;
+                }
+            }
+        }
+
+        if inserted_count > 0 && !first_event_emitted {
+            emit_pipeline_stage(
+                state,
+                workspace_id,
+                Some(connector_id),
+                Some(stream.id),
+                PipelineEventStage::FirstEvent,
+                Some(json!({ "event_count": inserted_count })),
+            )
+            .await;
+            first_event_emitted = true;
+        }
+    }
+}
+
+async fn emit_pipeline_stage(
+    state: &AppState,
+    workspace_id: Uuid,
+    connector_id: Option<Uuid>,
+    stream_id: Option<Uuid>,
+    stage: PipelineEventStage,
+    detail: Option<Value>,
+) {
+    let repo = PipelineEventRepo::new(state.pool.clone());
+    let input = PipelineEventInput {
+        workspace_id,
+        connector_id,
+        stream_id,
+        stage,
+        detail,
+    };
+
+    match repo.append(input).await {
+        Ok(event) => state.pipeline_bus.publish(event),
+        Err(err) => warn!(
+            workspace_id = %workspace_id,
+            connector_id = ?connector_id,
+            stream_id = ?stream_id,
+            stage = stage.as_str(),
+            error = %err,
+            "pipeline event append failed during connector create"
+        ),
+    }
+}
+
+async fn emit_pipeline_error(
+    state: &AppState,
+    workspace_id: Uuid,
+    connector_id: Option<Uuid>,
+    stream_id: Option<Uuid>,
+    stage_name: &str,
+    error: impl ToString,
+) {
+    emit_pipeline_stage(
+        state,
+        workspace_id,
+        connector_id,
+        stream_id,
+        PipelineEventStage::Error,
+        Some(json!({
+            "stage": stage_name,
+            "error": error.to_string(),
+        })),
+    )
+    .await;
 }
 
 pub async fn list_streams(
