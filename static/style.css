@@ -659,6 +659,11 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   flex-shrink: 0;
 }
 
+.sse-reconnect {
+  color: #9a6400;
+  font-size: var(--font-size-xs);
+}
+
 #add-connector-btn {
   padding: var(--space-2) var(--space-4);
   background: var(--color-primary);
@@ -744,6 +749,49 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .status-chip--error {
   background: #fdecea;
   color: var(--color-error);
+}
+
+.conn-timeline {
+  list-style: none;
+  padding: 6px 0 0 0;
+  margin: 6px 0 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.pe-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 0.75rem;
+  padding: 2px 0;
+}
+
+.pe-stage {
+  font-weight: 500;
+}
+
+.pe-time {
+  color: #666;
+  font-size: 0.7rem;
+}
+
+.pe-detail {
+  color: #666;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pe-item--error .pe-stage {
+  color: #8b1f1f;
+}
+
+.pe-item--stall .pe-stage {
+  color: #9a6400;
 }
 
 /* ── Stream sub-list ── */
@@ -858,6 +906,10 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   .toast {
     transition: none !important;
   }
+
+  .ac-progress-list li {
+    transition: none !important;
+  }
 }
 
 /* ── Add connector dialog ── */
@@ -883,7 +935,8 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 }
 
 #ac-step-provider[hidden],
-#ac-step-configure[hidden] {
+#ac-step-configure[hidden],
+#ac-step-progress[hidden] {
   display: none;
 }
 
@@ -991,6 +1044,37 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   color: var(--color-error);
   font-size: var(--font-size-sm);
   margin: 0;
+}
+
+.ac-step-progress {
+  padding: 12px 0;
+}
+
+.ac-progress-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ac-progress-list li {
+  padding: 8px 12px;
+  border-left: 3px solid #ccc;
+  background: #fafafa;
+}
+
+.ac-progress-list li.done {
+  border-left-color: #0a6d34;
+  background: #eef9f2;
+}
+
+.ac-progress-hint {
+  font-size: 0.85rem;
+  color: #666;
+  margin-top: 6px;
+  min-height: 1em;
 }
 
 .ac-actions {

@@ -146,6 +146,7 @@
       <div id="panel-connectors" role="tabpanel" aria-labelledby="tab-connectors" hidden>
         <div id="connectors-header">
           <button id="add-connector-btn" type="button">+ Add connector</button>
+          <span id="sse-reconnect" class="sse-reconnect" hidden>Reconnecting live updates…</span>
         </div>
         <div id="connectors-status" aria-live="polite"></div>
         <ul id="connector-list" role="list"></ul>
@@ -225,6 +226,21 @@
         <button type="submit" id="ac-submit-btn" disabled>Create</button>
       </div>
     </form>
+
+    <div id="ac-step-progress" class="ac-step-progress" hidden>
+      <h2>Setting up…</h2>
+      <ul class="ac-progress-list">
+        <li data-stage="publish_started">Publishing connector</li>
+        <li data-stage="first_event">First event received</li>
+        <li data-stage="first_signal">First signal</li>
+        <li data-stage="first_survivor">First survivor</li>
+        <li data-stage="first_decision">First routing decision</li>
+      </ul>
+      <div id="ac-progress-hint" class="ac-progress-hint" aria-live="polite"></div>
+      <div class="ac-actions">
+        <button type="button" id="ac-progress-done">Done</button>
+      </div>
+    </div>
   </dialog>
 
   <script src="/app.js"></script>
