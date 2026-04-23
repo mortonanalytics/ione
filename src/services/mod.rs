@@ -1,6 +1,7 @@
 pub mod auto_exec;
 pub mod critic;
 pub mod delivery;
+pub mod funnel;
 pub mod generator;
 pub mod ollama;
 pub mod peer;

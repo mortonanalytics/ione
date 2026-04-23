@@ -1,8 +1,8 @@
 use axum::{
+    Router,
     middleware::from_fn,
     middleware::from_fn_with_state,
     routing::{get, post},
-    Router,
 };
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -139,4 +139,7 @@ pub fn router(state: AppState) -> Router {
         .nest_service("/", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        .layer(axum::middleware::from_fn(
+            crate::middleware::session_cookie::session_cookie,
+        ))
 }
