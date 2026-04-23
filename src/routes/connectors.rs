@@ -12,6 +12,7 @@ use crate::{
     auth::AuthContext,
     connectors,
     error::AppError,
+    middleware::session_cookie::SessionId,
     models::{
         ActivationStepKey, ActivationTrack, ConnectorKind, PipelineEventInput, PipelineEventStage,
     },
@@ -49,6 +50,7 @@ pub async fn create_connector(
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
     Extension(auth): Extension<AuthContext>,
+    Extension(session): Extension<SessionId>,
     Json(req): Json<CreateConnectorRequest>,
 ) -> Response {
     let kind = match &req.kind {
@@ -64,22 +66,56 @@ pub async fn create_connector(
         }
     }
 
-    match do_create_connector(state, auth, workspace_id, req).await {
+    match do_create_connector(state, auth, session, workspace_id, req).await {
         Ok(resp) => resp.into_response(),
         Err(err) => err.into_response(),
     }
 }
 
-pub(crate) async fn validate_connector(Json(body): Json<ValidateBody>) -> Response {
+pub(crate) async fn validate_connector(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionId>,
+    Json(body): Json<ValidateBody>,
+) -> Response {
+    crate::services::funnel::track(
+        &state,
+        session.0,
+        None,
+        None,
+        "connector_validate_attempted",
+        Some(json!({ "kind": body.kind })),
+    );
+
     match crate::connectors::validate::dispatch(&body.kind, &body.name, &body.config).await {
-        Ok(ok) => (StatusCode::OK, Json(ok)).into_response(),
-        Err(err) => (StatusCode::UNPROCESSABLE_ENTITY, Json(err)).into_response(),
+        Ok(ok) => {
+            crate::services::funnel::track(
+                &state,
+                session.0,
+                None,
+                None,
+                "connector_validate_succeeded",
+                Some(json!({ "kind": body.kind })),
+            );
+            (StatusCode::OK, Json(ok)).into_response()
+        }
+        Err(err) => {
+            crate::services::funnel::track(
+                &state,
+                session.0,
+                None,
+                None,
+                "connector_validate_failed",
+                Some(json!({ "kind": body.kind, "errorKind": err.error })),
+            );
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(err)).into_response()
+        }
     }
 }
 
 async fn do_create_connector(
     state: AppState,
     auth: AuthContext,
+    session: SessionId,
     workspace_id: Uuid,
     req: CreateConnectorRequest,
 ) -> Result<Json<Value>, AppError> {
@@ -111,6 +147,14 @@ async fn do_create_connector(
         .create(workspace_id, req.kind, &req.name, req.config)
         .await
         .map_err(AppError::Internal)?;
+    crate::services::funnel::track(
+        &state,
+        session.0,
+        Some(auth.user_id),
+        Some(workspace_id),
+        "connector_created",
+        Some(json!({ "kind": connector.kind })),
+    );
 
     let connector_json =
         serde_json::to_value(&connector).map_err(|e| AppError::Internal(e.into()))?;

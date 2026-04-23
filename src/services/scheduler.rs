@@ -173,6 +173,7 @@ async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
                                 })),
                             )
                             .await;
+                            // TODO(T7.3b): emit funnel_events "first_real_signal" — requires scheduler user attribution
                             first_signal_emitted = true;
                         }
                         Ok(None) => {}

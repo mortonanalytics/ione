@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     response::Json,
 };
 use serde::Deserialize;
@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
+    auth::AuthContext,
     error::AppError,
+    middleware::session_cookie::SessionId,
     models::WorkspaceLifecycle,
     repos::{RoleRepo, WorkspaceRepo},
     state::AppState,
@@ -34,6 +36,8 @@ pub async fn list_workspaces(State(state): State<AppState>) -> Result<Json<Value
 
 pub async fn create_workspace(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Extension(session): Extension<SessionId>,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<Value>, AppError> {
     let org_id = get_default_org_id(&state).await?;
@@ -42,6 +46,16 @@ pub async fn create_workspace(
         .create(org_id, &req.name, &req.domain, req.lifecycle, req.parent_id)
         .await
         .map_err(AppError::Internal)?;
+    if ws.id != crate::demo::DEMO_WORKSPACE_ID {
+        crate::services::funnel::track(
+            &state,
+            session.0,
+            Some(ctx.user_id),
+            Some(ws.id),
+            "real_workspace_created",
+            Some(json!({ "workspaceId": ws.id })),
+        );
+    }
     Ok(Json(
         serde_json::to_value(ws).map_err(|e| AppError::Internal(e.into()))?,
     ))

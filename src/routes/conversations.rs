@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     response::Json,
 };
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
+    auth::AuthContext,
     error::AppError,
+    middleware::session_cookie::SessionId,
     models::{ActivationStepKey, ActivationTrack, Message, MessageRole},
     repos::{ConversationRepo, MessageRepo, WorkspaceRepo},
     state::AppState,
@@ -89,6 +91,8 @@ pub struct PostMessageRequest {
 pub(crate) async fn post_message(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Extension(ctx): Extension<AuthContext>,
+    Extension(session): Extension<SessionId>,
     Json(req): Json<PostMessageRequest>,
 ) -> Result<Json<Message>, AppError> {
     let content = req.content.trim().to_string();
@@ -139,7 +143,21 @@ pub(crate) async fn post_message(
         .to_string();
     let prompt = build_prompt(&history, &model);
 
-    let reply = state.ollama.generate(&model, &prompt).await?;
+    let reply = match state.ollama.generate(&model, &prompt).await {
+        Ok(reply) => reply,
+        Err(AppError::OllamaUnreachable { base_url, error }) => {
+            crate::services::funnel::track(
+                &state,
+                session.0,
+                Some(ctx.user_id),
+                Some(conv.workspace_id),
+                "ollama_unreachable_seen",
+                Some(json!({ "baseUrl": base_url })),
+            );
+            return Err(AppError::OllamaUnreachable { base_url, error });
+        }
+        Err(err) => return Err(err),
+    };
 
     let assistant_msg = msg_repo
         .append(id, MessageRole::Assistant, &reply, Some(&model))
