@@ -149,8 +149,13 @@ pub fn router(state: AppState) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // MCP server routes — no auth_middleware; MCP handles its own auth per tool call.
-    let mcp = mcp_server::router().with_state(state.clone());
+    // MCP server routes use OAuth bearer tokens; /mcp/oauth/* is registered separately.
+    let mcp = mcp_server::router()
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::mcp_bearer::mcp_bearer,
+        ))
+        .with_state(state.clone());
 
     Router::new()
         .merge(public)
