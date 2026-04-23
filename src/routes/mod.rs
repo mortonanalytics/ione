@@ -24,6 +24,7 @@ pub mod feed;
 pub mod health;
 pub mod me;
 pub mod peers;
+pub mod pipeline_events;
 pub mod signals;
 pub mod survivors;
 pub mod workspaces;
@@ -83,6 +84,14 @@ pub fn router(state: AppState) -> Router {
             get(survivors::list_survivors),
         )
         .route("/api/v1/workspaces/:id/feed", get(feed::get_feed))
+        .route(
+            "/api/v1/workspaces/:id/events",
+            get(pipeline_events::list_events),
+        )
+        .route(
+            "/api/v1/workspaces/:id/events/stream",
+            get(pipeline_events::stream_events),
+        )
         .route("/api/v1/workspaces/:id/roles", get(workspaces::list_roles))
         .route(
             "/api/v1/workspaces/:id/artifacts",
