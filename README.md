@@ -35,6 +35,8 @@ cargo run --release
 # open http://localhost:3000
 ```
 
+`.env.example` and `docker-compose.yml` set `IONE_SEED_DEMO=1`, so a fresh local install lands in the read-only `[Demo] IONe Ops` workspace automatically. The demo is populated and chat works offline through canned replies; switch to your real workspace when you are ready to connect live systems.
+
 The UI ships with Chat, Connectors, Signals, Survivors, and Approvals tabs. Create a workspace, register an NWS connector with your lat/lon, poll it, watch rule + generator signals land, watch the critic rank them, watch the classifier route them.
 
 ### Two-node federation demo
@@ -78,8 +80,19 @@ The UI ships with Chat, Connectors, Signals, Survivors, and Approvals tabs. Crea
 - **Postgres 16** + **pgvector** — primary store + embeddings
 - **S3 / MinIO** — blob store (documents, imagery)
 - **Ollama** — local-first LLM (generator `qwen3:14b`, critic `phi4-reasoning:14b`, router `qwen3:8b`; all configurable)
-- **MCP** — hand-rolled JSON-RPC 2.0 + SSE subset, ~550 LoC; both as server (this node's capabilities) and client (consuming peer nodes)
+- **MCP** — hand-rolled JSON-RPC 2.0 + SSE subset; both as server (`/mcp`) with OAuth 2.1 + PKCE + CIMD, and as client (consuming peer nodes). Connect from Claude Desktop (Pro/Max), Claude Code, Cursor, or VS Code via the in-app "Connect to MCP" panel.
 - **OIDC / SAML** — per-node local CoC + federated claims layered on top; Keycloak default IdP in docker-compose; PIV/CAC-capable for federal deployments
+
+## What's in this release
+
+- **Demo Workspace** (`IONE_SEED_DEMO=1`) — first-run is populated, and chat works offline through the canned layer.
+- **Ollama preflight + chat remediation** — health dot in the top bar; remediation card with `pullCommand` when models are missing or Ollama is unreachable.
+- **Guided connector setup** — provider-specific forms, `POST /api/v1/connectors/validate` dry-runs, and inline hints before create.
+- **Publish-don't-poll** — scheduler emits `pipeline_events` per stage; SSE stream at `/api/v1/workspaces/:id/events/stream`; connector cards show a live timeline.
+- **Split activation** — separate demo walkthrough and real activation trackers; demo completion shows a CTA to create a real workspace.
+- **Funnel telemetry** — `funnel_events` table; `POST /api/v1/telemetry/events` plus `GET /api/v1/admin/funnel` gated on `IONE_ADMIN_FUNNEL=1`.
+- **MCP OAuth 2.1** — discovery, register, authorize, token, and revoke at `/mcp/oauth/*`; bearer middleware on `/mcp/*`; per-client tiles in the Connect-to-MCP panel.
+- **Peer federation** — OAuth-based federation with tool allowlist; `POST /api/v1/peers`, `GET /api/v1/peers/:id/manifest`, and `POST /api/v1/peers/:id/authorize`.
 
 ## Running tests
 
@@ -108,8 +121,12 @@ Unset `IONE_SKIP_LIVE` to exercise the live Ollama generator/critic/router paths
 | `OLLAMA_GENERATOR_MODEL` | `qwen3:14b` | Signal generator |
 | `OLLAMA_CRITIC_MODEL` | `phi4-reasoning:14b` | Adversarial critic |
 | `OLLAMA_ROUTER_MODEL` | `qwen3:8b` | Routing classifier |
+| `IONE_SEED_DEMO` | `0` prod, `1` in `.env.example` / docker-compose | Seeds the demo workspace |
 | `IONE_POLL_INTERVAL_SECS` | `60` | Scheduler tick |
 | `IONE_AUTH_MODE` | `local` | `local` or `oidc` |
+| `IONE_OAUTH_ISSUER` | `http://{IONE_BIND}` | Absolute issuer URL used in the OAuth discovery document |
+| `IONE_OAUTH_STATIC_BEARER` | unset | CI/headless escape hatch for `/mcp/*` |
+| `IONE_ADMIN_FUNNEL` | unset | Gates `/api/v1/admin/funnel`; returns 404 when unset |
 | `IONE_SKIP_LIVE` | unset | Skip external network / Ollama calls in tests |
 | `IONE_HTTP_UA` | `IONe/0.1 …` | User-Agent for outbound fetches |
 | `IONE_STATIC_DIR` | `./static` | Static UI assets path |
