@@ -16,6 +16,16 @@ struct GenerateResponse {
     response: String,
 }
 
+#[derive(Deserialize)]
+struct TagsResponse {
+    models: Vec<ModelTag>,
+}
+
+#[derive(Deserialize)]
+struct ModelTag {
+    name: String,
+}
+
 impl OllamaClient {
     pub fn new(base_url: String) -> Self {
         let http = reqwest::Client::builder()
@@ -54,5 +64,30 @@ impl OllamaClient {
         info!(model = %model, elapsed_ms = start.elapsed().as_millis(), "ollama generate complete");
 
         Ok(parsed.response)
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<String>, AppError> {
+        let url = format!("{}/api/tags", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(|e| AppError::OllamaUpstream(format!("request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(AppError::OllamaUpstream(format!(
+                "upstream {}",
+                resp.status()
+            )));
+        }
+
+        let parsed: TagsResponse = resp
+            .json()
+            .await
+            .map_err(|e| AppError::OllamaUpstream(format!("parse: {e}")))?;
+
+        Ok(parsed.models.into_iter().map(|model| model.name).collect())
     }
 }
