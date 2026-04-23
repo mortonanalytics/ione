@@ -1,4 +1,5 @@
 use axum::{
+    http::StatusCode,
     extract::{Path, State},
     response::{IntoResponse, Json, Response},
 };
@@ -22,6 +23,15 @@ pub struct CreateConnectorRequest {
     pub config: serde_json::Value,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidateBody {
+    pub kind: String,
+    pub name: String,
+    #[serde(default)]
+    pub config: Value,
+}
+
 pub async fn list_connectors(
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
@@ -35,6 +45,37 @@ pub async fn create_connector(
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
     Json(req): Json<CreateConnectorRequest>,
+) -> Response {
+    let kind = match &req.kind {
+        ConnectorKind::Mcp => "mcp",
+        ConnectorKind::Openapi => "openapi",
+        ConnectorKind::RustNative => "rust_native",
+    };
+
+    match crate::connectors::validate::dispatch(kind, &req.name, &req.config).await {
+        Ok(_) => {}
+        Err(err) => {
+            return (StatusCode::UNPROCESSABLE_ENTITY, Json(err)).into_response();
+        }
+    }
+
+    match do_create_connector(state, workspace_id, req).await {
+        Ok(resp) => resp.into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+pub(crate) async fn validate_connector(Json(body): Json<ValidateBody>) -> Response {
+    match crate::connectors::validate::dispatch(&body.kind, &body.name, &body.config).await {
+        Ok(ok) => (StatusCode::OK, Json(ok)).into_response(),
+        Err(err) => (StatusCode::UNPROCESSABLE_ENTITY, Json(err)).into_response(),
+    }
+}
+
+async fn do_create_connector(
+    state: AppState,
+    workspace_id: Uuid,
+    req: CreateConnectorRequest,
 ) -> Result<Json<Value>, AppError> {
     // Verify workspace exists
     let ws_exists: bool =
