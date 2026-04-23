@@ -106,6 +106,12 @@ body {
   color: var(--color-ws-closed-text);
 }
 
+.workspace-lock {
+  margin-right: 6px;
+  font-size: 0.85rem;
+  opacity: 0.75;
+}
+
 .workspace-domain {
   font-size: var(--font-size-xs);
   color: var(--color-sidebar-muted);
@@ -320,6 +326,41 @@ body {
 .message { margin-bottom: var(--space-2); white-space: pre-wrap; }
 .message.user { color: var(--color-user-msg); }
 .message.assistant { color: var(--color-assistant-msg); }
+
+.chat-chips {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px 12px 12px;
+  max-width: 640px;
+}
+
+.chat-chips[hidden] {
+  display: none;
+}
+
+.chip {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border, #d0d0d0);
+  background: transparent;
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.875rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font: inherit;
+}
+
+.chip:hover {
+  background: var(--color-bg, #f4f4f4);
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--color-primary, #1f6feb);
+  outline-offset: 2px;
+}
 
 #chat-form {
   display: flex;
@@ -682,6 +723,44 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   font-size: var(--font-size-xs);
   color: var(--color-error);
   padding-left: var(--space-3);
+}
+
+#toast-container {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.toast {
+  padding: 12px 14px;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  max-width: 360px;
+  pointer-events: auto;
+}
+
+.toast--error {
+  border-left: 3px solid #d83b3b;
+  background: #fff5f5;
+  color: #5a0f0f;
+}
+
+@media (hover: hover) {
+  .chip:hover {
+    background: var(--color-bg, #f4f4f4);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    transition: none !important;
+  }
 }
 
 /* ── Add connector dialog ── */

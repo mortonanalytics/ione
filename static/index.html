@@ -20,6 +20,7 @@
       <!-- Workspace switcher -->
       <div id="workspace-switcher">
         <button id="workspace-trigger" aria-haspopup="true" aria-expanded="false" aria-label="Switch workspace">
+          <span id="workspace-lock" class="workspace-lock" hidden aria-label="Read-only sample workspace" title="Read-only sample workspace">🔒</span>
           <span id="workspace-name">Loading…</span>
           <span id="workspace-domain" class="workspace-domain"></span>
           <span class="workspace-caret" aria-hidden="true">▾</span>
@@ -52,6 +53,20 @@
       <!-- Chat panel -->
       <div id="panel-chat" role="tabpanel" aria-labelledby="tab-chat">
         <div id="transcript" aria-live="polite"></div>
+        <div id="chat-chips" class="chat-chips" hidden>
+          <button type="button" class="chip" data-prompt="What wildfires are active near populated areas right now?">
+            What wildfires are active near populated areas right now?
+          </button>
+          <button type="button" class="chip" data-prompt="Which NWS alerts in the last 24h need field response?">
+            Which NWS alerts in the last 24h need field response?
+          </button>
+          <button type="button" class="chip" data-prompt="Why did the critic reject survivor S-0142?">
+            Why did the critic reject survivor S-0142?
+          </button>
+          <button type="button" class="chip" data-prompt="What approvals are pending and why?">
+            What approvals are pending and why?
+          </button>
+        </div>
         <form id="chat-form">
           <textarea id="prompt" rows="3" placeholder="Type a message…" required></textarea>
           <button type="submit" id="send-btn">Send</button>
@@ -181,5 +196,6 @@
   </dialog>
 
   <script src="/app.js"></script>
+  <div id="toast-container" aria-live="assertive" role="alert"></div>
 </body>
 </html>
