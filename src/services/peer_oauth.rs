@@ -4,7 +4,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::state::AppState;
+use crate::{error::AppError, state::AppState};
 
 #[derive(Debug, Deserialize)]
 pub struct PeerDiscovery {
@@ -47,18 +47,19 @@ pub async fn begin_federation(
     state: &AppState,
     peer_id: uuid::Uuid,
     peer_url: &str,
-) -> Result<BeginResp> {
+) -> Result<BeginResp, AppError> {
     let client = reqwest::Client::new();
-    let disc: PeerDiscovery = client
-        .get(format!("{peer_url}/.well-known/oauth-authorization-server"))
-        .send()
-        .await
-        .context("peer discovery request")?
-        .error_for_status()
-        .context("peer discovery status")?
-        .json()
-        .await
-        .context("peer discovery json")?;
+    let discovery_url = format!("{peer_url}/.well-known/oauth-authorization-server");
+    let disc_value = crate::util::safe_http::fetch_public_metadata(
+        &discovery_url,
+        64_000,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
+    let disc: PeerDiscovery = serde_json::from_value(disc_value)
+        .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
+    verify_peer_endpoint_hosts(peer_url, &disc)?;
 
     let self_client_metadata_url = format!("{}/.well-known/mcp-client", state.config.oauth_issuer);
     let redirect_uri = format!("{}/api/v1/peers/callback", state.config.oauth_issuer);
@@ -115,7 +116,8 @@ pub async fn begin_federation(
     let peer_repo = crate::repos::PeerRepo::new(state.pool.clone());
     peer_repo
         .begin_oauth(peer_id, &register_resp.client_id)
-        .await?;
+        .await
+        .map_err(AppError::Internal)?;
 
     Ok(BeginResp {
         authorize_url,
@@ -167,6 +169,7 @@ pub async fn complete_callback(
         .await
         .context("peer token json")?;
     let access_hash = sha256_hex(&tokens.access_token);
+    let access_ciphertext = crate::util::token_crypto::encrypt_token(&tokens.access_token)?;
     let refresh_hash = tokens
         .refresh_token
         .as_ref()
@@ -176,8 +179,40 @@ pub async fn complete_callback(
         chrono::Utc::now() + chrono::Duration::seconds(tokens.expires_in.unwrap_or(3600));
     let peer_repo = crate::repos::PeerRepo::new(state.pool.clone());
     peer_repo
-        .set_tokens(pending.peer_id, &access_hash, &refresh_hash, expires_at)
+        .set_tokens(
+            pending.peer_id,
+            &access_hash,
+            &refresh_hash,
+            &access_ciphertext,
+            expires_at,
+        )
         .await?;
+    Ok(())
+}
+
+fn verify_peer_endpoint_hosts(peer_url: &str, disc: &PeerDiscovery) -> Result<(), AppError> {
+    let peer_host = url::Url::parse(peer_url)
+        .map_err(|_| AppError::BadRequest("invalid peerUrl".into()))?
+        .host_str()
+        .ok_or_else(|| AppError::BadRequest("invalid peerUrl".into()))?
+        .to_string();
+
+    for endpoint in [
+        &disc.authorization_endpoint,
+        &disc.token_endpoint,
+        &disc.registration_endpoint,
+    ] {
+        let endpoint_host = url::Url::parse(endpoint)
+            .map_err(|_| AppError::BadRequest("invalid peer endpoint".into()))?
+            .host_str()
+            .ok_or_else(|| AppError::BadRequest("invalid peer endpoint".into()))?
+            .to_string();
+        if endpoint_host != peer_host {
+            return Err(AppError::BadRequest(
+                "peer endpoints must match peer host".into(),
+            ));
+        }
+    }
     Ok(())
 }
 

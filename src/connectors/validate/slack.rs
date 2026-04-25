@@ -45,7 +45,6 @@ impl Validator for SlackValidator {
         }
 
         Ok(ValidateOk {
-            ok: true,
             sample: json!({ "webhookHost": "hooks.slack.com" }),
         })
     }

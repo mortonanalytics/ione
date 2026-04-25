@@ -84,9 +84,8 @@ pub async fn create_peer(
     .await
     .map_err(map_peer_registration_error)?;
 
-    let begin = crate::services::peer_oauth::begin_federation(&state, peer.id, &req.peer_url)
-        .await
-        .map_err(AppError::Internal)?;
+    let begin =
+        crate::services::peer_oauth::begin_federation(&state, peer.id, &req.peer_url).await?;
 
     PENDING_FEDERATIONS
         .lock()
@@ -141,9 +140,7 @@ pub(crate) async fn callback(
     crate::services::peer_oauth::complete_callback(&state, &pending, &q.code)
         .await
         .map_err(AppError::Internal)?;
-    let _manifest = fetch_manifest_over_mcp(&state, peer_id)
-        .await
-        .unwrap_or_else(|_| json!({ "tools": [] }));
+    let _ = fetch_manifest_over_mcp(&state, peer_id).await;
     Ok(Redirect::to(&format!("/#/peers/{peer_id}")))
 }
 
@@ -153,7 +150,7 @@ pub(crate) async fn get_manifest(
 ) -> Result<Json<Value>, AppError> {
     let manifest = fetch_manifest_over_mcp(&state, peer_id)
         .await
-        .unwrap_or_else(|_| json!({ "tools": [] }));
+        .map_err(AppError::Internal)?;
     Ok(Json(manifest))
 }
 
@@ -293,8 +290,44 @@ fn map_peer_registration_error(e: anyhow::Error) -> AppError {
     }
 }
 
-async fn fetch_manifest_over_mcp(_state: &AppState, _peer_id: Uuid) -> anyhow::Result<Value> {
-    // TODO: real manifest fetch. T9.2 stores token hashes, so there is no bearer
-    // token available for a tools/list MCP round trip yet.
-    Ok(json!({ "tools": [] }))
+async fn fetch_manifest_over_mcp(state: &AppState, peer_id: Uuid) -> anyhow::Result<Value> {
+    let peer_repo = PeerRepo::new(state.pool.clone());
+    let peer = peer_repo
+        .get(peer_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("peer {peer_id} not found"))?;
+
+    if peer.status != crate::models::PeerStatus::PendingAllowlist {
+        anyhow::bail!("peer is not pending allowlist");
+    }
+
+    let ciphertext = peer
+        .access_token_ciphertext
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("peer access token is unavailable"))?;
+    let access_token = crate::util::token_crypto::decrypt_token(ciphertext)?;
+    let endpoint = peer.mcp_url.trim_end_matches('/');
+    let resp: Value = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?
+        .post(format!("{endpoint}/mcp"))
+        .bearer_auth(access_token)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let tools = resp
+        .get("result")
+        .and_then(|result| result.get("tools"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    Ok(json!({ "tools": tools }))
 }

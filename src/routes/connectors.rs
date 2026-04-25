@@ -182,14 +182,30 @@ async fn do_create_connector(
 
     if workspace_id != crate::demo::DEMO_WORKSPACE_ID {
         let activation_repo = crate::repos::ActivationRepo::new(state.pool.clone());
-        let _ = activation_repo
+        let inserted = activation_repo
             .mark(
                 auth.user_id,
                 workspace_id,
                 ActivationTrack::RealActivation,
                 ActivationStepKey::AddedConnector,
             )
-            .await;
+            .await
+            .unwrap_or(false);
+        if inserted
+            && activation_repo
+                .is_track_complete(auth.user_id, workspace_id, ActivationTrack::RealActivation)
+                .await
+                .unwrap_or(false)
+        {
+            crate::services::funnel::track(
+                &state,
+                session.0,
+                Some(auth.user_id),
+                Some(workspace_id),
+                "activation_completed",
+                Some(json!({ "track": "real_activation" })),
+            );
+        }
     }
 
     Ok(Json(connector_json))

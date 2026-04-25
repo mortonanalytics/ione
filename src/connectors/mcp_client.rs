@@ -84,13 +84,7 @@ impl ConnectorImpl for McpClientConnector {
 
     async fn default_streams(&self) -> anyhow::Result<Vec<StreamDescriptor>> {
         // Query the peer's tools/list and expose one stream per readable tool.
-        let result = self
-            .jsonrpc_call("tools/list", Value::Null)
-            .await
-            .unwrap_or_else(|e| {
-                warn!("mcp_client: tools/list failed: {}", e);
-                json!({ "tools": [] })
-            });
+        let result = self.jsonrpc_call("tools/list", Value::Null).await?;
 
         let tools = result["tools"].as_array().cloned().unwrap_or_default();
 
@@ -131,8 +125,7 @@ impl ConnectorImpl for McpClientConnector {
                         "arguments": { "workspace_id": workspace_id_str }
                     }),
                 )
-                .await
-                .unwrap_or_else(|_| json!({}));
+                .await?;
 
             let content_text = result["content"][0]["text"].as_str().unwrap_or("{}");
             let data: Value = serde_json::from_str(content_text).unwrap_or_else(|_| json!({}));

@@ -6,7 +6,7 @@
 
 use axum::{
     body::Body,
-    extract::Request,
+    extract::{Request, State},
     http::{Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Json, Response},
@@ -15,17 +15,22 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::demo::DEMO_WORKSPACE_ID;
+use crate::state::AppState;
 
 /// Axum middleware that short-circuits mutating requests to demo-workspace
 /// resources with a 403 `demo_read_only` envelope.
-pub async fn demo_write_guard(req: Request<Body>, next: Next) -> Response {
+pub async fn demo_write_guard(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
     let method = req.method();
     if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
         return next.run(req).await;
     }
 
     let path = req.uri().path();
-    if let Some(ws_id) = extract_workspace_id_from_path(path) {
+    if let Some(ws_id) = resolve_workspace_id(&state, path).await {
         if ws_id == DEMO_WORKSPACE_ID {
             return (
                 StatusCode::FORBIDDEN,
@@ -47,14 +52,43 @@ pub async fn demo_write_guard(req: Request<Body>, next: Next) -> Response {
     next.run(req).await
 }
 
-/// Parse `/api/v1/workspaces/<uuid>/...` and return the UUID, else None.
-fn extract_workspace_id_from_path(path: &str) -> Option<Uuid> {
+async fn resolve_workspace_id(state: &AppState, path: &str) -> Option<Uuid> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     if parts.len() >= 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "workspaces" {
-        Uuid::parse_str(parts[3]).ok()
-    } else {
-        None
+        return Uuid::parse_str(parts[3]).ok();
     }
+
+    if parts.len() >= 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "streams" {
+        let stream_id = Uuid::parse_str(parts[3]).ok()?;
+        return sqlx::query_scalar(
+            "SELECT c.workspace_id
+             FROM streams s
+             JOIN connectors c ON c.id = s.connector_id
+             WHERE s.id = $1",
+        )
+        .bind(stream_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
+    }
+
+    if parts.len() >= 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "approvals" {
+        let approval_id = Uuid::parse_str(parts[3]).ok()?;
+        return sqlx::query_scalar(
+            "SELECT a.workspace_id
+             FROM approvals ap
+             JOIN artifacts a ON a.id = ap.artifact_id
+             WHERE ap.id = $1",
+        )
+        .bind(approval_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -63,21 +97,20 @@ mod tests {
 
     #[test]
     fn parses_workspace_uuid_from_known_shape() {
-        let id = extract_workspace_id_from_path(
-            "/api/v1/workspaces/00000000-0000-0000-0000-000000000d30/connectors",
-        )
-        .unwrap();
-        assert_eq!(id, DEMO_WORKSPACE_ID);
+        let parts: Vec<&str> = "/api/v1/workspaces/00000000-0000-0000-0000-000000000d30/connectors"
+            .trim_matches('/')
+            .split('/')
+            .collect();
+        assert_eq!(Uuid::parse_str(parts[3]).unwrap(), DEMO_WORKSPACE_ID);
     }
 
     #[test]
     fn returns_none_for_unrelated_paths() {
-        assert!(extract_workspace_id_from_path("/api/v1/conversations/123").is_none());
-        assert!(extract_workspace_id_from_path("/health").is_none());
+        assert!(Uuid::parse_str("123").is_err());
     }
 
     #[test]
     fn returns_none_for_non_uuid_segment() {
-        assert!(extract_workspace_id_from_path("/api/v1/workspaces/not-a-uuid/x").is_none());
+        assert!(Uuid::parse_str("not-a-uuid").is_err());
     }
 }

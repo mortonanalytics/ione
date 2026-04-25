@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{short_client, ValidateErr, ValidateOk, ValidateResult, Validator};
+use super::{ValidateErr, ValidateOk, ValidateResult, Validator};
 
 pub struct IrwinValidator;
 
@@ -22,12 +22,13 @@ impl Validator for IrwinValidator {
                 .with_field("endpoint")
         })?;
 
-        let resp = short_client(5).head(endpoint).send().await.map_err(|e| {
-            ValidateErr::new("network_timeout", &format!("Couldn't reach IRWIN: {e}"))
-                .with_hint("Check your network or firewall, then click Test again.")
-        })?;
-
-        let status = resp.status();
+        let status =
+            crate::util::safe_http::public_head(endpoint, std::time::Duration::from_secs(5))
+                .await
+                .map_err(|_| {
+                    ValidateErr::new("validation_failed", "endpoint must be a public URL.")
+                        .with_field("endpoint")
+                })?;
         if status.is_server_error() {
             return Err(ValidateErr::new(
                 "irwin_upstream_error",
@@ -37,7 +38,6 @@ impl Validator for IrwinValidator {
         }
 
         Ok(ValidateOk {
-            ok: true,
             sample: json!({ "endpointHost": parsed.host_str().unwrap_or_default() }),
         })
     }

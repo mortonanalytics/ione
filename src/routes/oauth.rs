@@ -8,6 +8,7 @@ use base64::{engine::general_purpose, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{auth::AuthContext, error::AppError, models::ClientMetadata, state::AppState};
@@ -56,22 +57,13 @@ pub(crate) async fn register(
     let metadata_json: Value = match body {
         RegisterBody::Cimd {
             client_metadata_url,
-        } => {
-            let resp = reqwest::Client::new()
-                .get(&client_metadata_url)
-                .send()
-                .await
-                .map_err(|e| AppError::BadRequest(format!("CIMD fetch failed: {e}")))?;
-            if !resp.status().is_success() {
-                return Err(AppError::BadRequest(format!(
-                    "CIMD fetch returned {}",
-                    resp.status()
-                )));
-            }
-            resp.json()
-                .await
-                .map_err(|e| AppError::BadRequest(format!("CIMD parse: {e}")))?
-        }
+        } => crate::util::safe_http::fetch_public_metadata(
+            &client_metadata_url,
+            64_000,
+            Duration::from_secs(5),
+        )
+        .await
+        .map_err(|_| AppError::BadRequest("invalid client metadata".into()))?,
         RegisterBody::Direct(m) => serde_json::to_value(&m)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("serialize client metadata: {e}")))?,
     };
@@ -132,6 +124,7 @@ pub(crate) async fn authorize(
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::BadRequest("unknown client_id".into()))?;
+    ensure_registered_redirect_uri(&client.client_metadata, &q.redirect_uri)?;
 
     let html = format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><title>Connect {name} to IONe</title></head>
@@ -177,6 +170,14 @@ pub(crate) async fn authorize_consent(
     axum::Extension(ctx): axum::Extension<AuthContext>,
     Form(form): Form<AuthorizeForm>,
 ) -> Result<Response, AppError> {
+    let client_repo = crate::repos::OauthClientRepo::new(state.pool.clone());
+    let client = client_repo
+        .get_by_client_id(&form.client_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::BadRequest("unknown client_id".into()))?;
+    ensure_registered_redirect_uri(&client.client_metadata, &form.redirect_uri)?;
+
     let redirect = form.redirect_uri.clone();
     let st = form.state.clone().unwrap_or_default();
     if form.action != "allow" {
@@ -268,6 +269,7 @@ pub(crate) async fn token(
                     ));
                 }
             }
+            ensure_client_redirect_still_registered(&state, &client_id, &row.redirect_uri).await?;
             let verifier_hash =
                 general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
             if verifier_hash != row.code_challenge {
@@ -294,6 +296,10 @@ pub(crate) async fn token(
                     "invalid_grant: client mismatch".into(),
                 ));
             }
+            token_repo
+                .revoke_client_tokens(&row.client_id, row.user_id)
+                .await
+                .map_err(AppError::Internal)?;
             (row.client_id, row.user_id, row.scope)
         }
     };
@@ -333,6 +339,7 @@ pub(crate) async fn token(
 #[derive(Deserialize)]
 pub(crate) struct RevokeBody {
     pub token: String,
+    pub client_id: String,
     #[serde(default)]
     pub token_type_hint: Option<String>,
 }
@@ -344,19 +351,69 @@ pub(crate) async fn revoke(
     let _ = body.token_type_hint;
     let hash = sha256_hex(&body.token);
     let pool = state.pool.clone();
-    let _ = sqlx::query(
-        "UPDATE oauth_access_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL",
-    )
-    .bind(&hash)
-    .execute(&pool)
-    .await;
-    let _ = sqlx::query(
-        "UPDATE oauth_refresh_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL",
-    )
-    .bind(&hash)
-    .execute(&pool)
-    .await;
+    if token_belongs_to_client(&pool, "oauth_access_tokens", &hash, &body.client_id).await {
+        let _ = sqlx::query(
+            "UPDATE oauth_access_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL",
+        )
+        .bind(&hash)
+        .execute(&pool)
+        .await;
+    } else if token_belongs_to_client(&pool, "oauth_refresh_tokens", &hash, &body.client_id).await {
+        let _ = sqlx::query(
+            "UPDATE oauth_refresh_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL",
+        )
+        .bind(&hash)
+        .execute(&pool)
+        .await;
+    } else {
+        tracing::warn!(client_id = %body.client_id, "OAuth revoke ignored for missing or mismatched client token");
+    }
     StatusCode::OK
+}
+
+fn ensure_registered_redirect_uri(metadata: &Value, redirect_uri: &str) -> Result<(), AppError> {
+    let parsed: ClientMetadata = serde_json::from_value(metadata.clone())
+        .map_err(|_| AppError::BadRequest("invalid client metadata".into()))?;
+    if parsed.redirect_uris.iter().any(|uri| uri == redirect_uri) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest("redirect_uri not registered".into()))
+    }
+}
+
+async fn ensure_client_redirect_still_registered(
+    state: &AppState,
+    client_id: &str,
+    redirect_uri: &str,
+) -> Result<(), AppError> {
+    let repo = crate::repos::OauthClientRepo::new(state.pool.clone());
+    let client = repo
+        .get_by_client_id(client_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::BadRequest("unknown client_id".into()))?;
+    ensure_registered_redirect_uri(&client.client_metadata, redirect_uri)
+}
+
+async fn token_belongs_to_client(
+    pool: &sqlx::PgPool,
+    table: &str,
+    token_hash: &str,
+    client_id: &str,
+) -> bool {
+    let sql = format!("SELECT client_id FROM {table} WHERE token_hash = $1");
+    match sqlx::query_scalar::<_, String>(&sql)
+        .bind(token_hash)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(owner)) => owner == client_id,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(error = %e, "OAuth revoke token lookup failed");
+            false
+        }
+    }
 }
 
 fn generate_opaque_token(bytes: usize) -> String {

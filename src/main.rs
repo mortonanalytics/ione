@@ -22,6 +22,8 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    ione::util::token_crypto::validate_env_key()?;
+
     let pool = ione::db::connect(&database_url).await?;
     ione::db::migrate(&pool).await?;
 

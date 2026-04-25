@@ -19,8 +19,8 @@ impl ActivationRepo {
         workspace_id: Uuid,
         track: ActivationTrack,
         step: ActivationStepKey,
-    ) -> Result<()> {
-        sqlx::query(
+    ) -> Result<bool> {
+        let result = sqlx::query(
             "INSERT INTO activation_progress (user_id, workspace_id, track, step_key)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT DO NOTHING",
@@ -32,7 +32,52 @@ impl ActivationRepo {
         .execute(&self.pool)
         .await
         .context("failed to mark activation progress")?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn is_step_complete(
+        &self,
+        user_id: Uuid,
+        workspace_id: Uuid,
+        track: ActivationTrack,
+        step: ActivationStepKey,
+    ) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM activation_progress
+                WHERE user_id = $1 AND workspace_id = $2 AND track = $3 AND step_key = $4
+            )",
+        )
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(track_str(track))
+        .bind(step_key_str(step))
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to query activation step")?;
+        Ok(exists)
+    }
+
+    pub async fn is_track_complete(
+        &self,
+        user_id: Uuid,
+        workspace_id: Uuid,
+        track: ActivationTrack,
+    ) -> Result<bool> {
+        let complete_count: i64 = sqlx::query_scalar(
+            "SELECT count(*)
+               FROM activation_progress
+              WHERE user_id = $1
+                AND workspace_id = $2
+                AND track = $3",
+        )
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(track_str(track))
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to query activation track")?;
+        Ok(complete_count as usize >= expected_steps(track).len())
     }
 
     pub async fn list(
@@ -104,6 +149,27 @@ fn track_str(track: ActivationTrack) -> &'static str {
     match track {
         ActivationTrack::DemoWalkthrough => "demo_walkthrough",
         ActivationTrack::RealActivation => "real_activation",
+    }
+}
+
+pub fn track_key_str(track: ActivationTrack) -> &'static str {
+    track_str(track)
+}
+
+pub fn expected_steps(track: ActivationTrack) -> &'static [ActivationStepKey] {
+    match track {
+        ActivationTrack::DemoWalkthrough => &[
+            ActivationStepKey::AskedDemoQuestion,
+            ActivationStepKey::OpenedDemoSurvivor,
+            ActivationStepKey::ReviewedDemoApproval,
+            ActivationStepKey::ViewedDemoAudit,
+        ],
+        ActivationTrack::RealActivation => &[
+            ActivationStepKey::AddedConnector,
+            ActivationStepKey::FirstSignal,
+            ActivationStepKey::FirstApprovalDecided,
+            ActivationStepKey::FirstAuditViewed,
+        ],
     }
 }
 

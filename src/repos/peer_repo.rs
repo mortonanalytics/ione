@@ -24,8 +24,8 @@ impl PeerRepo {
             "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy)
              VALUES ($1, $2, $3, $4)
              RETURNING id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                 oauth_client_id, access_token_hash, refresh_token_hash, token_expires_at,
-                 tool_allowlist",
+                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
+                 token_expires_at, tool_allowlist",
         )
         .bind(name)
         .bind(mcp_url)
@@ -39,8 +39,8 @@ impl PeerRepo {
     pub async fn list(&self) -> anyhow::Result<Vec<Peer>> {
         sqlx::query_as::<_, Peer>(
             "SELECT id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                 oauth_client_id, access_token_hash, refresh_token_hash, token_expires_at,
-                 tool_allowlist
+                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
+                 token_expires_at, tool_allowlist
              FROM peers
              ORDER BY created_at DESC",
         )
@@ -52,8 +52,8 @@ impl PeerRepo {
     pub async fn get(&self, id: Uuid) -> anyhow::Result<Option<Peer>> {
         sqlx::query_as::<_, Peer>(
             "SELECT id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                 oauth_client_id, access_token_hash, refresh_token_hash, token_expires_at,
-                 tool_allowlist
+                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
+                 token_expires_at, tool_allowlist
              FROM peers
              WHERE id = $1",
         )
@@ -69,8 +69,8 @@ impl PeerRepo {
              SET status = $2
              WHERE id = $1
              RETURNING id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                 oauth_client_id, access_token_hash, refresh_token_hash, token_expires_at,
-                 tool_allowlist",
+                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
+                 token_expires_at, tool_allowlist",
         )
         .bind(id)
         .bind(status)
@@ -99,18 +99,21 @@ impl PeerRepo {
         peer_id: Uuid,
         access_token_hash: &str,
         refresh_token_hash: &str,
+        access_token_ciphertext: &[u8],
         expires_at: chrono::DateTime<chrono::Utc>,
     ) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE peers
              SET access_token_hash = $1,
                  refresh_token_hash = $2,
-                 token_expires_at = $3,
+                 access_token_ciphertext = $3,
+                 token_expires_at = $4,
                  status = 'pending_allowlist'
-             WHERE id = $4",
+             WHERE id = $5",
         )
         .bind(access_token_hash)
         .bind(refresh_token_hash)
+        .bind(access_token_ciphertext)
         .bind(expires_at)
         .bind(peer_id)
         .execute(&self.pool)

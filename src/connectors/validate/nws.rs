@@ -64,7 +64,6 @@ impl Validator for NwsValidator {
             .unwrap_or(0);
 
         Ok(ValidateOk {
-            ok: true,
             sample: json!({ "alertCount": alert_count }),
         })
     }

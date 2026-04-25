@@ -1,5 +1,4 @@
 use axum::{
-    middleware::from_fn,
     middleware::from_fn_with_state,
     routing::{delete, get, post},
     Router,
@@ -153,7 +152,7 @@ pub fn router(state: AppState) -> Router {
             post(peers::subscribe_peer),
         )
         .route("/api/v1/me", get(me::me))
-        .route_layer(from_fn(demo_write_guard))
+        .route_layer(from_fn_with_state(state.clone(), demo_write_guard))
         .route_layer(from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state.clone());
 

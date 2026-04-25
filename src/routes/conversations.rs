@@ -111,30 +111,79 @@ pub(crate) async fn post_message(
 
     let msg_repo = MessageRepo::new(state.pool.clone());
 
-    msg_repo
-        .append(id, MessageRole::User, &content, None)
-        .await
-        .map_err(AppError::Internal)?;
-
-    let history = msg_repo.list(id).await.map_err(AppError::Internal)?;
-
     if conv.workspace_id == crate::demo::DEMO_WORKSPACE_ID {
         let reply = crate::demo::canned_chat::canned_response(&content);
-        let assistant_msg = msg_repo
-            .append(id, MessageRole::Assistant, reply, Some("canned"))
+        let mut tx = state
+            .pool
+            .begin()
             .await
-            .map_err(AppError::Internal)?;
+            .map_err(|e| AppError::Internal(e.into()))?;
+        sqlx::query_as::<_, Message>(
+            "INSERT INTO messages (conversation_id, role, content, model)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, conversation_id, role, content, model, tokens_in, tokens_out, created_at",
+        )
+        .bind(id)
+        .bind(MessageRole::User)
+        .bind(&content)
+        .bind(Option::<&str>::None)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+        let assistant_msg = sqlx::query_as::<_, Message>(
+            "INSERT INTO messages (conversation_id, role, content, model)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, conversation_id, role, content, model, tokens_in, tokens_out, created_at",
+        )
+        .bind(id)
+        .bind(MessageRole::Assistant)
+        .bind(reply)
+        .bind(Some("canned"))
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+
         let activation_repo = crate::repos::ActivationRepo::new(state.pool.clone());
-        let _ = activation_repo
+        let inserted = activation_repo
             .mark(
                 state.default_user_id,
                 conv.workspace_id,
                 ActivationTrack::DemoWalkthrough,
                 ActivationStepKey::AskedDemoQuestion,
             )
-            .await;
+            .await
+            .unwrap_or(false);
+        if inserted
+            && activation_repo
+                .is_track_complete(
+                    state.default_user_id,
+                    conv.workspace_id,
+                    ActivationTrack::DemoWalkthrough,
+                )
+                .await
+                .unwrap_or(false)
+        {
+            crate::services::funnel::track(
+                &state,
+                session.0,
+                Some(ctx.user_id),
+                Some(conv.workspace_id),
+                "activation_completed",
+                Some(json!({ "track": "demo_walkthrough" })),
+            );
+        }
         return Ok(Json(assistant_msg));
     }
+
+    msg_repo
+        .append(id, MessageRole::User, &content, None)
+        .await
+        .map_err(AppError::Internal)?;
+
+    let history = msg_repo.list(id).await.map_err(AppError::Internal)?;
 
     let model = req
         .model

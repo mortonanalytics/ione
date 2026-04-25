@@ -11,6 +11,7 @@ pub mod repos;
 pub mod routes;
 pub mod services;
 pub mod state;
+pub mod util;
 
 use axum::Router;
 use sqlx::PgPool;

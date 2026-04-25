@@ -8,6 +8,7 @@ use axum::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -36,7 +37,7 @@ pub async fn mcp_bearer(
     };
 
     if let Ok(expected) = std::env::var("IONE_OAUTH_STATIC_BEARER") {
-        if !expected.is_empty() && token == expected {
+        if !expected.is_empty() && token.as_bytes().ct_eq(expected.as_bytes()).into() {
             req.extensions_mut().insert(OauthContext {
                 user_id: state.default_user_id,
                 client_id: "static".to_string(),

@@ -51,7 +51,6 @@ impl Validator for FirmsValidator {
         let detection_count = body.lines().count().saturating_sub(1);
 
         Ok(ValidateOk {
-            ok: true,
             sample: json!({ "detectionCount": detection_count }),
         })
     }

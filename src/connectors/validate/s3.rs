@@ -34,10 +34,12 @@ impl Validator for S3Validator {
             .unwrap_or("us-east-1");
 
         if let Some(ep) = endpoint {
-            reqwest::Url::parse(ep).map_err(|_| {
-                ValidateErr::new("validation_failed", "endpoint is not a valid URL.")
-                    .with_field("endpoint")
-            })?;
+            crate::util::safe_http::ensure_public_url(ep)
+                .await
+                .map_err(|_| {
+                    ValidateErr::new("validation_failed", "endpoint is not a valid URL.")
+                        .with_field("endpoint")
+                })?;
         }
 
         #[cfg(feature = "s3")]
@@ -55,7 +57,6 @@ impl Validator for S3Validator {
 
             let object_count = output.key_count().unwrap_or_default();
             return Ok(ValidateOk {
-                ok: true,
                 sample: json!({ "objectCount": object_count }),
             });
         }
@@ -66,7 +67,6 @@ impl Validator for S3Validator {
             let _ = prefix;
             let _ = region;
             Ok(ValidateOk {
-                ok: true,
                 sample: json!({ "note": "config shape ok - full dry-run pending aws_sdk_s3 dep" }),
             })
         }

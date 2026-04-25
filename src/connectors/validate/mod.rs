@@ -16,14 +16,12 @@ pub trait Validator {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidateOk {
-    pub ok: bool,
     pub sample: Value,
 }
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidateErr {
-    pub ok: bool,
     pub error: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,7 +33,6 @@ pub struct ValidateErr {
 impl ValidateErr {
     pub fn new(error: &str, message: &str) -> Self {
         Self {
-            ok: false,
             error: error.into(),
             message: message.into(),
             hint: None,

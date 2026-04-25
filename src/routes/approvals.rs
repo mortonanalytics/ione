@@ -130,26 +130,53 @@ pub async fn decide_approval(
 
     if let Some(workspace_id) = workspace_id {
         if workspace_id != crate::demo::DEMO_WORKSPACE_ID {
-            crate::services::funnel::track(
-                &state,
-                session.0,
-                Some(auth.user_id),
-                Some(workspace_id),
-                "first_real_approval_decided",
-                Some(json!({
-                    "approvalId": approval_id,
-                    "decision": req.decision,
-                })),
-            );
             let activation_repo = crate::repos::ActivationRepo::new(state.pool.clone());
-            let _ = activation_repo
+            let was_complete = activation_repo
+                .is_step_complete(
+                    auth.user_id,
+                    workspace_id,
+                    ActivationTrack::RealActivation,
+                    ActivationStepKey::FirstApprovalDecided,
+                )
+                .await
+                .unwrap_or(false);
+            let inserted = activation_repo
                 .mark(
                     auth.user_id,
                     workspace_id,
                     ActivationTrack::RealActivation,
                     ActivationStepKey::FirstApprovalDecided,
                 )
-                .await;
+                .await
+                .unwrap_or(false);
+            if inserted
+                && activation_repo
+                    .is_track_complete(auth.user_id, workspace_id, ActivationTrack::RealActivation)
+                    .await
+                    .unwrap_or(false)
+            {
+                crate::services::funnel::track(
+                    &state,
+                    session.0,
+                    Some(auth.user_id),
+                    Some(workspace_id),
+                    "activation_completed",
+                    Some(json!({ "track": "real_activation" })),
+                );
+            }
+            if !was_complete {
+                crate::services::funnel::track(
+                    &state,
+                    session.0,
+                    Some(auth.user_id),
+                    Some(workspace_id),
+                    "first_real_approval_decided",
+                    Some(json!({
+                        "approvalId": approval_id,
+                        "decision": req.decision,
+                    })),
+                );
+            }
         }
     }
 

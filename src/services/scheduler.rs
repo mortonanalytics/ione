@@ -173,7 +173,7 @@ async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
                                 })),
                             )
                             .await;
-                            // TODO(T7.3b): emit funnel_events "first_real_signal" — requires scheduler user attribution
+                            emit_first_real_signal(state, workspace_id, signal_id, "rule").await;
                             first_signal_emitted = true;
                         }
                         Ok(None) => {}
@@ -224,6 +224,8 @@ async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
                                     })),
                                 )
                                 .await;
+                                emit_first_real_signal(state, workspace_id, signal_id, "generator")
+                                    .await;
                             }
                             Ok(None) => {}
                             Err(e) => warn!(
@@ -265,6 +267,76 @@ async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn emit_first_real_signal(
+    state: &AppState,
+    workspace_id: uuid::Uuid,
+    signal_id: uuid::Uuid,
+    source: &str,
+) {
+    if workspace_id == crate::demo::DEMO_WORKSPACE_ID {
+        return;
+    }
+
+    let already_emitted: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM funnel_events
+            WHERE event_kind = 'first_real_signal'
+              AND workspace_id = $1
+              AND occurred_at > now() - interval '1 day'
+        )",
+    )
+    .bind(workspace_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(false);
+    if already_emitted {
+        return;
+    }
+
+    let session_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, workspace_id.as_bytes());
+    crate::services::funnel::track(
+        state,
+        session_id,
+        None,
+        Some(workspace_id),
+        "first_real_signal",
+        Some(json!({
+            "signalId": signal_id,
+            "source": source,
+        })),
+    );
+
+    let activation_repo = crate::repos::ActivationRepo::new(state.pool.clone());
+    let inserted = activation_repo
+        .mark(
+            state.default_user_id,
+            workspace_id,
+            crate::models::ActivationTrack::RealActivation,
+            crate::models::ActivationStepKey::FirstSignal,
+        )
+        .await
+        .unwrap_or(false);
+    if inserted
+        && activation_repo
+            .is_track_complete(
+                state.default_user_id,
+                workspace_id,
+                crate::models::ActivationTrack::RealActivation,
+            )
+            .await
+            .unwrap_or(false)
+    {
+        crate::services::funnel::track(
+            state,
+            session_id,
+            Some(state.default_user_id),
+            Some(workspace_id),
+            "activation_completed",
+            Some(json!({ "track": "real_activation" })),
+        );
+    }
 }
 
 async fn run_critic_for_workspace(
