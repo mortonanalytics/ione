@@ -22,10 +22,12 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
+const TEST_STATIC_BEARER: &str = "phase12-peer-static-bearer";
 
 // ─── Harness ──────────────────────────────────────────────────────────────────
 
 async fn spawn_app() -> (String, PgPool) {
+    std::env::set_var("IONE_OAUTH_STATIC_BEARER", TEST_STATIC_BEARER);
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
 
     let pool = PgPoolOptions::new()
@@ -72,6 +74,7 @@ async fn truncate_all(pool: &PgPool) {
 /// Spawn a second app instance against the same DB without truncating.
 /// Used in two-node federation tests where node A runs spawn_app() first.
 async fn spawn_second_app() -> (String, PgPool) {
+    std::env::set_var("IONE_OAUTH_STATIC_BEARER", TEST_STATIC_BEARER);
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
 
     let pool = PgPoolOptions::new()
@@ -146,8 +149,8 @@ async fn insert_trust_issuer(
 
 async fn insert_peer(pool: &PgPool, name: &str, mcp_url: &str, issuer_id: Uuid) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy)
-         VALUES ($1, $2, $3, '{}'::jsonb)
+        "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy, tool_allowlist)
+         VALUES ($1, $2, $3, '{}'::jsonb, '[\"propose_artifact\"]'::jsonb)
          RETURNING id",
     )
     .bind(name)
@@ -233,7 +236,7 @@ fn mint_jwt(subject: &str, issuer: &str, audience: &str, secret: &[u8]) -> Strin
 
 // ─── Test 1: peer_status_enum_variants ───────────────────────────────────────
 
-/// peer_status has exactly the three variants: active, paused, error.
+/// peer_status includes the legacy lifecycle states and OAuth federation states.
 #[tokio::test]
 #[ignore]
 async fn peer_status_enum_variants() {
@@ -245,24 +248,20 @@ async fn peer_status_enum_variants() {
             .await
             .expect("failed to query peer_status enum variants");
 
-    assert_eq!(
-        variants.len(),
-        3,
-        "peer_status must have 3 variants, got: {:?}",
-        variants
-    );
-    assert!(
-        variants.contains(&"active".to_string()),
-        "missing variant 'active'"
-    );
-    assert!(
-        variants.contains(&"paused".to_string()),
-        "missing variant 'paused'"
-    );
-    assert!(
-        variants.contains(&"error".to_string()),
-        "missing variant 'error'"
-    );
+    for variant in [
+        "active",
+        "paused",
+        "error",
+        "pending_oauth",
+        "pending_allowlist",
+        "revoked",
+    ] {
+        assert!(
+            variants.contains(&variant.to_string()),
+            "missing variant '{variant}' from {:?}",
+            variants
+        );
+    }
 }
 
 // ─── Test 2: mcp_url_is_unique ────────────────────────────────────────────────
@@ -503,10 +502,11 @@ async fn peer_routing_invokes_propose_artifact_on_peer() {
     sqlx::query(
         "INSERT INTO connectors (workspace_id, kind, name, config)
          VALUES ($1, 'mcp'::connector_kind, 'peer:B Peer 6',
-                 jsonb_build_object('mcp_url', $2, 'bearer_token', ''))",
+                 jsonb_build_object('mcp_url', $2, 'bearer_token', $3))",
     )
     .bind(ws_a)
     .bind(&peer_mcp_url)
+    .bind(TEST_STATIC_BEARER)
     .execute(&pool_a)
     .await
     .expect("insert mcp connector failed");
@@ -625,9 +625,10 @@ async fn sharing_policy_blocks_disallowed_severity() {
 
     // Create peer with sharing_policy that only allows 'routine'.
     let peer_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy)
+        "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy, tool_allowlist)
          VALUES ('Block Peer', 'http://127.0.0.1:2/mcp', $1,
-                 '{\"allow_severity\":[\"routine\"]}'::jsonb)
+                 '{\"allow_severity\":[\"routine\"]}'::jsonb,
+                 '[\"propose_artifact\"]'::jsonb)
          RETURNING id",
     )
     .bind(issuer_id)
@@ -639,9 +640,10 @@ async fn sharing_policy_blocks_disallowed_severity() {
     sqlx::query(
         "INSERT INTO connectors (workspace_id, kind, name, config)
          VALUES ($1, 'mcp'::connector_kind, 'peer:Block Peer',
-                 jsonb_build_object('mcp_url', 'http://127.0.0.1:2/mcp', 'bearer_token', ''))",
+                 jsonb_build_object('mcp_url', 'http://127.0.0.1:2/mcp', 'bearer_token', $2))",
     )
     .bind(ws)
+    .bind(TEST_STATIC_BEARER)
     .execute(&pool)
     .await
     .expect("insert connector failed");
@@ -705,9 +707,10 @@ async fn sharing_policy_allows_matched_severity() {
     let (issuer_id, _) = insert_trust_issuer(&pool, org_id, "https://iss-allow.test", "aud9").await;
 
     let peer_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy)
+        "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy, tool_allowlist)
          VALUES ('Allow Peer', 'http://127.0.0.1:3/mcp', $1,
-                 '{\"allow_severity\":[\"flagged\",\"command\"]}'::jsonb)
+                 '{\"allow_severity\":[\"flagged\",\"command\"]}'::jsonb,
+                 '[\"propose_artifact\"]'::jsonb)
          RETURNING id",
     )
     .bind(issuer_id)
@@ -719,9 +722,10 @@ async fn sharing_policy_allows_matched_severity() {
     sqlx::query(
         "INSERT INTO connectors (workspace_id, kind, name, config)
          VALUES ($1, 'mcp'::connector_kind, 'peer:Allow Peer',
-                 jsonb_build_object('mcp_url', 'http://127.0.0.1:3/mcp', 'bearer_token', ''))",
+                 jsonb_build_object('mcp_url', 'http://127.0.0.1:3/mcp', 'bearer_token', $2))",
     )
     .bind(ws)
+    .bind(TEST_STATIC_BEARER)
     .execute(&pool)
     .await
     .expect("insert connector failed");
@@ -803,10 +807,11 @@ async fn two_node_federation_end_to_end() {
     sqlx::query(
         "INSERT INTO connectors (workspace_id, kind, name, config)
          VALUES ($1, 'mcp'::connector_kind, 'peer:E2E Peer',
-                 jsonb_build_object('mcp_url', $2, 'bearer_token', ''))",
+                 jsonb_build_object('mcp_url', $2, 'bearer_token', $3))",
     )
     .bind(ws_a)
     .bind(&peer_mcp_url)
+    .bind(TEST_STATIC_BEARER)
     .execute(&pool_a)
     .await
     .expect("insert mcp connector for e2e");

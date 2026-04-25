@@ -41,19 +41,12 @@ pub async fn auto_create_connector_for_peer(
 ) -> anyhow::Result<Connector> {
     let connector_repo = ConnectorRepo::new(pool.clone());
 
-    // Fetch the issuer to get the bearer token hint. Use the issuer jwks_uri secret as the
-    // bearer token for peer-to-peer calls (local/test environments). In production this
-    // would be a proper service-account token; for Phase 12 we use the jwks secret.
-    let issuer: Option<crate::models::TrustIssuer> = sqlx::query_as(
-        "SELECT id, org_id, issuer_url, audience, jwks_uri, claim_mapping
-         FROM trust_issuers WHERE id = $1",
-    )
-    .bind(peer.issuer_id)
-    .fetch_optional(pool)
-    .await
-    .context("failed to fetch issuer for peer")?;
-
-    let bearer_token = issuer.map(|i| i.jwks_uri).unwrap_or_default();
+    let bearer_token = if let Some(ciphertext) = peer.access_token_ciphertext.as_deref() {
+        crate::util::token_crypto::decrypt_token(ciphertext)
+            .context("failed to decrypt peer access token")?
+    } else {
+        std::env::var("IONE_OAUTH_STATIC_BEARER").unwrap_or_default()
+    };
 
     let config = serde_json::json!({
         "mcp_url": peer.mcp_url,
