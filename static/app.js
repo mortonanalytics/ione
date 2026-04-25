@@ -449,7 +449,7 @@ function renderWorkspaceLock(ws) {
 
 async function fetchActivation(workspaceId, track) {
   try {
-    return await apiFetch(`/api/v1/activation?workspace_id=${encodeURIComponent(workspaceId)}&track=${encodeURIComponent(track)}`);
+    return await apiFetch(`/api/v1/activation?workspaceId=${encodeURIComponent(workspaceId)}&track=${encodeURIComponent(track)}`);
   } catch (_err) {
     return null;
   }

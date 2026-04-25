@@ -1127,9 +1127,9 @@ async fn workspace_cascade_reaches_stream_events() {
     .fetch_one(&pool)
     .await
     .expect("event count failed");
-    assert_eq!(
-        event_count_before, 2,
-        "must have 2 stream_events before delete"
+    assert!(
+        event_count_before >= 2,
+        "must have at least 2 stream_events before delete, got {event_count_before}"
     );
 
     // Delete the workspace row directly

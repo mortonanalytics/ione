@@ -5,7 +5,7 @@
 ///   - Plan:     md/plans/ione-v1-plan.md        Phase 11
 ///
 /// Transport: HTTP+SSE (JSON-RPC 2.0 over POST /mcp; SSE over GET /mcp/sse).
-/// Auth: session cookie OR `Authorization: Bearer <jwt>` from trusted issuer.
+/// Auth: `Authorization: Bearer <token>` is required by the /mcp middleware.
 ///
 /// Prerequisites:
 ///   docker compose up -d postgres
@@ -28,10 +28,18 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
+const TEST_STATIC_BEARER: &str = "phase11-test-bearer";
 
 // ─── Harness ──────────────────────────────────────────────────────────────────
 
 async fn spawn_app() -> (String, PgPool) {
+    spawn_app_with_auth_mode("local").await
+}
+
+async fn spawn_app_with_auth_mode(auth_mode: &str) -> (String, PgPool) {
+    std::env::set_var("IONE_AUTH_MODE", auth_mode);
+    std::env::set_var("IONE_OAUTH_STATIC_BEARER", TEST_STATIC_BEARER);
+
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
 
     let pool = PgPoolOptions::new()
@@ -91,16 +99,28 @@ async fn default_org_id(pool: &PgPool) -> Uuid {
 async fn mcp_post(base: &str, body: Value) -> reqwest::Response {
     reqwest::Client::new()
         .post(format!("{}/mcp", base))
+        .header("Authorization", format!("Bearer {}", TEST_STATIC_BEARER))
         .json(&body)
         .send()
         .await
         .expect("POST /mcp failed")
 }
 
-/// POST to /mcp with a valid session cookie attached.
+/// POST a JSON-RPC request to /mcp without Authorization.
+async fn mcp_post_unauthenticated(base: &str, body: Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{}/mcp", base))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST /mcp failed")
+}
+
+/// POST to /mcp with bearer auth and a valid session cookie attached.
 async fn mcp_post_with_cookie(base: &str, body: Value, cookie: &str) -> reqwest::Response {
     reqwest::Client::new()
         .post(format!("{}/mcp", base))
+        .header("Authorization", format!("Bearer {}", TEST_STATIC_BEARER))
         .header("Cookie", cookie)
         .json(&body)
         .send()
@@ -208,34 +228,6 @@ async fn insert_connector_and_event(
     .expect("insert stream event failed");
 
     (connector_id, stream_id)
-}
-
-/// Register a trust issuer with a local HMAC secret, return (issuer_id, issuer_url, secret_bytes).
-async fn insert_trust_issuer(
-    pool: &PgPool,
-    org_id: Uuid,
-    issuer_url: &str,
-    audience: &str,
-) -> (Uuid, Vec<u8>) {
-    use base64::Engine as _;
-    let secret: Vec<u8> = (0u8..32).collect();
-    let secret_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&secret);
-    let jwks_uri = format!("secret:{}", secret_b64);
-
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO trust_issuers (org_id, issuer_url, audience, jwks_uri, claim_mapping)
-         VALUES ($1, $2, $3, $4, '{}'::jsonb)
-         RETURNING id",
-    )
-    .bind(org_id)
-    .bind(issuer_url)
-    .bind(audience)
-    .bind(&jwks_uri)
-    .fetch_one(pool)
-    .await
-    .expect("insert trust_issuer failed");
-
-    (id, secret)
 }
 
 /// Mint a signed HS256 JWT for testing.
@@ -826,30 +818,16 @@ async fn mcp_tools_call_deliver_notification_invokes_connector() {
     );
 }
 
-// ─── Test 9: unauthenticated request rejected in oidc mode ────────────────────
+// ─── Test 9: unauthenticated request rejected by /mcp middleware ──────────────
 
-/// In oidc mode: no cookie + no bearer → tools/call returns 401 error.
-///
-/// Note: in local mode (default for tests) this test will get a 200 because
-/// the fallback user is used. We skip if IONE_AUTH_MODE != oidc.
+/// No bearer token → the /mcp middleware rejects the request before JSON-RPC dispatch.
 #[tokio::test]
 #[ignore]
 async fn mcp_unauthenticated_request_is_rejected() {
-    // Only meaningful in oidc mode.
-    let auth_mode = std::env::var("IONE_AUTH_MODE").unwrap_or_default();
-    if auth_mode.to_lowercase() != "oidc" {
-        eprintln!(
-            "mcp_unauthenticated_request_is_rejected: skipping because IONE_AUTH_MODE is not 'oidc' (got '{}'). \
-             Set IONE_AUTH_MODE=oidc to run this test.",
-            auth_mode
-        );
-        return;
-    }
-
     let (base, _pool) = spawn_app().await;
 
     // No cookie, no bearer.
-    let resp = mcp_post(
+    let resp = mcp_post_unauthenticated(
         &base,
         json!({
             "jsonrpc": "2.0",
@@ -862,40 +840,24 @@ async fn mcp_unauthenticated_request_is_rejected() {
 
     assert_eq!(
         resp.status(),
-        StatusCode::OK,
-        "MCP returns errors in JSON-RPC body with HTTP 200"
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated /mcp requests must be rejected by bearer middleware"
     );
 
     let body: Value = resp.json().await.expect("response not JSON");
-    assert!(
-        !body["error"].is_null(),
-        "unauthenticated tools/call must return a JSON-RPC error in oidc mode, got: {}",
-        body
-    );
-    let code = body["error"]["code"].as_i64().unwrap_or(0);
     assert_eq!(
-        code, -32001,
-        "unauthenticated tools/call must have error code -32001, got: {}",
-        code
+        body["error"], "unauthorized",
+        "unauthenticated /mcp must return the standard unauthorized envelope"
     );
 }
 
-// ─── Test 10: bearer JWT from trusted issuer is accepted ─────────────────────
+// ─── Test 10: static bearer is accepted ──────────────────────────────────────
 
-/// Register a trust_issuer with a local HMAC secret; mint a JWT signed with that
-/// secret; call tools/call with the bearer → 200 with valid result.
+/// The CI/headless static bearer escape hatch authenticates /mcp requests.
 #[tokio::test]
 #[ignore]
-async fn mcp_bearer_jwt_from_trusted_issuer_is_accepted() {
-    let (base, pool) = spawn_app().await;
-
-    let org_id = default_org_id(&pool).await;
-
-    let issuer_url = "https://test.issuer.local";
-    let audience = "ione-mcp";
-    let (_issuer_id, secret) = insert_trust_issuer(&pool, org_id, issuer_url, audience).await;
-
-    let token = mint_jwt("peer-user-sub", issuer_url, audience, &secret);
+async fn mcp_static_bearer_is_accepted() {
+    let (base, _pool) = spawn_app().await;
 
     let resp = mcp_post_with_bearer(
         &base,
@@ -905,61 +867,41 @@ async fn mcp_bearer_jwt_from_trusted_issuer_is_accepted() {
             "method": "tools/call",
             "params": { "name": "list_workspaces", "arguments": {} }
         }),
-        &token,
+        TEST_STATIC_BEARER,
     )
     .await;
 
     assert_eq!(
         resp.status(),
         StatusCode::OK,
-        "bearer JWT from trusted issuer must return 200"
+        "static bearer must return 200"
     );
 
     let body: Value = resp.json().await.expect("response not JSON");
     assert!(
         body["error"].is_null(),
-        "bearer JWT from trusted issuer must not produce a JSON-RPC error, got: {}",
+        "static bearer must not produce a JSON-RPC error, got: {}",
         body["error"]
     );
     assert!(
         !body["result"].is_null(),
-        "bearer JWT from trusted issuer must return a result, got: {}",
+        "static bearer must return a result, got: {}",
         body
     );
 }
 
 // ─── Test 11: bearer JWT from untrusted issuer is rejected ───────────────────
 
-/// Bearer JWT signed with a key for an issuer not in trust_issuers → tools/call returns error.
+/// A bearer value that is not an issued OAuth token and does not match the static bearer is rejected.
 #[tokio::test]
 #[ignore]
 async fn mcp_bearer_jwt_from_untrusted_issuer_is_rejected() {
-    // In local mode, the fallback user is used even when bearer fails.
-    // We need oidc mode OR the bearer verification to fail AND the local fallback to kick in.
-    // In local mode, untrusted bearer → falls through to local default user → succeeds.
-    // This test is only meaningful in oidc mode.
-    let auth_mode = std::env::var("IONE_AUTH_MODE").unwrap_or_default();
-    if auth_mode.to_lowercase() != "oidc" {
-        eprintln!(
-            "mcp_bearer_jwt_from_untrusted_issuer_is_rejected: skipping (IONE_AUTH_MODE != oidc). \
-             In local mode the default user fallback masks this test."
-        );
-        return;
-    }
+    let (base, _pool) = spawn_app().await;
 
-    let (base, pool) = spawn_app().await;
-
-    let org_id = default_org_id(&pool).await;
-
-    // Register one issuer but sign with a different secret.
     let issuer_url = "https://untrusted.issuer.local";
     let audience = "ione-mcp";
     let wrong_secret: Vec<u8> = (100u8..132).collect(); // different from registered secret
 
-    // Register with correct secret.
-    insert_trust_issuer(&pool, org_id, issuer_url, audience).await;
-
-    // Mint with wrong secret.
     let token = mint_jwt("bad-actor", issuer_url, audience, &wrong_secret);
 
     let resp = mcp_post_with_bearer(
@@ -976,21 +918,14 @@ async fn mcp_bearer_jwt_from_untrusted_issuer_is_rejected() {
 
     assert_eq!(
         resp.status(),
-        StatusCode::OK,
-        "MCP returns JSON-RPC errors in body with HTTP 200"
+        StatusCode::UNAUTHORIZED,
+        "invalid bearer values must be rejected by bearer middleware"
     );
 
     let body: Value = resp.json().await.expect("response not JSON");
-    assert!(
-        !body["error"].is_null(),
-        "untrusted issuer JWT must produce a JSON-RPC error, got: {}",
-        body
-    );
-    let code = body["error"]["code"].as_i64().unwrap_or(0);
     assert_eq!(
-        code, -32001,
-        "untrusted issuer must return error code -32001, got: {}",
-        code
+        body["error"], "unauthorized",
+        "invalid bearer must return the standard unauthorized envelope"
     );
 }
 
@@ -1055,8 +990,8 @@ async fn mcp_schema_validation_on_invalid_args() {
 // - Mutant: tools/list omits 'propose_artifact'
 //   → caught by mcp_tools_list_returns_all_tools (names.contains check) ✓
 //
-// - Mutant: tools/call returns result for unauthenticated request in oidc mode
-//   → caught by mcp_unauthenticated_request_is_rejected (error.is_null() fails) ✓
+// - Mutant: tools/call reaches JSON-RPC without bearer auth
+//   → caught by mcp_unauthenticated_request_is_rejected (expects HTTP 401) ✓
 //
 // - Mutant: propose_artifact allows notification_draft kind
 //   → caught by mcp_tools_call_propose_artifact_rejects_forbidden_kind
@@ -1066,9 +1001,9 @@ async fn mcp_schema_validation_on_invalid_args() {
 //   → caught by mcp_tools_call_list_survivors_filters_by_workspace
 //     (workspace B assert_eq!(0) fails) ✓
 //
-// - Mutant: bearer JWT from untrusted issuer is accepted
+// - Mutant: invalid bearer value is accepted
 //   → caught by mcp_bearer_jwt_from_untrusted_issuer_is_rejected
-//     (error.is_null() fails in oidc mode) ✓
+//     (expects HTTP 401) ✓
 //
 // - Mutant: schema validation skipped (workspace_id not checked)
 //   → caught by mcp_schema_validation_on_invalid_args

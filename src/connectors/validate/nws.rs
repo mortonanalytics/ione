@@ -33,6 +33,12 @@ impl Validator for NwsValidator {
             .with_field("lon"));
         }
 
+        if std::env::var("IONE_SKIP_LIVE").as_deref() == Ok("1") {
+            return Ok(ValidateOk {
+                sample: json!({ "mode": "syntaxOnly" }),
+            });
+        }
+
         let url = format!("https://api.weather.gov/alerts/active?point={lat},{lon}");
         let resp = short_client(5).get(&url).send().await.map_err(|e| {
             ValidateErr::new(

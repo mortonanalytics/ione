@@ -21,10 +21,13 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
+const TEST_STATIC_BEARER: &str = "phase13-demo-peer-bearer";
 
 // ─── Harness ──────────────────────────────────────────────────────────────────
 
 async fn spawn_app() -> (String, PgPool) {
+    std::env::set_var("IONE_OAUTH_STATIC_BEARER", TEST_STATIC_BEARER);
+
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
 
     let pool = PgPoolOptions::new()
@@ -49,6 +52,8 @@ async fn spawn_app() -> (String, PgPool) {
 }
 
 async fn spawn_second_app() -> (String, PgPool) {
+    std::env::set_var("IONE_OAUTH_STATIC_BEARER", TEST_STATIC_BEARER);
+
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
 
     let pool = PgPoolOptions::new()
@@ -119,8 +124,8 @@ async fn insert_trust_issuer(pool: &PgPool, org_id: Uuid, issuer_url: &str) -> U
 
 async fn insert_peer(pool: &PgPool, name: &str, mcp_url: &str, issuer_id: Uuid) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy)
-         VALUES ($1, $2, $3, '{}'::jsonb)
+        "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy, tool_allowlist)
+         VALUES ($1, $2, $3, '{}'::jsonb, '[\"propose_artifact\"]'::jsonb)
          RETURNING id",
     )
     .bind(name)
@@ -220,10 +225,11 @@ async fn two_node_demo_via_http_harness() {
     sqlx::query(
         "INSERT INTO connectors (workspace_id, kind, name, config)
          VALUES ($1, 'mcp'::connector_kind, 'peer:Node B — Lolo NF',
-                 jsonb_build_object('mcp_url', $2, 'bearer_token', ''))",
+                 jsonb_build_object('mcp_url', $2, 'bearer_token', $3))",
     )
     .bind(ws_a)
     .bind(&peer_mcp_url)
+    .bind(TEST_STATIC_BEARER)
     .execute(&pool_a)
     .await
     .expect("insert mcp connector");

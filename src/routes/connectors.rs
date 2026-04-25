@@ -59,10 +59,12 @@ pub async fn create_connector(
         ConnectorKind::RustNative => "rust_native",
     };
 
-    match crate::connectors::validate::dispatch(kind, &req.name, &req.config).await {
-        Ok(_) => {}
-        Err(err) => {
-            return (StatusCode::UNPROCESSABLE_ENTITY, Json(err)).into_response();
+    if matches!(req.kind, ConnectorKind::RustNative) {
+        match crate::connectors::validate::dispatch(kind, &req.name, &req.config).await {
+            Ok(_) => {}
+            Err(err) => {
+                return (StatusCode::UNPROCESSABLE_ENTITY, Json(err)).into_response();
+            }
         }
     }
 

@@ -175,13 +175,20 @@ async fn seed_connectors(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyh
 
 async fn seed_streams(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {
     for c in f::connectors() {
+        let stream_name = match c.id {
+            f::CONN_NWS => "observations",
+            f::CONN_FIRMS => "hotspots",
+            f::CONN_IRWIN => "incidents",
+            _ => "default",
+        };
         sqlx::query(
             "INSERT INTO streams (id, connector_id, name, schema)
-             VALUES ($1, $2, 'default', '{}'::jsonb)
+             VALUES ($1, $2, $3, '{}'::jsonb)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(c.stream_id)
         .bind(c.id)
+        .bind(stream_name)
         .execute(&mut **tx)
         .await
         .context("failed to insert demo stream")?;

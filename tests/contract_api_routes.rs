@@ -375,6 +375,7 @@ async fn route_post_telemetry_events_registered() {
 #[tokio::test]
 #[ignore]
 async fn route_get_admin_funnel_registered() {
+    std::env::set_var("IONE_ADMIN_FUNNEL", "1");
     let (base, _pool) = spawn_app().await;
     let resp = reqwest::Client::new()
         .get(format!("{}/api/v1/admin/funnel", base))

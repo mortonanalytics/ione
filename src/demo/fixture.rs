@@ -159,13 +159,13 @@ pub fn connectors() -> Vec<ConnectorFixture> {
             id: CONN_SLACK,
             stream_id: STREAM_SLACK,
             name: "slack",
-            config: json!({"kind":"slack","webhookUrl":"https://hooks.slack.com/demo"}),
+            config: json!({"kind":"slack","webhook_url":"https://hooks.slack.com/demo"}),
         },
         ConnectorFixture {
             id: CONN_IRWIN,
             stream_id: STREAM_IRWIN,
             name: "irwin",
-            config: json!({"kind":"irwin","endpoint":"https://demo.local/irwin"}),
+            config: json!({"kind":"irwin","base_url":"mock://irwin"}),
         },
     ]
 }

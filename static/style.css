@@ -1,5 +1,9 @@
 *, *::before, *::after { box-sizing: border-box; }
 
+[hidden] {
+  display: none !important;
+}
+
 :root {
   --color-bg: #f5f5f5;
   --color-surface: #ffffff;
@@ -1897,6 +1901,47 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 }
 
 @media (max-width: 720px) {
+  body {
+    height: auto;
+    min-height: 100vh;
+    overflow: auto;
+  }
+
+  #layout {
+    flex-direction: column;
+    height: auto;
+    min-height: calc(100vh - 28px);
+  }
+
+  #sidebar {
+    width: 100%;
+    max-height: none;
+    overflow: visible;
+  }
+
+  #main {
+    min-height: 620px;
+    overflow: visible;
+    padding: var(--space-3);
+  }
+
+  #tab-bar {
+    overflow-x: auto;
+  }
+
+  .chat-chips {
+    grid-template-columns: 1fr;
+    padding-inline: 0;
+  }
+
+  .chip {
+    white-space: normal;
+  }
+
+  #transcript {
+    min-height: 260px;
+  }
+
   .mcp-tile-grid { grid-template-columns: 1fr; }
 }
 
