@@ -755,6 +755,8 @@ Codex review surfaced abuse-resistance gaps that are out of scope for v0.1 but d
 
 5. **Single-tenant by default.** One org per IONe deployment. Multi-tenant identity (multiple buyer tenants with distinct IdPs in one IONe instance) is v0.2+ and depends on the v0.2 RLS retrofit of older tables.
 
+6. **RLS policies are present but not yet enforced.** Migrations 0019, 0021, and 0022 add `ENABLE ROW LEVEL SECURITY` + `CREATE POLICY` clauses on `user_sessions`, `identity_audit_events`, `mfa_enrollments`, `mfa_recovery_codes`, and `broker_credentials`. The policies are intentionally inert in v0.1: the IONe Postgres role owns these tables, so PostgreSQL bypasses RLS for the owner unless `FORCE ROW LEVEL SECURITY` is set. Application-layer scoping (every query filters by `ctx.org_id` / `ctx.user_id`) provides the actual isolation today. The policies are defense-in-depth scaffolding for the v0.2 work that will (a) introduce a non-owner DB role for application connections, (b) add a per-request transaction middleware that calls `set_config('app.current_org_id', ctx.org_id, true)`, and (c) add `FORCE ROW LEVEL SECURITY` to flip the policies from inert to enforced. Do not assume the policies are doing isolation work in v0.1.
+
 ## Task Manifest
 
 Routing: `claude-code` for tasks touching existing code with multiple callers or middleware integration; `codex` for greenfield service modules and static HTML/JS from clear specs.
