@@ -4,6 +4,10 @@
 **Shape:** large
 **Stack:** Rust 1.78+ / Axum / sqlx (Postgres) / vanilla-JS static frontend. No TypeScript compile gate; UI verification is integration-test + browser smoke.
 
+**Revision history:**
+- 2026-05-12 initial plan written from design doc.
+- 2026-05-12 revised after Codex plan-and-contract review. Eight findings + two policy gaps folded in: session-id cookie payload migration, RLS context middleware (`rls_context.rs` + transaction-bound `TxHandle`), `enforce_auth` changed from extractor to middleware, public `GET /auth/issuers` endpoint (no longer borrows admin endpoint), subject-based federated identity binding (`federated_identities` table, not email-keyed user lookup), MFA two-axis enforcement matrix (admins must enroll when org flag is set, not just challenge if already enrolled), logout server-side revocation added to Phase 1, broker `state_token` uniqueness + replay/expired ACs + `UNIQUE(user_id, provider, label)` instead of `(user_id, provider)`, audit rows on admin mutations, v0.1-known-limitations section for rate-limiting deferral.
+
 ## Dependencies (new crates)
 
 | Crate | Version | Purpose |
@@ -74,21 +78,27 @@ let row = sqlx::query!(
 ```
 
 ```rust
-// src/auth.rs — new extractor
-pub struct EnforceAuth;
-
-#[async_trait]
-impl<S: Send + Sync> FromRequestParts<S> for EnforceAuth {
-    type Rejection = AppError;
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, AppError> {
-        let ctx: &AuthContext = parts.extensions.get()
-            .ok_or(AppError::Unauthorized)?;
-        if matches!(parts.extensions.get::<AuthMode>(), Some(AuthMode::Oidc)) && !ctx.is_oidc {
-            return Err(AppError::Unauthorized);
+// src/auth.rs — Axum middleware (NOT an extractor; extractors only fire when handlers ask for them)
+pub async fn enforce_auth(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, AppError> {
+    let ctx = req.extensions().get::<AuthContext>().cloned();
+    let mode = req.extensions().get::<AuthMode>().copied();
+    if matches!(mode, Some(AuthMode::Oidc)) {
+        match ctx {
+            Some(c) if c.is_oidc => {}
+            _ => return Err(AppError::Unauthorized),
         }
-        Ok(EnforceAuth)
     }
+    Ok(next.run(req).await)
 }
+
+// src/routes/mod.rs — apply unconditionally to the protected subtree
+let protected = Router::new()
+    .nest("/api/v1", api_v1_routes())
+    .layer(axum::middleware::from_fn(enforce_auth))
+    .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware));
 ```
 
 ```rust
@@ -119,16 +129,18 @@ cargo sqlx migrate run && cargo clippy --all-targets -- -D warnings && cargo tes
 
 ---
 
-### Phase 1 — DB-backed sessions + audit-event infrastructure (S1 + S6 skeleton)
+### Phase 1 — DB-backed sessions + audit-event infrastructure + RLS context (S1 + S6 skeleton)
 
-**Goal:** every subsequent phase emits audit rows and uses revocable DB sessions. Ship together because every later service needs both.
+**Goal:** every subsequent phase emits audit rows, uses revocable DB sessions, and runs queries under a per-request org context that RLS can enforce against.
 
 **Files:**
 - `migrations/00000000000019_user_sessions_audit.sql` — **create**
 - `src/repos/user_session_repo.rs` — **create**
 - `src/services/session_service.rs` — **create**
 - `src/services/identity_audit_writer.rs` — **create**
-- `src/auth.rs` — **modify** (DB session lookup in middleware; add `session_id` and `mfa_verified` to `AuthContext`)
+- `src/middleware/rls_context.rs` — **create** (per-request RLS context wrapper; see below)
+- `src/auth.rs` — **modify** (DB session lookup in middleware; add `session_id` and `mfa_verified` to `AuthContext`; **change cookie payload from `user_id:exp` to `session_id:exp`**; update `sign_payload`/parser callers accordingly)
+- `src/routes/auth_routes.rs` — **modify** (logout calls `SessionService::revoke(session_id)`, writes `SessionRevoke` audit event)
 - `src/repos/mod.rs` — **modify** (re-export `UserSessionRepo`)
 - `src/services/mod.rs` — **modify** (re-export `SessionService`, `IdentityAuditWriter`)
 - `src/models/mod.rs` — **modify** (`UserSession` struct)
@@ -150,9 +162,10 @@ CREATE TABLE user_sessions (
 CREATE INDEX user_sessions_user ON user_sessions(user_id);
 CREATE INDEX user_sessions_active ON user_sessions(expires_at) WHERE revoked_at IS NULL;
 
-ALTER TABLE user_sessions ENABLE ROW LEVEL SECURITY;
-CREATE POLICY user_sessions_org_isolation ON user_sessions
-    USING (org_id = current_setting('app.current_org_id', true)::uuid);
+-- user_sessions intentionally does NOT have RLS. The session_id itself is the unguessable
+-- auth credential (signed in the cookie); RLS would create a chicken-and-egg with org context
+-- resolution. RLS lives on every downstream table (mfa_*, broker_*, identity_audit_events,
+-- etc.) that holds org-scoped data.
 
 CREATE TABLE identity_audit_events (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -175,22 +188,55 @@ CREATE POLICY identity_audit_org_isolation ON identity_audit_events
 
 ```rust
 // src/services/session_service.rs
-pub struct SessionService<'a> { pool: &'a PgPool, audit: &'a IdentityAuditWriter }
+pub struct SessionService<'a> { pool: &'a PgPool, audit: &'a IdentityAuditWriter<'a> }
 
 impl<'a> SessionService<'a> {
     pub async fn create(&self, user_id: Uuid, org_id: Uuid, idp_type: &str)
-        -> anyhow::Result<(Uuid, String /* set-cookie header value */)> { ... }
+        -> anyhow::Result<(Uuid, String /* set-cookie header value carrying session_id:exp */)> { ... }
     pub async fn revoke(&self, session_id: Uuid) -> anyhow::Result<()> { ... }
     pub async fn mark_mfa_verified(&self, session_id: Uuid) -> anyhow::Result<()> { ... }
     pub async fn find_active(&self, session_id: Uuid) -> anyhow::Result<Option<UserSession>> { ... }
 }
 
+// src/middleware/rls_context.rs — RLS context wrapper used by every protected handler.
+// auth_middleware runs first (does NOT need RLS — it queries user_sessions which has no RLS).
+// After AuthContext is populated, this middleware opens a transaction and sets app.current_org_id
+// for the rest of the request. Handlers receive a transaction-bound connection on extensions.
+pub async fn rls_context_layer(
+    State(state): State<AppState>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, AppError> {
+    let ctx = req.extensions().get::<AuthContext>()
+        .ok_or(AppError::Unauthorized)?.clone();
+    let mut tx = state.pool.begin().await.map_err(AppError::Internal)?;
+    sqlx::query("SELECT set_config('app.current_org_id', $1, true)")
+        .bind(ctx.org_id.to_string())
+        .execute(&mut *tx).await.map_err(AppError::Internal)?;
+    // Attach the transaction handle to request extensions so handlers can use it.
+    // Commit at response time.
+    let mut req = req;
+    req.extensions_mut().insert(TxHandle::new(tx));
+    let resp = next.run(req).await;
+    // TxHandle has a Drop impl that commits on success, rolls back on AppError 5xx — implemented
+    // in the rls_context module.
+    Ok(resp)
+}
+// Handler usage: `axum::Extension(tx): axum::Extension<TxHandle>` then `tx.acquire().await`.
+// Repository methods take `&mut PgConnection` (already the pattern in src/repos/), so this
+// integrates with existing query call sites.
+
 // src/services/identity_audit_writer.rs
 #[derive(Clone, Copy)]
 pub enum IdentityEvent {
+    // session lifecycle
     OidcLogin, OidcLoginFailure, Logout, SessionRevoke,
-    MfaEnroll, MfaVerify, MfaFail, MfaDisable,
-    TokenBrokerGrant, TokenBrokerRefresh, TokenBrokerRevoke,
+    // mfa
+    MfaEnroll, MfaVerify, MfaFail, MfaDisable, MfaRecoveryConsume, MfaRecoveryViewed,
+    // brokered SaaS tokens
+    TokenBrokerGrant, TokenBrokerRefresh, TokenBrokerRevoke, TokenBrokerRevokeUpstreamFailed,
+    // identity-control admin mutations (Codex policy-gap A)
+    TrustIssuerCreate, TrustIssuerDelete,
 }
 
 pub struct IdentityAuditWriter<'a> { pool: &'a PgPool }
@@ -222,7 +268,9 @@ cargo sqlx migrate run && cargo clippy --all-targets -- -D warnings && cargo tes
 **Acceptance:**
 - `psql -c "\dt user_sessions identity_audit_events"` shows both tables.
 - Integration test: create session via `SessionService::create`, revoke it, then a request carrying the cookie returns 401 with body `error: "unauthorized"`.
-- `psql -c "SELECT event_type, outcome FROM identity_audit_events ORDER BY occurred_at DESC LIMIT 1"` shows the revoke event.
+- Integration test: `POST /auth/logout` with a valid session cookie sets `user_sessions.revoked_at` non-null and writes an `identity_audit_events` row with `event_type='logout'`.
+- Integration test: cookie now carries `<session_id>:<exp>`, not `<user_id>:<exp>` — a cookie minted before this migration is treated as invalid (forces re-login).
+- Integration test: under RLS context middleware, a request running as org A cannot SELECT an `identity_audit_events` row belonging to org B even via a raw query through the request's `TxHandle`.
 
 ---
 
@@ -247,8 +295,26 @@ ALTER TABLE trust_issuers
     ADD COLUMN idp_type                TEXT    NOT NULL DEFAULT 'oidc',
     ADD COLUMN max_coc_level           INTEGER NOT NULL DEFAULT 100,
     ADD COLUMN client_id               TEXT,
-    ADD COLUMN client_secret_ciphertext BYTEA;
+    ADD COLUMN client_secret_ciphertext BYTEA,
+    ADD COLUMN display_name            TEXT;   -- shown on public /auth/issuers picker
 -- jwks_uri already exists, do NOT re-add
+
+-- federated_identities — binds (trust_issuer, OIDC sub claim) → local user.
+-- Email is profile data; the immutable subject is the identity. (Codex finding #5.)
+CREATE TABLE federated_identities (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    issuer_id       UUID NOT NULL REFERENCES trust_issuers(id) ON DELETE RESTRICT,
+    subject         TEXT NOT NULL,
+    user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    last_seen_email TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (issuer_id, subject),
+    UNIQUE (user_id, issuer_id)
+);
+CREATE INDEX federated_identities_user ON federated_identities(user_id);
+-- No RLS — federated_identities is reached from the auth path before org context is set.
+-- Safety comes from the secrecy of the (issuer_id, subject) tuple, validated by ID-token signature.
 ```
 
 ```rust
@@ -273,8 +339,15 @@ impl ClaimMapper {
     pub async fn map_to_user(pool: &PgPool, org_id: Uuid, ti: &TrustIssuer, claims: &Value)
         -> anyhow::Result<User>;
 }
-// reads ti.claim_mapping JSONB (email_claim, name_claim, role_claim, coc_level_claim, workspace_name),
-// upserts users row, upserts roles row capped at ti.max_coc_level, binds via memberships.
+// 1. Reads required `sub` claim from ID token (always present in OIDC).
+// 2. Looks up federated_identities by (ti.id, sub). If found → fetch users row; update last_seen_email
+//    and updated_at. This is the steady-state path.
+// 3. If not found → create new users row, insert federated_identities binding. Email comes from
+//    ti.claim_mapping.email_claim and is profile data — NOT used for identity lookup.
+// 4. Reads role_claim and coc_level_claim, caps coc_level at ti.max_coc_level, upserts roles row,
+//    binds user via memberships.
+// 5. Returns the User. Email-collision case: two distinct subjects with the same email map to two
+//    distinct users (correct behavior — email is mutable, subject is not).
 ```
 
 **Entra-ID-specific defaults documented in the operator setup guide:**
@@ -290,7 +363,9 @@ cargo clippy --all-targets -- -D warnings && cargo test --test phase_oidc_callba
 ```
 
 **Acceptance:**
-- New integration test `phase_oidc_callback` brings up a mock OIDC issuer (using `openidconnect`'s test fixtures) and asserts `/auth/login → /auth/callback` round-trip creates a `user_sessions` row with `idp_type='oidc'` and writes an `identity_audit_events` row with `event_type='oidc_login'`, `outcome='success'`.
+- New integration test `phase_oidc_callback` brings up a mock OIDC issuer (using `openidconnect`'s test fixtures) and asserts `/auth/login → /auth/callback` round-trip creates a `user_sessions` row with `idp_type='oidc'`, a `federated_identities` row binding (issuer_id, sub) to the new user, and an `identity_audit_events` row with `event_type='oidc_login'`, `outcome='success'`.
+- Second login with the same `sub` reuses the existing user row (no duplicate users created) and updates `federated_identities.last_seen_email` if the email claim changed.
+- Two distinct `sub` values asserting the same email claim produce two distinct user rows (email is not the identity).
 - Bad `aud` claim → 400, audit row with `outcome='failure'`, `detail.failure_reason='aud_mismatch'`.
 - Claim asserting `coc_level=999` against `max_coc_level=50` → resulting `roles.coc_level` is 50.
 
@@ -303,7 +378,8 @@ cargo clippy --all-targets -- -D warnings && cargo test --test phase_oidc_callba
 **Files:**
 - `src/routes/admin/mod.rs` — **create**
 - `src/routes/admin/trust_issuers.rs` — **create**
-- `src/routes/mod.rs` — **modify** (mount `/api/v1/admin/*` under auth + admin-role guard)
+- `src/routes/public_issuers.rs` — **create** (public discovery endpoint for the login picker)
+- `src/routes/mod.rs` — **modify** (mount `/api/v1/admin/*` under auth + admin-role guard; mount `/auth/issuers` public)
 - `static/admin.html` — **create** (admin shell page)
 - `static/admin.js` — **create** (trust issuer CRUD UI)
 - `static/admin.css` — **create** (admin-section styles; loaded from admin.html so we don't append to the shared style.css from a parallel task)
@@ -337,7 +413,23 @@ pub struct TrustIssuerResp {
 
 pub async fn list(ctx, state) -> Json<Vec<TrustIssuerResp>>;
 pub async fn create(ctx, state, Json<CreateTrustIssuerBody>) -> Result<Json<TrustIssuerResp>, AppError>;
+// create writes IdentityEvent::TrustIssuerCreate audit row with detail = {issuer_url, audience, idp_type}.
 pub async fn delete(ctx, state, Path<Uuid>) -> Result<StatusCode, AppError>;
+// delete writes IdentityEvent::TrustIssuerDelete audit row.
+```
+
+```rust
+// src/routes/public_issuers.rs — UNAUTHENTICATED endpoint for the login picker.
+// Returns only safe display metadata; no claim_mapping, no client_id, no client_secret, no jwks_uri.
+#[derive(Serialize)]
+pub struct PublicIssuerResp {
+    pub id: Uuid,
+    pub display_name: String,   // operator-set human label; falls back to issuer_url host
+}
+
+pub async fn list(State(state): State<AppState>) -> Json<Vec<PublicIssuerResp>> { ... }
+// Route: GET /auth/issuers
+// Mounted on the public router subtree (NOT under enforce_auth).
 ```
 
 ```html
@@ -353,10 +445,12 @@ cargo clippy --all-targets -- -D warnings && cargo test trust_issuer_admin -- --
 ```
 
 **Acceptance:**
-- `POST /api/v1/admin/trust-issuers` with valid Entra ID body returns 200 and inserts a row.
+- `POST /api/v1/admin/trust-issuers` with valid Entra ID body returns 200, inserts a row, and writes an `identity_audit_events` row with `event_type='trust_issuer_create'`.
 - Same call without admin-level session → 403.
 - POST with `idp_type: "saml"` → 400.
 - Duplicate `(org_id, issuer_url, audience)` → 409.
+- `DELETE /api/v1/admin/trust-issuers/:id` writes an `identity_audit_events` row with `event_type='trust_issuer_delete'`.
+- `GET /auth/issuers` (no auth cookie) returns 200 with `[{id, display_name}]` only — body must not contain any of `claim_mapping`, `client_id`, `client_secret_ciphertext`, `jwks_uri`, `audience`. Test asserts each forbidden key is absent.
 - Browser smoke: navigate to `/admin.html`, see the IdP picker, submit "Entra ID" preset with tenant_id + client_id, see the new IdP appear in the list.
 
 ---
@@ -434,7 +528,21 @@ impl<'a> MfaService<'a> {
 - `POST /api/v1/me/mfa/challenge` → on success, calls `SessionService::mark_mfa_verified`
 - `GET /api/v1/me/mfa/recovery-codes`, `POST /recovery-codes/consume`
 
-**Policy enforcement:** broker endpoints (Phase 5) call `mfa_required(user_id)` helper. Returns `true` only if user has an enrollment row AND `mfa_verified=false` on the current session. Otherwise endpoints proceed.
+**Policy enforcement (revised after Codex review):** two-axis check via `mfa_gate(ctx, pool)` helper, invoked from broker endpoints AND every admin route:
+
+| Org `mfa_required_for_admins` | User has admin role | User has enrollment | `mfa_verified` on session | Result |
+|---|---|---|---|---|
+| `true` | yes | no | — | 403 `{"error": "mfa_enrollment_required"}` — UI redirects to `/mfa/enroll` |
+| `true` | yes | yes | false | 403 `{"error": "mfa_required"}` — UI redirects to `/mfa/challenge` |
+| `true` | yes | yes | true | proceed |
+| `true` | no | yes | false | 403 `{"error": "mfa_required"}` |
+| `true` | no | yes | true | proceed |
+| `true` | no | no | — | proceed (non-admin opt-in, not forced) |
+| `false` | any | yes | false | 403 `{"error": "mfa_required"}` |
+| `false` | any | yes | true | proceed |
+| `false` | any | no | — | proceed |
+
+The `mfa_enrollment_required` error is distinct from `mfa_required` so the UI knows whether to push the user through enrollment or challenge. Admin-with-no-enrollment cannot bypass MFA — they are blocked at every admin endpoint until they enroll. (Closes Codex finding #6.)
 
 **Gate:**
 ```bash
@@ -446,7 +554,9 @@ cargo clippy --all-targets -- -D warnings && cargo test mfa -- --nocapture
 - Challenge with wrong code → 403, audit row `event_type='mfa_fail'`.
 - GET recovery-codes twice → second call 409.
 - Wrong code 5 times → still 403 each time (no rate limit in v0.1, but 5 audit rows exist).
-- Delete TOTP without supplying current code → 400.
+- Delete TOTP without supplying current code → 400. Successful TOTP delete writes `identity_audit_events` row with `event_type='mfa_disable'`.
+- Admin user with no MFA enrollment, org flag `mfa_required_for_admins=true`, hits `GET /api/v1/admin/trust-issuers` → 403 with body `{"error": "mfa_enrollment_required"}`. After enrollment + challenge, the same call succeeds.
+- Recovery code consumption writes `identity_audit_events` row with `event_type='mfa_recovery_consume'`.
 
 ---
 
@@ -474,7 +584,7 @@ CREATE TABLE broker_credentials (
     user_id                  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     org_id                   UUID NOT NULL REFERENCES organizations(id),
     provider                 TEXT NOT NULL,
-    label                    TEXT,
+    label                    TEXT NOT NULL DEFAULT '',   -- empty string acts as default label; allows multiple accounts per provider
     scopes                   TEXT[] NOT NULL DEFAULT '{}',
     access_token_ciphertext  BYTEA,
     refresh_token_ciphertext BYTEA,
@@ -483,10 +593,16 @@ CREATE TABLE broker_credentials (
     code_verifier            TEXT,
     state_expires_at         TIMESTAMPTZ,
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (user_id, provider)
+    -- Multiple accounts per provider per user are valid (different QuickBooks companies, different Google accounts).
+    -- label disambiguates. (Closes Codex finding #8.)
+    UNIQUE (user_id, provider, label)
 );
 CREATE INDEX broker_credentials_expiring ON broker_credentials(token_expires_at)
     WHERE access_token_ciphertext IS NOT NULL;
+-- state_token uniqueness — required for the public callback to look up the pending row safely.
+CREATE UNIQUE INDEX broker_state_token_unique
+    ON broker_credentials(state_token) WHERE state_token IS NOT NULL;
+
 ALTER TABLE broker_credentials ENABLE ROW LEVEL SECURITY;
 CREATE POLICY broker_credentials_org_isolation ON broker_credentials
     USING (org_id = current_setting('app.current_org_id', true)::uuid);
@@ -545,9 +661,13 @@ cargo clippy --all-targets -- -D warnings && cargo test broker -- --ignored --te
 ```
 
 **Acceptance:**
-- Test runs against a local mock OAuth provider (axum sub-app). POST → returns authorize_url. Test client follows to mock IdP, IdP redirects to callback. `broker_credentials` row has `access_token_ciphertext` non-null, `state_token` and `code_verifier` cleared, `token_expires_at` populated.
-- `BrokerService::get_for_user` against an expired token → triggers refresh via the mock provider, updates ciphertext.
+- Test runs against a local mock OAuth provider (axum sub-app). POST → returns authorize_url. Test client follows to mock IdP, IdP redirects to callback. `broker_credentials` row has `access_token_ciphertext` non-null, `state_token` and `code_verifier` cleared, `token_expires_at` populated. Audit row `event_type='token_broker_grant'` written.
+- `BrokerService::get_for_user` against an expired token → triggers refresh via the mock provider, updates ciphertext. Audit row `event_type='token_broker_refresh'` written.
+- **Replay test:** same `state_token` POSTed to `/auth/broker/callback` twice — first call 302 success, second call 400 (state_token was cleared after first use).
+- **Expired-state test:** `state_token` whose `state_expires_at < now()` → 400 with `error: "broker_state_expired"`.
+- **Multi-account test:** same user connects two QuickBooks accounts (provider="quickbooks", different `label` values: `"Acme"`, `"Beta Corp"`). Both rows insert successfully; `UNIQUE(user_id, provider, label)` rejects only an exact triplet collision.
 - Ciphertext with wrong key-version byte → `decrypt_versioned` returns `Err(DecryptionError)` and does not panic.
+- Upstream revocation HTTP call fails on DELETE → local row still deleted; audit row written with `event_type='token_broker_revoke_upstream_failed'`, `outcome='failure'`. A second DELETE row with `event_type='token_broker_revoke'`, `outcome='success'` follows.
 - Browser smoke: `/connections.html` shows the generic-test provider, clicking "Connect" completes the round-trip to the mock provider.
 
 ---
@@ -620,6 +740,20 @@ cargo run --release & sleep 3 && curl -sSI http://localhost:3002/login.html | he
 | 6 — Org-scoped peers | 0 | 2 Rust | 1 |
 | 7 — Login UI | 2 static | 2 static + CSS | 0 |
 | **Total** | **~25** | **~22** | **6** |
+
+## v0.1 known limitations (documented, not blockers)
+
+Codex review surfaced abuse-resistance gaps that are out of scope for v0.1 but documented here so operators and v0.2 planners can act on them:
+
+1. **No rate limiting on authentication endpoints.** OIDC callback errors, MFA challenges, MFA recovery code consumption, and broker callback attempts can be retried arbitrarily often. Mitigation in v0.1: every attempt writes an `identity_audit_events` row with `outcome='failure'`, so operators can detect abuse via SQL or log queries against the audit table. v0.2 will add per-IP throttling (likely via `tower-governor` or equivalent) and an account-lockout decision for repeated MFA failure.
+
+2. **No proactive token refresh scheduler for broker credentials.** Brokered SaaS tokens refresh on read when `token_expires_at < now() + 5min`. This means a token can be invalid for a brief window if no read happens before expiry and the upstream provider does not honor expired-but-refreshable semantics. Operators with active QuickBooks/Google use cases should re-trigger a `BrokerService::get_for_user` call after long idle periods. v0.2 will add a background scheduler that refreshes within 24h of expiry.
+
+3. **RLS context is per-request, not per-connection-pool.** Every protected request opens a transaction, sets `app.current_org_id`, and commits at response time. This adds one round-trip per request. At small scale (operators measured in tens) the cost is negligible; at scale, `tokio_postgres` connection-level context or PgBouncer session-level context may be preferred. v0.2 will revisit if observability shows latency impact.
+
+4. **No federated logout (SLO).** `POST /auth/logout` revokes the IONe session and clears the cookie but does not propagate to Entra ID / Login.gov / upstream IdP. The operator's upstream session continues until that IdP expires it. Documented in the operator deployment guide; v0.2 may add OIDC back-channel logout for Entra-ID-integrated deployments.
+
+5. **Single-tenant by default.** One org per IONe deployment. Multi-tenant identity (multiple buyer tenants with distinct IdPs in one IONe instance) is v0.2+ and depends on the v0.2 RLS retrofit of older tables.
 
 ## Task Manifest
 
