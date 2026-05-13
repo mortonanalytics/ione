@@ -38,8 +38,30 @@ Required maturation:
 - Conflict resolution policy for collisions
 - Per-peer rate limiting + circuit breakers
 - Resource browsing protocol (operator can enumerate what each peer offers)
+- **Context slices for federation discovery** (see below)
 
 Lives in: [src/connectors/mcp_client.rs](../../src/connectors/mcp_client.rs), [src/peers/](../../src/peers/), [src/mcp_server.rs](../../src/mcp_server.rs).
+
+#### Context slices for federation discovery
+
+**Problem.** As IONe federates to N peers with M tools each, the chat context fills with tool definitions. Realistic scale (3 apps × 20–30 tools × 200–800 tokens each) = 15k–70k tokens of tool definitions in every chat request before the user's query. Tool-definition tokens dominate the system prompt; cost and latency scale linearly with peer count.
+
+**Approach.** Each peer publishes a compact **context slice** (~100–500 tokens) instead of forcing IONe to ship every full tool definition into the model's context up front. The slice is enough to route — the model picks a peer + intent — and IONe expands the relevant tool definitions on demand for the second turn.
+
+A slice contains:
+- `summary` — what the peer does, one paragraph (~100 tokens)
+- `domain_tags` — `["geospatial", "time-series", "alerts", "ag", "financial", ...]`
+- `sample_queries` — 3–5 representative natural-language queries this peer can serve
+- `tool_index` — list of `{name, one_sentence_description, expand_uri}` (no full schema)
+- `resource_hints` — example resource URIs, schemas, recent-activity summary
+
+IONe injects all peer slices into the system prompt (~2–5k tokens total at peer count 5–10, vs 15–70k for full tool defs). When the model selects a tool, IONe fetches the full `inputSchema` via `tools/get` (or `resources/read expand_uri`) and continues. Tool discovery is lazy and hierarchical; token cost is bounded by `O(peers)` not `O(peers × tools)`.
+
+**v0.1 contract scope:** apps must publish slices (in the app integration playbook). Without this, every app needs to retrofit later.
+
+**v0.2 implementation scope:** IONe-side routing/expansion logic — slice aggregation in the federation hub, model-side prompt economy, lazy `tools/get` expansion, optional vector index over tool descriptions for retrieval-based filtering at very high peer counts.
+
+Design doc to follow: `md/design/mcp-context-slices.md` (deferred until identity broker lands).
 
 ### 2. Identity broker
 The deepest gap. IONe does not replace each app's IdP needs — it brokers. A single operator authenticates to IONe; IONe holds delegated credentials per app and presents them when invoking app tools.
@@ -116,7 +138,8 @@ Re-derived from the substrate thesis. These move from "v0.2 candidate" (under th
 3. **Signed webhook ingress** — receiver endpoint, HMAC verification, replay protection, fan-in into `pipeline_events`.
 4. **Tile-URL passthrough + generic map view** — both EO apps need this day one. MapLibre embed, reads tile URL from MCP resource metadata.
 5. **Tool namespacing in the federation hub** — required at peer count > 1.
-6. **App integration playbook** — the contract apps follow to plug in. Lives at [md/design/app-integration-playbook.md](app-integration-playbook.md).
+6. **Context slice contract** — apps must publish a context slice (`slice://` resource) in v0.1 so token-efficient discovery is possible without per-app retrofit. IONe-side routing logic is v0.2.
+7. **App integration playbook** — the contract apps follow to plug in. Lives at [md/design/app-integration-playbook.md](app-integration-playbook.md).
 
 What was previously in v0.1 scope (chat-first onboarding polish, demo workspace canned chat, activation funnel telemetry) is **application-layer**, not substrate. It stays in IONe's reference UI but is no longer load-bearing for the v0.1 thesis.
 

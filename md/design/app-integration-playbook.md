@@ -11,7 +11,7 @@ The contract a client app must satisfy to plug into IONe as a federated peer. If
 
 The contract is intentionally minimal. Apps stay opinionated about their own DB, queue, compute, tile serving, file formats, and frontend. IONe federates over MCP + signed webhooks + brokered identity. Nothing more.
 
-## The five surfaces an app exposes
+## The six surfaces an app exposes
 
 ### 1. MCP server endpoint
 
@@ -95,7 +95,59 @@ Supported `ione_view` values (v0.1):
 
 Apps may include resources with no `ione_view`; IONe surfaces them as opaque references with name + description only.
 
-### 5. Foreign-tenant `whoami` resource
+### 5. Context slice resource (`slice://`)
+
+To keep token usage bounded as IONe federates to many peers, every app publishes a single compact **context slice** instead of forcing IONe to ship full `tools/list` output into the chat model's system prompt. The slice describes the peer's capabilities in ~100–500 tokens; IONe expands tool schemas on demand only after the model selects a tool.
+
+The slice is exposed as a well-known resource:
+
+```json
+{
+  "uri": "slice://",
+  "name": "GroundPulse capability slice",
+  "mimeType": "application/vnd.ione.slice+json"
+}
+```
+
+Slice body (returned via `resources/read`):
+
+```json
+{
+  "schema_version": "1",
+  "peer_id": "groundpulse-prod",
+  "summary": "Infrastructure risk intelligence for pipeline, bridge, and dam operators. Detects ground displacement via OPERA InSAR satellite data, ranks asset risk, generates compliance reports (API RP 1187, NBIS, FERC).",
+  "domain_tags": ["geospatial", "time-series", "infrastructure", "alerts", "compliance", "raster"],
+  "sample_queries": [
+    "What pipeline segments showed accelerating displacement this quarter?",
+    "Show me bridges with critical alerts in Region 4.",
+    "Generate an API RP 1187 report for the Permian corridor."
+  ],
+  "tool_index": [
+    {"name": "query_displacement", "summary": "Time-series displacement for a given asset or AOI.", "expand_uri": "tools://query_displacement"},
+    {"name": "list_alerts", "summary": "Active alerts filtered by tier, asset, AOI.", "expand_uri": "tools://list_alerts"},
+    {"name": "acknowledge_alert", "summary": "Mark an alert as acknowledged. Requires approval.", "expand_uri": "tools://acknowledge_alert", "approval_required": true},
+    {"name": "generate_report", "summary": "Generate a compliance or evidence report. Requires approval.", "expand_uri": "tools://generate_report", "approval_required": true}
+  ],
+  "resource_hints": {
+    "example_resources": [
+      {"uri_template": "gp://aoi/{aoi_id}/displacement", "description": "Time-series chart for an AOI"},
+      {"uri_template": "gp://bridges/{bridge_id}", "description": "Bridge asset detail"}
+    ],
+    "recent_activity_summary_uri": "gp://activity/recent"
+  }
+}
+```
+
+Field requirements:
+- `summary` — one paragraph, target 80–120 tokens
+- `domain_tags` — choose from a shared taxonomy (geospatial, time-series, raster, vector, tabular, alerts, compliance, financial, ag, infrastructure, observability, identity, communication). Apps may propose new tags; the federation hub aggregates them.
+- `sample_queries` — 3–5 representative natural-language queries the peer can serve. These help the model match user intent to peer.
+- `tool_index` — every tool the peer exposes via `tools/list`, with name + 1-sentence summary + `expand_uri` for fetching the full `inputSchema` lazily. The full schema is NOT included in the slice. `approval_required` mirrors the tool's metadata flag.
+- `resource_hints` — example resource URI templates and a pointer to a recent-activity summary if the peer publishes one.
+
+Total slice payload should target < 2 KB.
+
+**Why the contract is in v0.1 even though the IONe-side routing logic is v0.2:** apps publish slices once; IONe optimizes when needed. Without the contract in v0.1, every app needs to retrofit later. The slice format is intentionally cheap to produce — apps can hand-write one in an hour.
 
 Every app exposes a `whoami` resource that returns, for the OAuth-authenticated session, the foreign tenant and user identity:
 
