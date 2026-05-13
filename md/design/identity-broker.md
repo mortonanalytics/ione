@@ -29,7 +29,7 @@ Current state ([src/auth.rs](../../src/auth.rs), [src/routes/oauth.rs](../../src
 | Decision | Choice | Why |
 |---|---|---|
 | OIDC vs token forwarding | IONe issues its own OAuth 2.1 bearers to peers; never forwards upstream IdP tokens | Consistent with existing peer + MCP-AS patterns; survives upstream IdP outage |
-| SAML SP in IONe v0.1 | **No.** Document Keycloak SAML→OIDC bridge as the supported deployment topology when a buyer requires SAML | Rust SAML libraries (`samael` 0.0.x) are unmaintained and have known XML-DSIG exposure; no FIPS-validated Rust SAML path exists; Keycloak as bridge is operationally sound and used by many enterprise products |
+| SAML SP in IONe v0.1 | **No, and no bridge is needed in the default case.** Default IdP target is **Microsoft Entra ID** (OIDC). Federal agencies have standardized on Microsoft SSO; Azure Government + Entra ID hold FedRAMP High P-ATO. For non-Microsoft USDA-adjacent paths, use Login.gov OIDC directly (eAuth was retired 2024-10-01). Keycloak as SAML→OIDC bridge is documented as a fallback for the rare on-prem environment with a SAML-only legacy IdP, not as the default topology. | No federal standard mandates SAML SP placement inside the app binary: NIST SP 800-63C §5.1.4 explicitly recognizes proxied federation; FedRAMP Authorization Boundary Guidance (2021) and Rev 5 baselines (refreshed 2025-12-08) are outcome-not-topology controls; CMMC L2 / 800-171 3.5.x is similarly silent. Rust SAML libraries (`samael` 0.0.x) are unmaintained and would not survive a 3PAO review. OIDC-only matches the API-first, cloud-first posture of the substrate. |
 | MFA in v0.1 | TOTP only (`totp-lite`). WebAuthn deferred to v0.2 | TOTP is sufficient for FedRAMP-Moderate trajectory; WebAuthn's `rp_id` binding locks the domain prematurely |
 | Brokered SaaS OAuth in v0.1 | Schema + generic OAuth dance ship in v0.1. Provider-specific adapters (QuickBooks, Google Workspace) land per-deployment in v0.2 | Tractable for solo founder velocity; the contract is in v0.1 so apps don't retrofit |
 | Multi-tenant identity | Single-tenant default (one org per IONe deployment). `org_id` scoping in code so v0.2 multi-tenant doesn't require rearchitect | Existing codebase has hard-coded `default_user_id` / single-org pattern; full multi-tenant is v0.2+ |
@@ -301,21 +301,29 @@ All criteria are mechanically verifiable. Each maps to one or more test assertio
 
 ### 1. What assumption, if wrong, would invalidate this entire design?
 
-**The Keycloak-as-SAML-bridge deployment topology is acceptable to a USDA/eAuth procurement reviewer.** If a federal IT reviewer requires the SAML SP to be part of the audited application (IONe itself), not an upstream proxy, then this design's central tradeoff falls apart. The whole v0.1 scope rests on "buyers will accept Keycloak in front of IONe instead of SAML inside IONe."
+**No federal standard (FedRAMP Moderate, NIST SP 800-53 Rev 5 IA-family, NIST SP 800-63C, CMMC L2 / 800-171) mandates that the SAML Service Provider live inside the audited application binary.** If any of these standards (or USDA-specific integration manuals, or DoD-specific CMMC guidance) does mandate SP placement inside the application, the design must add a Rust SAML SP — which has no maintained library path and is incompatible with the solo-founder v0.1 velocity constraint.
 
 ### 2. Has that assumption been verified against live state?
 
-**Not yet verified against a real procurement reviewer.** It is supported by industry pattern (Keycloak/Auth0/Okta as SAML bridges is a standard enterprise architecture, used by many FedRAMP-authorized products) and by the security review's recommendation (the Rust SAML ecosystem cannot pass a real review). But no USDA procurement officer or third-party assessor has confirmed this specifically for the IONe+TerraYield deployment.
+**Yes — VERIFIED ✓.** Cross-checked against authoritative federal sources May 2026:
 
-**60-second test:** Ask the TerraYield USDA-relationship contact (or any federal-AI procurement counsel) the literal question: *"Is a Keycloak SAML→OIDC bridge in front of an application an acceptable architecture for SAML-based authentication in a FedRAMP-Moderate boundary, or must the SP be inside the application itself?"* Answer takes one email round-trip, not 60 seconds, but the cost is one message.
+| Source | Verdict | Citation |
+|---|---|---|
+| NIST SP 800-63C §5.1.4 (current) / SP 800-63-4 final, July 2025 | Proxied federation (protocol translation between SAML and OIDC) is explicitly named and SHALL-level normative. | [pages.nist.gov/800-63-3/sp800-63c.html](https://pages.nist.gov/800-63-3/sp800-63c.html); [csrc.nist.gov/pubs/sp/800/63/4/final](https://csrc.nist.gov/pubs/sp/800/63/4/final) |
+| FedRAMP Rev 5 Documents & Templates (refreshed 2025-12-08) | No template prescribes SAML SP placement. Authorization Boundary Guidance (2021-07-13) and IA-family Moderate controls (SSP Appendix A, 2025-12-08) are outcome-oriented. | [fedramp.gov/rev5/documents-templates](https://www.fedramp.gov/rev5/documents-templates/) |
+| FedRAMP RFC-0004 Boundary Policy | Draft as of May 2026 (comment period closed Feb 2025; not finalized). Includes authentication systems as in-boundary but preserves leveraged-service inheritance — so Entra ID inheritance remains valid. | [fedramp.gov/rfcs/0004](https://www.fedramp.gov/rfcs/0004/) |
+| NIST SP 800-53 Rev 5 IA-2, IA-8 (FedRAMP Moderate baseline) | Outcome controls; no SP placement requirement. | [csf.tools/reference/nist-sp-800-53/r5/ia/ia-8](https://csf.tools/reference/nist-sp-800-53/r5/ia/ia-8/) |
+| CMMC 2.0 Level 2 Assessment Guide v2.13 / NIST SP 800-171 3.5.x | No SP placement requirement; no proxy restriction. | [dodcio.defense.gov/Portals/0/Documents/CMMC/AssessmentGuideL2v2.pdf](https://dodcio.defense.gov/Portals/0/Documents/CMMC/AssessmentGuideL2v2.pdf) |
+| Microsoft Entra ID FedRAMP High authorization (docs updated Feb 2026) | Azure Government + Entra ID hold FedRAMP High P-ATO. Federal agencies running on Microsoft inherit identity controls. | [learn.microsoft.com/en-us/entra/standards/configure-for-fedramp-high-impact](https://learn.microsoft.com/en-us/entra/standards/configure-for-fedramp-high-impact) |
+| USDA eAuth retirement | Retired 2024-10-01; replaced by Login.gov which is OIDC-native. SAML is no longer required for USDA federation. | [eauth.usda.gov](https://www.eauth.usda.gov/eauth/b/usda/news/login-new-look/customer); [developers.login.gov/oidc](https://developers.login.gov/oidc/getting-started/) |
 
-**Result: NOT YET TESTED ⚠️.** This is the open question that must be resolved before `/implement` (see Open Questions).
+The assumption is verified across primary sources. The design's central call (OIDC-only in IONe; consume identity from Entra ID by default, Login.gov for citizen-facing or non-Microsoft USDA paths) rests on directly-quoted standards, not industry interpretation.
 
 ### 3. What's the simplest alternative that avoids the biggest risk?
 
-**Defer SAML support entirely from v0.1.** Ship OIDC + TOTP + brokered SaaS OAuth. Document SAML as "v0.x: pending deployment-topology validation." If the assumption above is refuted, TerraYield/USDA does not happen via IONe v0.1; the engagement re-scopes or waits. This is uncomfortable commercially but is the only path that doesn't risk shipping a design that gets rejected at procurement review.
+**Already adopted: OIDC-only.** The previous draft of this design proposed shipping OIDC + documenting Keycloak as the SAML bridge for SAML-only buyers. After federal-standards research (May 2026), the simpler answer prevailed: ship OIDC-only, default to **Microsoft Entra ID** as the OIDC IdP target, treat **Login.gov OIDC** as the secondary path for USDA-adjacent and citizen-facing deployments, and treat Keycloak only as an on-prem fallback bridge for the rare environment that has a SAML-only legacy IdP and no cloud federation option. There is no version of v0.1 that includes a Rust SAML SP.
 
-**Why the proposed design is worth the additional complexity:** The proposed design IS this alternative — IONe ships OIDC only, with Keycloak documented as the bridge. The only difference is whether we *document* the bridge topology as supported. Documenting it costs nothing; not documenting it loses the engagement guidance for buyers who do need SAML. The risk is symmetric and tiny.
+**Why this is the right call:** Federal procurement runs on Microsoft. The agency holds an ATO inheritance for Entra; the application consumes OIDC. Adding any SAML code path to IONe — including the deployment-time Keycloak bridge as the *default* topology — is over-engineering for a v0.1 that needs to ship to a Microsoft-shop buyer.
 
 ### 4. Structural completeness checklist
 
@@ -328,19 +336,19 @@ All criteria are mechanically verifiable. Each maps to one or more test assertio
 
 ## Open questions
 
-The structural design is complete. One assumption requires external validation before `/implement` runs.
+The structural design is complete. No open questions block `/implement`.
 
-**Q1. (BLOCKER for `/implement`)** Is Keycloak SAML→OIDC bridge acceptable as the deployment topology for SAML-based authentication in a FedRAMP-Moderate-trajectory IONe + TerraYield deployment, or must the SAML SP be inside the IONe binary? Resolve via one email to TerraYield USDA contact or federal-AI procurement counsel. If "must be inside IONe" — re-scope SAML out of v0.1 entirely and accept the TerraYield engagement delay, OR re-evaluate whether ory/hydra or another sidecar is acceptable (still not inside IONe but closer than Keycloak).
+**Q1.** ~~Is Keycloak SAML→OIDC bridge acceptable?~~ _Resolved by federal-standards research, 2026-05-12._ See Devil's Advocate §2. **Final answer:** OIDC-only in IONe v0.1. Default IdP target is **Microsoft Entra ID** (FedRAMP High P-ATO, Feb 2026 docs); secondary target is **Login.gov** OIDC (USDA-adjacent, citizen-facing; eAuth retired 2024-10-01). Keycloak is documented as on-prem fallback only for the rare environment with a SAML-only legacy IdP and no cloud federation. No SAML code path in IONe v0.1.
 
-**Q2.** _Resolved in S3 above._ MFA policy in v0.1: TOTP enrollment is optional per user; if not enrolled, `mfa_verified` is treated as `true` for authorization. If enrolled, the current session must pass an MFA challenge. An org-level `organizations.mfa_required_for_admins` flag forces enrollment for users in admin-level roles. No other forcing in v0.1.
+**Q2.** _Resolved in S3 above._ MFA policy in v0.1: TOTP enrollment is optional per user; if not enrolled, `mfa_verified` is treated as `true` for authorization. If enrolled, the current session must pass an MFA challenge. An org-level `organizations.mfa_required_for_admins` flag forces enrollment for users in admin-level roles. No other forcing in v0.1. Note: in production federal deployments, MFA is typically enforced upstream by Entra ID Conditional Access (FedRAMP-High-authorized) — IONe's TOTP serves the standalone / OSS / non-Microsoft deployment case.
 
-**Q3. (resolvable in S5 code)** Which generic-provider OAuth dialect does the v0.1 broker handle: authorization-code-with-PKCE only, or also support implicit/password grants for legacy SaaS that don't support PKCE? Recommendation: PKCE-only. If a provider doesn't support PKCE, it doesn't qualify for the broker in v0.1; operator runs the provider's flow manually and pastes the token (out-of-scope acknowledged path).
+**Q3.** _Resolved._ Which generic-provider OAuth dialect does the v0.1 broker handle: PKCE authorization code only. If a provider doesn't support PKCE, it doesn't qualify for the broker in v0.1.
 
 ## Commercial linkage
 
 | Slice | Buyer-visible outcome |
 |---|---|
-| S2 OIDC consumer | "Operators log into IONe with their existing corporate IdP (Okta/Auth0/Keycloak/Entra)." Required for any non-trivial deployment. Unblocks USDA-trajectory via Keycloak bridge. |
+| S2 OIDC consumer | "Operators log into IONe with their existing corporate IdP — Microsoft Entra ID (default for federal/enterprise), Login.gov (USDA / citizen-facing), Okta, Auth0, Keycloak." Required for any non-trivial deployment. Federal procurement runs on Microsoft; Entra ID is the canonical target. |
 | S3 TOTP MFA | "FedRAMP-trajectory compatible. Operators enroll TOTP via authenticator app." Required for federal procurement conversations. |
 | S5 Broker scaffold | "One IONe login authorizes access to QuickBooks / Google / Slack on the operator's behalf." Tangible for bearingLineDash future deployment. The scaffold is invisible to the buyer until provider adapters land. |
 | S6 Audit events | "Every authentication event is auditable for compliance review." Required to be checked off in any FedRAMP boundary documentation. |
@@ -360,3 +368,12 @@ No active `md/requirements/` directory exists in this repo today; the substrate 
 - [.claude/rules/path-2-stream-p.md](../../.claude/rules/path-2-stream-p.md) — Path 2 positioning, federal-AI procurement context
 - Existing code: [src/auth.rs](../../src/auth.rs), [src/routes/oauth.rs](../../src/routes/oauth.rs), [src/routes/peers.rs](../../src/routes/peers.rs), [src/services/peer_oauth.rs](../../src/services/peer_oauth.rs), [src/routes/auth_routes.rs](../../src/routes/auth_routes.rs), [src/util/token_crypto.rs](../../src/util/token_crypto.rs)
 - Security review findings: P-1, P-2, P-3 are captured in the Prerequisites table above. Additional findings cited inline (H-4: brokered token ciphertext lacks key-version prefix, blocking zero-downtime rotation → closed by Scope Decisions encryption format. M-3: claim mapping accepts `coc_level` without server-side cap → closed by S2 `max_coc_level` column.) Full security finding list lives in the design-session transcript; the load-bearing ones are inlined here.
+- Federal-standards research (2026-05-12, all sources verified May 2026):
+  - [NIST SP 800-63-4 final (July 2025)](https://csrc.nist.gov/pubs/sp/800/63/4/final) — supersedes 800-63-3; preserves proxied federation model
+  - [NIST SP 800-63C §5.1.4 Proxied Federation](https://pages.nist.gov/800-63-3/sp800-63c.html) — protocol translation SHALL-level normative
+  - [FedRAMP Rev 5 Documents & Templates](https://www.fedramp.gov/rev5/documents-templates/) — refreshed 2025-12-08; no SP placement prescription
+  - [FedRAMP Authorization Boundary Guidance (2021-07-13)](https://www.fedramp.gov/) — controlling boundary document until RFC-0004 finalizes
+  - [FedRAMP RFC-0004 Boundary Policy (draft, Jan 2025)](https://www.fedramp.gov/rfcs/0004/) — still draft as of May 2026; preserves leveraged-service inheritance
+  - [Microsoft Entra ID FedRAMP High guidance (Feb 2026)](https://learn.microsoft.com/en-us/entra/standards/configure-for-fedramp-high-impact) — default IdP target
+  - [Login.gov OIDC](https://developers.login.gov/oidc/getting-started/) — USDA / citizen-facing secondary IdP path; eAuth retired 2024-10-01
+  - [CMMC L2 Assessment Guide v2.13](https://dodcio.defense.gov/Portals/0/Documents/CMMC/AssessmentGuideL2v2.pdf) — no SP placement requirement

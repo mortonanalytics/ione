@@ -67,13 +67,13 @@ Design doc to follow: `md/design/mcp-context-slices.md` (deferred until identity
 The deepest gap. IONe does not replace each app's IdP needs — it brokers. A single operator authenticates to IONe; IONe holds delegated credentials per app and presents them when invoking app tools.
 
 Required surface:
-- OIDC consumer (IONe consumes one identity from a corporate IdP)
-- SAML 2.0 SP (USDA eAuth and equivalents)
+- **OIDC consumer** — default IdP target is **Microsoft Entra ID** (federal/enterprise SSO; FedRAMP High P-ATO). Secondary: **Login.gov OIDC** (USDA-adjacent / citizen-facing; eAuth retired 2024-10-01). Tertiary: any standards-compliant OIDC IdP (Okta, Auth0, Keycloak, Microsoft AD FS).
+- **No SAML SP in v0.1.** NIST SP 800-63C §5.1.4 and FedRAMP Rev 5 baselines do not mandate SAML SP placement; OIDC-only is API-first and cloud-first. For the rare on-prem deployment with a SAML-only legacy IdP, Keycloak runs as an in-boundary SAML→OIDC bridge.
 - Brokered SaaS OAuth dance (QuickBooks, Google Workspace, Slack admin, etc.) with token refresh
-- TOTP and WebAuthn MFA at the broker layer
+- TOTP MFA at the broker layer (WebAuthn deferred to v0.2)
 - Claim mapping (`ione_user → {peer_id, foreign_user_id, foreign_role}`)
 
-This is the highest-effort layer and the one that fundamentally cannot live in any of the apps.
+This is the highest-effort layer and the one that fundamentally cannot live in any of the apps. Full design in [md/design/identity-broker.md](identity-broker.md).
 
 ### 3. Approval and audit gateway
 Mostly built — the [signals → survivors → approvals → audit](../../src/) chain is IONe's differentiator. Apps emit "I want to do X" via MCP notifications or webhooks; IONe gates with human-in-the-loop and writes an audit row on every action.
