@@ -1,0 +1,11 @@
+body { margin: 0; font-family: system-ui, sans-serif; background: #f7f8fa; color: #17202a; }
+.shell { max-width: 920px; margin: 0 auto; padding: 32px 18px; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+h1 { font-size: 24px; margin: 0 0 18px; }
+.panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; padding: 16px; background: white; border: 1px solid #d8dee6; border-radius: 8px; }
+input, select, button { min-height: 38px; border: 1px solid #c7ced8; border-radius: 6px; padding: 0 10px; font: inherit; }
+button { background: #17324d; color: white; border-color: #17324d; cursor: pointer; }
+#admin-status { grid-column: 1 / -1; margin: 0; min-height: 20px; }
+.list { display: grid; gap: 10px; margin-top: 16px; }
+.item { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: center; padding: 12px; background: white; border: 1px solid #d8dee6; border-radius: 8px; }
+@media (max-width: 680px) { .item { grid-template-columns: 1fr; } }

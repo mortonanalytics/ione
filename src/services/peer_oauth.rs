@@ -24,6 +24,7 @@ pub struct PendingFederation {
     pub code_challenge: String,
     pub client_id: String,
     pub redirect_uri: String,
+    pub nonce: String,
 }
 
 #[derive(Debug)]
@@ -103,14 +104,15 @@ pub async fn begin_federation(
     let code_verifier = generate_opaque(32);
     let code_challenge =
         general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+    let nonce = generate_opaque(32);
 
     let authorize_url = format!(
-        "{endpoint}?response_type=code&client_id={client_id}&redirect_uri={redirect}&code_challenge={challenge}&code_challenge_method=S256&scope=mcp&state={peer_id}",
+        "{endpoint}?response_type=code&client_id={client_id}&redirect_uri={redirect}&code_challenge={challenge}&code_challenge_method=S256&scope=mcp&state={state}",
         endpoint = disc.authorization_endpoint,
         client_id = urlencoding::encode(&register_resp.client_id),
         redirect = urlencoding::encode(&redirect_uri),
         challenge = urlencoding::encode(&code_challenge),
-        peer_id = peer_id,
+        state = urlencoding::encode(&nonce),
     );
 
     let peer_repo = crate::repos::PeerRepo::new(state.pool.clone());
@@ -118,6 +120,16 @@ pub async fn begin_federation(
         .begin_oauth(peer_id, &register_resp.client_id)
         .await
         .map_err(AppError::Internal)?;
+    sqlx::query(
+        "INSERT INTO peer_oauth_pending (peer_id, nonce, code_verifier, expires_at)
+         VALUES ($1, $2, $3, now() + interval '10 minutes')",
+    )
+    .bind(peer_id)
+    .bind(&nonce)
+    .bind(&code_verifier)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
 
     Ok(BeginResp {
         authorize_url,
@@ -129,6 +141,7 @@ pub async fn begin_federation(
             code_challenge,
             client_id: register_resp.client_id,
             redirect_uri,
+            nonce,
         },
     })
 }

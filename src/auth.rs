@@ -14,8 +14,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
+    error::AppError,
     models::TrustIssuer,
-    repos::{MembershipRepo, RoleRepo, TrustIssuerRepo, UserRepo},
+    repos::{MembershipRepo, RoleRepo, TrustIssuerRepo, UserRepo, UserSessionRepo},
     state::AppState,
 };
 
@@ -34,6 +35,8 @@ pub struct AuthContext {
     /// (MCP-to-MCP or peer-to-peer call). False for cookie sessions and local fallback.
     pub is_mcp_peer: bool,
     pub active_role_id: Option<Uuid>,
+    pub session_id: Option<Uuid>,
+    pub mfa_verified: bool,
 }
 
 /// Authentication mode derived from `IONE_AUTH_MODE`.
@@ -88,7 +91,7 @@ fn init_session_key() -> [u8; 64] {
 
 // ─── Cookie helpers ──────────────────────────────────────────────────────────
 
-/// Cookie payload: `<user_id>:<exp_unix>`.
+/// Cookie payload: `<session_id>:<exp_unix>`.
 /// HMAC-SHA256 is computed over `<payload>` using the session key.
 /// Final cookie value: `<payload>.<hex_hmac>`.
 fn sign_payload(key: &[u8; 64], payload: &str) -> String {
@@ -100,8 +103,8 @@ fn sign_payload(key: &[u8; 64], payload: &str) -> String {
     hex::encode(result.into_bytes())
 }
 
-fn build_cookie_value(key: &[u8; 64], user_id: Uuid, exp: DateTime<Utc>) -> String {
-    let payload = format!("{}:{}", user_id, exp.timestamp());
+fn build_cookie_value(key: &[u8; 64], session_id: Uuid, exp: DateTime<Utc>) -> String {
+    let payload = format!("{}:{}", session_id, exp.timestamp());
     let sig = sign_payload(key, &payload);
     format!("{}.{}", payload, sig)
 }
@@ -134,9 +137,9 @@ fn parse_cookie_value(key: &[u8; 64], value: &str) -> Option<Uuid> {
         return None;
     }
 
-    let (uid_str, exp_str) = payload.split_once(':')?;
+    let (session_id_str, exp_str) = payload.split_once(':')?;
 
-    let user_id = Uuid::parse_str(uid_str).ok()?;
+    let session_id = Uuid::parse_str(session_id_str).ok()?;
     let exp_ts: i64 = exp_str.parse().ok()?;
     let exp = DateTime::from_timestamp(exp_ts, 0)?;
 
@@ -144,7 +147,7 @@ fn parse_cookie_value(key: &[u8; 64], value: &str) -> Option<Uuid> {
         return None;
     }
 
-    Some(user_id)
+    Some(session_id)
 }
 
 /// Produce a `name=value` cookie string suitable for a `Cookie:` request header
@@ -164,8 +167,8 @@ pub async fn issue_session_cookie_with_expiry(
     Ok(format!("{}={}", SESSION_COOKIE_NAME, value))
 }
 
-/// Extract the user_id from a `Cookie:` header value, if valid and not expired.
-pub fn extract_user_id_from_header(key: &[u8; 64], cookie_header: &str) -> Option<Uuid> {
+/// Extract the session_id from a `Cookie:` header value, if valid and not expired.
+pub fn extract_session_id_from_header(key: &[u8; 64], cookie_header: &str) -> Option<Uuid> {
     for part in cookie_header.split(';') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(SESSION_COOKIE_NAME) {
@@ -178,12 +181,12 @@ pub fn extract_user_id_from_header(key: &[u8; 64], cookie_header: &str) -> Optio
 }
 
 /// Extract user_id from an `axum::http::HeaderMap` (reads the `Cookie:` header).
-pub fn extract_user_id_from_headers(
+pub fn extract_session_id_from_headers(
     key: &[u8; 64],
     headers: &axum::http::HeaderMap,
 ) -> Option<Uuid> {
     let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
-    extract_user_id_from_header(key, cookie_header)
+    extract_session_id_from_header(key, cookie_header)
 }
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
@@ -199,32 +202,73 @@ pub async fn auth_middleware(
     let mode = mode_from_env();
     let key = session_key_from_env();
 
-    let user_id = if mode == AuthMode::Oidc {
+    let session_id_from_cookie = if mode == AuthMode::Oidc {
         req.headers()
             .get(header::COOKIE)
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| extract_user_id_from_header(&key, s))
+            .and_then(|s| extract_session_id_from_header(&key, s))
+    } else {
+        None
+    };
+    let session = if let Some(session_id) = session_id_from_cookie {
+        UserSessionRepo::new(state.pool.clone())
+            .find_active(session_id)
+            .await
+            .ok()
+            .flatten()
     } else {
         None
     };
 
-    let (resolved_user_id, is_oidc) = match user_id {
-        Some(uid) => (uid, true),
-        None => (state.default_user_id, false),
+    let (resolved_user_id, resolved_org_id, is_oidc, session_id, mfa_verified) = match session {
+        Some(s) => (s.user_id, s.org_id, true, Some(s.id), s.mfa_verified),
+        None => (
+            state.default_user_id,
+            resolve_org_id(&state.pool, state.default_user_id)
+                .await
+                .unwrap_or(Uuid::nil()),
+            false,
+            None,
+            false,
+        ),
     };
 
-    let org_id = resolve_org_id(&state.pool, resolved_user_id).await;
+    let active_role_id = resolve_active_role_id(&state.pool, resolved_user_id).await;
 
     let ctx = AuthContext {
         user_id: resolved_user_id,
-        org_id: org_id.unwrap_or(Uuid::nil()),
+        org_id: resolved_org_id,
         is_oidc,
         is_mcp_peer: false,
-        active_role_id: None,
+        active_role_id,
+        session_id,
+        mfa_verified,
     };
 
     req.extensions_mut().insert(ctx);
     next.run(req).await
+}
+
+pub async fn enforce_auth(
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, AppError> {
+    let mode = req
+        .extensions()
+        .get::<AuthMode>()
+        .cloned()
+        .unwrap_or_else(mode_from_env);
+    if mode == AuthMode::Oidc {
+        let ok = req
+            .extensions()
+            .get::<AuthContext>()
+            .map(|c| c.is_oidc)
+            .unwrap_or(false);
+        if !ok {
+            return Err(AppError::Unauthorized);
+        }
+    }
+    Ok(next.run(req).await)
 }
 
 async fn resolve_org_id(pool: &PgPool, user_id: Uuid) -> Option<Uuid> {
@@ -234,6 +278,31 @@ async fn resolve_org_id(pool: &PgPool, user_id: Uuid) -> Option<Uuid> {
         .await
         .ok()
         .flatten()
+}
+
+async fn resolve_active_role_id(pool: &PgPool, user_id: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT role_id FROM memberships WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+pub async fn require_admin(ctx: &AuthContext, pool: &PgPool) -> Result<(), AppError> {
+    let role_id = ctx.active_role_id.ok_or(AppError::Forbidden)?;
+    let coc: Option<i32> = sqlx::query_scalar("SELECT coc_level FROM roles WHERE id = $1")
+        .bind(role_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    if coc.unwrap_or(0) >= 80 {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
 }
 
 // ─── Claim → User + Membership mapping ───────────────────────────────────────
@@ -366,6 +435,7 @@ async fn resolve_workspace_by_name(
 /// Placeholder OIDC state cookie name used during login/callback.
 pub const OIDC_STATE_COOKIE: &str = "ione_oidc_state";
 pub const OIDC_VERIFIER_COOKIE: &str = "ione_oidc_verifier";
+pub const OIDC_ISSUER_COOKIE: &str = "ione_oidc_issuer";
 
 /// Build the PKCE challenge from a verifier (base64url(sha256(verifier))).
 pub fn pkce_challenge(verifier: &str) -> String {
@@ -398,5 +468,15 @@ pub fn set_session_cookie_header(user_id: Uuid) -> String {
     format!(
         "{}={}; Max-Age={}; Path=/; HttpOnly; SameSite=Lax",
         SESSION_COOKIE_NAME, value, SESSION_DEFAULT_TTL_SECS
+    )
+}
+
+pub fn set_session_cookie_header_for_session(session_id: Uuid, exp: DateTime<Utc>) -> String {
+    let key = session_key_from_env();
+    let max_age = (exp - Utc::now()).num_seconds().max(0);
+    let value = build_cookie_value(&key, session_id, exp);
+    format!(
+        "{}={}; Max-Age={}; Path=/; HttpOnly; SameSite=Lax",
+        SESSION_COOKIE_NAME, value, max_age
     )
 }

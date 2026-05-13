@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{
-        extract_user_id_from_headers, mode_from_env, session_key_from_env, AuthContext, AuthMode,
+        extract_session_id_from_headers, mode_from_env, session_key_from_env, AuthContext, AuthMode,
     },
     connectors::build_from_row,
     models::{ActorKind, ArtifactKind},
@@ -173,16 +173,20 @@ pub async fn resolve_auth(state: &AppState, headers: &HeaderMap) -> Option<AuthC
 
     // 2. Session cookie path
     let key = session_key_from_env();
-    if let Some(user_id) = extract_user_id_from_headers(&key, headers) {
-        let org_id = resolve_org_id(&state.pool, user_id)
+    if let Some(session_id) = extract_session_id_from_headers(&key, headers) {
+        let session = crate::repos::UserSessionRepo::new(state.pool.clone())
+            .find_active(session_id)
             .await
-            .unwrap_or(Uuid::nil());
+            .ok()
+            .flatten()?;
         return Some(AuthContext {
-            user_id,
-            org_id,
+            user_id: session.user_id,
+            org_id: session.org_id,
             is_oidc: true,
             is_mcp_peer: false,
             active_role_id: None,
+            session_id: Some(session.id),
+            mfa_verified: session.mfa_verified,
         });
     }
 
@@ -197,6 +201,8 @@ pub async fn resolve_auth(state: &AppState, headers: &HeaderMap) -> Option<AuthC
             is_oidc: false,
             is_mcp_peer: false,
             active_role_id: None,
+            session_id: None,
+            mfa_verified: false,
         });
     }
 
@@ -291,6 +297,8 @@ async fn verify_jwt_against_issuer(
         is_oidc: true,
         is_mcp_peer: true,
         active_role_id: None,
+        session_id: None,
+        mfa_verified: false,
     })
 }
 

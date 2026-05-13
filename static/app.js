@@ -94,6 +94,10 @@ async function apiFetch(path, options = {}) {
     try { errorBody = await resp.json(); } catch (_) {}
     if (errorBody?.error === 'demo_read_only') {
       showToast('The demo workspace is read-only. Switch to your workspace to make changes.');
+    } else if (errorBody?.error === 'mfa_required') {
+      window.location.href = '/mfa.html#challenge';
+    } else if (errorBody?.error === 'mfa_enrollment_required') {
+      window.location.href = '/mfa.html#enroll';
     } else if (errorBody?.field && typeof onFieldError === 'function') {
       onFieldError(errorBody.field, errorBody);
     } else if (!skipErrorToast) {

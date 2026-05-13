@@ -21,9 +21,9 @@ impl PeerRepo {
         sharing_policy: serde_json::Value,
     ) -> anyhow::Result<Peer> {
         sqlx::query_as::<_, Peer>(
-            "INSERT INTO peers (name, mcp_url, issuer_id, sharing_policy)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+            "INSERT INTO peers (org_id, name, mcp_url, issuer_id, sharing_policy)
+             SELECT org_id, $1, $2, id, $4 FROM trust_issuers WHERE id = $3
+             RETURNING id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                  oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
                  token_expires_at, tool_allowlist",
         )
@@ -38,7 +38,7 @@ impl PeerRepo {
 
     pub async fn list(&self) -> anyhow::Result<Vec<Peer>> {
         sqlx::query_as::<_, Peer>(
-            "SELECT id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+            "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                  oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
                  token_expires_at, tool_allowlist
              FROM peers
@@ -49,9 +49,24 @@ impl PeerRepo {
         .context("failed to list peers")
     }
 
+    pub async fn list_for_org(&self, org_id: Uuid) -> anyhow::Result<Vec<Peer>> {
+        sqlx::query_as::<_, Peer>(
+            "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
+                 token_expires_at, tool_allowlist
+             FROM peers
+             WHERE org_id = $1
+             ORDER BY created_at DESC",
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list peers by org")
+    }
+
     pub async fn get(&self, id: Uuid) -> anyhow::Result<Option<Peer>> {
         sqlx::query_as::<_, Peer>(
-            "SELECT id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+            "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                  oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
                  token_expires_at, tool_allowlist
              FROM peers
@@ -68,7 +83,7 @@ impl PeerRepo {
             "UPDATE peers
              SET status = $2
              WHERE id = $1
-             RETURNING id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+             RETURNING id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                  oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
                  token_expires_at, tool_allowlist",
         )

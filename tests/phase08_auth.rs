@@ -171,6 +171,22 @@ async fn insert_trust_issuer(
     )
 }
 
+async fn issue_db_session_cookie(pool: &PgPool, user_id: Uuid, org_id: Uuid) -> String {
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let session_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO user_sessions (user_id, org_id, idp_type, expires_at)
+         VALUES ($1, $2, 'oidc', $3)
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(org_id)
+    .bind(expires_at)
+    .fetch_one(pool)
+    .await
+    .expect("insert user_session failed");
+    ione::auth::set_session_cookie_header_for_session(session_id, expires_at)
+}
+
 // ─── 1. trust_issuer_unique_constraint ────────────────────────────────────────
 
 /// INSERT the same (org_id, issuer_url, audience) twice → second INSERT must fail
@@ -600,10 +616,8 @@ async fn me_with_valid_session_returns_oidc_user() {
             .await
             .expect("user not found after handle_test_callback");
 
-    // Mint a signed session cookie for that user.
-    let cookie_value = ione::auth::issue_session_cookie(user_id)
-        .await
-        .expect("issue_session_cookie failed (not implemented — expected failure)");
+    // Mint a signed DB-backed session cookie for that user.
+    let cookie_value = issue_db_session_cookie(&pool, user_id, org_id).await;
 
     let client = reqwest::Client::new();
 

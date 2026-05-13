@@ -20,6 +20,12 @@ pub enum AppError {
     #[error("forbidden")]
     Forbidden,
 
+    #[error("mfa required")]
+    MfaRequired,
+
+    #[error("mfa enrollment required")]
+    MfaEnrollmentRequired,
+
     #[error("ollama upstream error: {0}")]
     OllamaUpstream(String),
 
@@ -70,6 +76,22 @@ impl IntoResponse for AppError {
                 Json(json!({
                     "error": "forbidden",
                     "message": "You don't have permission to perform this action."
+                })),
+            )
+                .into_response(),
+            AppError::MfaRequired => (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "mfa_required",
+                    "message": "Complete MFA challenge to continue."
+                })),
+            )
+                .into_response(),
+            AppError::MfaEnrollmentRequired => (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "mfa_enrollment_required",
+                    "message": "Enroll MFA before using this endpoint."
                 })),
             )
                 .into_response(),
@@ -141,6 +163,8 @@ mod tests {
             AppError::NotFound("y".into()),
             AppError::Unauthorized,
             AppError::Forbidden,
+            AppError::MfaRequired,
+            AppError::MfaEnrollmentRequired,
             AppError::OllamaUpstream("upstream failed".into()),
             AppError::OllamaUnreachable {
                 base_url: "http://localhost:11434".into(),

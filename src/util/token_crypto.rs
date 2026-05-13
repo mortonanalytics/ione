@@ -7,6 +7,7 @@ use base64::{engine::general_purpose, Engine};
 use rand::RngCore;
 
 const NONCE_LEN: usize = 12;
+pub const TOKEN_KEY_VERSION_CURRENT: u8 = 0x01;
 
 pub fn encrypt_token(token: &str) -> Result<Vec<u8>> {
     let cipher = cipher_from_env()?;
@@ -32,6 +33,36 @@ pub fn decrypt_token(ciphertext: &[u8]) -> Result<String> {
         .decrypt(Nonce::from_slice(nonce), body)
         .map_err(|_| anyhow::anyhow!("decrypt token"))?;
     String::from_utf8(plaintext).context("token plaintext is not utf-8")
+}
+
+pub fn encrypt_versioned(plaintext: &[u8]) -> Result<Vec<u8>> {
+    let cipher = cipher_from_env()?;
+    let mut nonce = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .map_err(|_| anyhow::anyhow!("encrypt token"))?;
+    let mut out = Vec::with_capacity(1 + NONCE_LEN + ciphertext.len());
+    out.push(TOKEN_KEY_VERSION_CURRENT);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+pub fn decrypt_versioned(ciphertext: &[u8]) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        ciphertext.len() > 1 + NONCE_LEN,
+        "encrypted token payload is too short"
+    );
+    anyhow::ensure!(
+        ciphertext[0] == TOKEN_KEY_VERSION_CURRENT,
+        "unsupported token key version"
+    );
+    let cipher = cipher_from_env()?;
+    let (nonce, body) = ciphertext[1..].split_at(NONCE_LEN);
+    cipher
+        .decrypt(Nonce::from_slice(nonce), body)
+        .map_err(|_| anyhow::anyhow!("decrypt token"))
 }
 
 pub fn validate_env_key() -> Result<()> {

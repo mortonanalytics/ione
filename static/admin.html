@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IONe Admin</title>
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="toolbar">
+      <h1>Identity Providers</h1>
+      <a href="/">App</a>
+    </section>
+    <form id="issuer-form" class="panel">
+      <select id="preset">
+        <option value="entra">Entra ID</option>
+        <option value="login-gov">Login.gov</option>
+        <option value="custom">Custom OIDC</option>
+      </select>
+      <input id="display-name" placeholder="Display name">
+      <input id="tenant-id" placeholder="Tenant ID">
+      <input id="issuer-url" placeholder="Issuer URL">
+      <input id="audience" placeholder="Client ID">
+      <input id="jwks-uri" placeholder="JWKS URI">
+      <input id="client-secret" placeholder="Client secret" type="password">
+      <button type="submit">Add provider</button>
+      <p id="admin-status" role="status"></p>
+    </form>
+    <section id="issuer-list" class="list"></section>
+  </main>
+  <script src="/admin.js"></script>
+</body>
+</html>

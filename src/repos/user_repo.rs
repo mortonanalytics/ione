@@ -51,4 +51,25 @@ impl UserRepo {
         .await
         .context("failed to upsert user by oidc_subject")
     }
+
+    pub async fn insert_profile(
+        &self,
+        org_id: Uuid,
+        email: &str,
+        display_name: &str,
+        oidc_subject: Option<&str>,
+    ) -> anyhow::Result<User> {
+        sqlx::query_as::<_, User>(
+            "INSERT INTO users (org_id, email, display_name, oidc_subject)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, org_id, email, display_name, oidc_subject, created_at",
+        )
+        .bind(org_id)
+        .bind(email)
+        .bind(display_name)
+        .bind(oidc_subject)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to insert user profile")
+    }
 }

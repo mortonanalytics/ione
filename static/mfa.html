@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IONe MFA</title>
+  <link rel="stylesheet" href="/mfa.css">
+</head>
+<body>
+  <main class="shell">
+    <h1>Multi-Factor Authentication</h1>
+    <section class="panel">
+      <button id="enroll-btn">Enroll TOTP</button>
+      <pre id="qr"></pre>
+      <p id="secret"></p>
+      <input id="code" inputmode="numeric" placeholder="6-digit code">
+      <button id="confirm-btn">Confirm</button>
+      <button id="challenge-btn">Verify</button>
+      <button id="recovery-btn">Show recovery codes</button>
+      <pre id="output"></pre>
+    </section>
+  </main>
+  <script src="/mfa.js"></script>
+</body>
+</html>

@@ -1,8 +1,13 @@
 pub mod auto_exec;
+pub mod brokered_token_service;
+pub mod claim_mapper;
 pub mod critic;
 pub mod delivery;
 pub mod funnel;
 pub mod generator;
+pub mod identity_audit_writer;
+pub mod idp_service;
+pub mod mfa_service;
 pub mod ollama;
 pub mod peer;
 pub mod peer_oauth;
@@ -10,3 +15,7 @@ pub mod pipeline_bus;
 pub mod router;
 pub mod rules;
 pub mod scheduler;
+pub mod session_service;
+
+pub use identity_audit_writer::{IdentityAuditWriter, IdentityEvent};
+pub use session_service::SessionService;

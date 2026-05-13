@@ -1,23 +1,25 @@
 use axum::{
-    middleware::from_fn_with_state,
+    http::{header, HeaderValue, Method},
+    middleware::{from_fn, from_fn_with_state},
     routing::{delete, get, post},
     Router,
 };
-use tower_http::{
-    cors::{Any, CorsLayer},
-    services::ServeDir,
-    trace::TraceLayer,
-};
+use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    auth::auth_middleware, mcp_server, middleware::demo_guard::demo_write_guard, state::AppState,
+    auth::{auth_middleware, enforce_auth, AuthContext},
+    mcp_server,
+    middleware::demo_guard::demo_write_guard,
+    state::AppState,
 };
 
 pub mod activation;
+pub mod admin;
 pub mod approvals;
 pub mod artifacts;
 pub mod audit_events;
 pub mod auth_routes;
+pub mod broker;
 pub mod chat;
 pub mod connectors;
 pub mod conversations;
@@ -25,9 +27,11 @@ pub mod feed;
 pub mod health;
 pub mod mcp_clients;
 pub mod me;
+pub mod mfa;
 pub mod oauth;
 pub mod peers;
 pub mod pipeline_events;
+pub mod public_issuers;
 pub mod signals;
 pub mod survivors;
 pub mod telemetry;
@@ -54,6 +58,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/health/ollama", get(health::health_ollama))
         .route("/auth/login", get(auth_routes::login))
         .route("/auth/callback", get(auth_routes::callback))
+        .route("/auth/issuers", get(public_issuers::list))
+        .route("/auth/broker/callback", get(broker::callback))
         .route("/auth/logout", post(auth_routes::logout))
         .route("/api/v1/peers/callback", get(peers::callback))
         .with_state(state.clone());
@@ -136,6 +142,29 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/telemetry/events", post(telemetry::track_event))
         .route("/api/v1/admin/funnel", get(telemetry::admin_funnel))
+        .route(
+            "/api/v1/admin/trust-issuers",
+            get(admin::trust_issuers::list).post(admin::trust_issuers::create),
+        )
+        .route(
+            "/api/v1/admin/trust-issuers/:id",
+            delete(admin::trust_issuers::delete),
+        )
+        .route("/api/v1/me/mfa", get(mfa::status))
+        .route("/api/v1/me/mfa/totp/enroll", post(mfa::enroll_totp))
+        .route("/api/v1/me/mfa/totp/confirm", post(mfa::confirm_totp))
+        .route("/api/v1/me/mfa/totp", delete(mfa::delete_totp))
+        .route("/api/v1/me/mfa/challenge", post(mfa::challenge))
+        .route("/api/v1/me/mfa/recovery-codes", get(mfa::recovery_codes))
+        .route(
+            "/api/v1/broker/connections",
+            get(broker::list).post(broker::begin),
+        )
+        .route("/api/v1/broker/connections/:id", delete(broker::revoke))
+        .route(
+            "/api/v1/broker/connections/:id/refresh",
+            post(broker::refresh),
+        )
         .route("/api/v1/approvals/:id", post(approvals::decide_approval))
         .route(
             "/api/v1/peers",
@@ -153,13 +182,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/me", get(me::me))
         .route_layer(from_fn_with_state(state.clone(), demo_write_guard))
+        .route_layer(from_fn(enforce_auth))
         .route_layer(from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state.clone());
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = cors_layer_from_env();
 
     // MCP server routes use OAuth bearer tokens; /mcp/oauth/* is registered separately.
     let mcp = mcp_server::router()
@@ -179,4 +206,63 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(
             crate::middleware::session_cookie::session_cookie,
         ))
+}
+
+fn cors_layer_from_env() -> CorsLayer {
+    let origins = std::env::var("IONE_CORS_ALLOWED_ORIGINS").unwrap_or_default();
+    let parsed: Vec<HeaderValue> = origins
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if parsed.is_empty() {
+        CorsLayer::new()
+    } else {
+        CorsLayer::new()
+            .allow_origin(parsed)
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+    }
+}
+
+pub async fn mfa_gate(
+    ctx: &AuthContext,
+    pool: &sqlx::PgPool,
+) -> Result<(), crate::error::AppError> {
+    let enrolled: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM mfa_enrollments WHERE user_id = $1 AND activated_at IS NOT NULL)",
+    )
+    .bind(ctx.user_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    let org_requires_admin: bool = sqlx::query_scalar(
+        "SELECT COALESCE(mfa_required_for_admins, false) FROM organizations WHERE id = $1",
+    )
+    .bind(ctx.org_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+    let is_admin = if let Some(role_id) = ctx.active_role_id {
+        sqlx::query_scalar::<_, i32>("SELECT coc_level FROM roles WHERE id = $1")
+            .bind(role_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+            >= 80
+    } else {
+        false
+    };
+    if org_requires_admin && is_admin && !enrolled {
+        return Err(crate::error::AppError::MfaEnrollmentRequired);
+    }
+    if enrolled && !ctx.mfa_verified {
+        return Err(crate::error::AppError::MfaRequired);
+    }
+    Ok(())
 }

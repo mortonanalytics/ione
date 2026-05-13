@@ -18,6 +18,7 @@ pub enum PeerStatus {
 #[serde(rename_all = "camelCase")]
 pub struct Peer {
     pub id: Uuid,
+    pub org_id: Uuid,
     pub name: String,
     pub mcp_url: String,
     pub issuer_id: Uuid,

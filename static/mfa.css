@@ -1,0 +1,7 @@
+body { margin: 0; font-family: system-ui, sans-serif; background: #f7f8fa; color: #17202a; }
+.shell { max-width: 680px; margin: 0 auto; padding: 32px 18px; }
+h1 { font-size: 24px; margin: 0 0 18px; }
+.panel { display: grid; gap: 12px; padding: 16px; background: white; border: 1px solid #d8dee6; border-radius: 8px; }
+input, button { min-height: 40px; border: 1px solid #c7ced8; border-radius: 6px; padding: 0 10px; font: inherit; }
+button { background: #17324d; color: white; border-color: #17324d; cursor: pointer; }
+pre { overflow: auto; white-space: pre-wrap; background: #eef2f5; padding: 10px; border-radius: 6px; }

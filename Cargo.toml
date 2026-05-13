@@ -56,6 +56,11 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
 csv = "1"
 phf = { version = "0.12", features = ["macros"] }
+openidconnect = "3"
+totp-lite = "2"
+argon2 = "0.5"
+qrcode = { version = "0.14", default-features = false }
+data-encoding = "2"
 aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 

@@ -1,24 +1,19 @@
 use axum::{
     extract::{Path, Query, State},
     response::{Json, Redirect},
+    Extension,
 };
-use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
+    auth::AuthContext,
     error::AppError,
     repos::{ConnectorRepo, PeerRepo, StreamRepo},
     services::peer::auto_create_connector_for_peer,
     state::AppState,
 };
-
-static PENDING_FEDERATIONS: Lazy<
-    Mutex<HashMap<Uuid, crate::services::peer_oauth::PendingFederation>>,
-> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 // ── Request types ─────────────────────────────────────────────────────────────
 
@@ -52,15 +47,22 @@ struct LegacyCreatePeerRequest {
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// GET /api/v1/peers — list all known peers.
-pub async fn list_peers(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
+pub async fn list_peers(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<Json<Value>, AppError> {
     let repo = PeerRepo::new(state.pool.clone());
-    let items = repo.list().await.map_err(AppError::Internal)?;
+    let items = repo
+        .list_for_org(ctx.org_id)
+        .await
+        .map_err(AppError::Internal)?;
     Ok(Json(json!({ "items": items })))
 }
 
 /// POST /api/v1/peers — begin OAuth federation with a peer.
 pub async fn create_peer(
     State(state): State<AppState>,
+    Extension(_ctx): Extension<AuthContext>,
     Json(req): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
     if req.get("peerUrl").is_none() {
@@ -86,11 +88,6 @@ pub async fn create_peer(
 
     let begin =
         crate::services::peer_oauth::begin_federation(&state, peer.id, &req.peer_url).await?;
-
-    PENDING_FEDERATIONS
-        .lock()
-        .await
-        .insert(peer.id, begin.pending);
 
     Ok(Json(json!({
         "id": peer.id,
@@ -130,13 +127,41 @@ pub(crate) async fn callback(
     State(state): State<AppState>,
     Query(q): Query<CallbackQuery>,
 ) -> Result<Redirect, AppError> {
-    let peer_id =
-        Uuid::parse_str(&q.state).map_err(|_| AppError::BadRequest("invalid state".into()))?;
-    let pending = PENDING_FEDERATIONS
-        .lock()
+    let row: Option<(Uuid, String)> = sqlx::query_as(
+        "DELETE FROM peer_oauth_pending
+         WHERE nonce = $1 AND expires_at > now()
+         RETURNING peer_id, code_verifier",
+    )
+    .bind(&q.state)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
+    let (peer_id, code_verifier) =
+        row.ok_or_else(|| AppError::BadRequest("invalid or expired state".into()))?;
+    let peer = PeerRepo::new(state.pool.clone())
+        .get(peer_id)
         .await
-        .remove(&peer_id)
-        .ok_or_else(|| AppError::BadRequest("no pending federation for this state".into()))?;
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::BadRequest("peer not found".into()))?;
+    let disc_value = crate::util::safe_http::fetch_public_metadata(
+        &format!("{}/.well-known/oauth-authorization-server", peer.mcp_url),
+        64_000,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
+    let discovery: crate::services::peer_oauth::PeerDiscovery = serde_json::from_value(disc_value)
+        .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
+    let pending = crate::services::peer_oauth::PendingFederation {
+        peer_id,
+        peer_url: peer.mcp_url.clone(),
+        discovery,
+        code_verifier,
+        code_challenge: String::new(),
+        client_id: peer.oauth_client_id.unwrap_or_default(),
+        redirect_uri: format!("{}/api/v1/peers/callback", state.config.oauth_issuer),
+        nonce: q.state.clone(),
+    };
     crate::services::peer_oauth::complete_callback(&state, &pending, &q.code)
         .await
         .map_err(AppError::Internal)?;

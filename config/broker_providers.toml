@@ -1,0 +1,5 @@
+[providers.generic-test]
+authorize_url = "${IONE_TEST_AUTHORIZE_URL}"
+token_url = "${IONE_TEST_TOKEN_URL}"
+revoke_url = "${IONE_TEST_REVOKE_URL}"
+scopes_required = []

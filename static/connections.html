@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IONe Connections</title>
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="toolbar"><h1>Connections</h1><a href="/">App</a></section>
+    <form id="connect-form" class="panel">
+      <select id="provider"><option value="generic-test">Generic test</option></select>
+      <input id="label" placeholder="Label">
+      <button type="submit">Connect</button>
+    </form>
+    <section id="connections" class="list"></section>
+  </main>
+  <script src="/connections.js"></script>
+</body>
+</html>
