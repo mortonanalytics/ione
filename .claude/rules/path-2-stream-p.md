@@ -11,13 +11,15 @@ paths:
 
 # Path 2 — Stream P Supporting (IONe)
 
-Work in this repo supports **Path 2 — Modular Infrastructure Risk Intelligence**, the selected growth path for Morton Analytics LLC (decided 2026-05-12). IONe's role: **on-prem workspace substrate underneath GroundPulse customer deployments**. Full plan: `../morton-analytics-web/md/strategy/path-2-90day-plan.md`.
+Work in this repo supports **Path 2 — Modular Infrastructure Risk Intelligence**, the selected growth path for Morton Analytics LLC (decided 2026-05-12). IONe's role: **integration fabric for Morton Analytics' polyglot client-app portfolio.** GroundPulse is the first instance; TerraYield (`../eo_ag/`) and bearingLineDash (`../bearingLineDash/`) are the next reference apps the substrate must accommodate. Full plan: `../morton-analytics-web/md/strategy/path-2-90day-plan.md`. Substrate spec: `md/design/ione-substrate.md`.
 
 ## Positioning inside Path 2
 
-IONe is **not a standalone product** in the current plan (until Y3 gate). The pitch to an asset-operator buyer is GroundPulse (the analytics + asset-type module) + IONe (the chat-first workspace surface), sold as one solution. This converts IONe's category-creation risk into a feature of GroundPulse's existing-category sale.
+IONe is **not a standalone product** in the current plan (until Y3 gate). The pitch to a client is the **domain app + IONe substrate** sold as one solution: GroundPulse + IONe for a pipeline/bridge/dam operator; TerraYield + IONe for an ag cooperative; etc. This converts IONe's category-creation risk into a feature of an existing-category sale.
 
-Commercial revenue accrues to GroundPulse engagements until a separate IONe commercial line is validated. The IONe OSS release still ships publicly to maintain MCP-adoption-window optionality.
+Commercial revenue accrues to client-app engagements until a separate IONe commercial line is validated. The IONe OSS release still ships publicly to maintain MCP-adoption-window optionality.
+
+The **internal ROI** is the real driver: every Morton client engagement deploys IONe substrate + one or more app modules. The OSS positioning is the external face of an internal-developer-leverage investment across the portfolio.
 
 ## Current 90-day outcome
 
@@ -29,9 +31,10 @@ P7 is Tier 3 — protected against P2 (pipelines module) but cuttable if Stream 
 
 ## Architectural priorities for Stream P work in IONe
 
-- **Workspace-substrate framing**: every UI/API surface should be answerable to "would this be useful inside a GroundPulse customer deployment?" — not "would this win standalone enterprise AI ops sales?"
+- **Integration-fabric framing**: every architectural decision answers one question — *does this help IONe federate to three different polyglot apps owned by different teams, or does it only make IONe better as a standalone product?* If only the latter, defer.
 - **MCP-native is the differentiator** vs. Palantir / Glean / LangChain. Federation primitives and on-prem deployment are the moat. Keep these first-class.
-- **Connectors that matter for Stream P**: ones that bridge to GroundPulse data (PMTiles, COG, observation streams) + the federal-adjacent ones already in v0.1 (NWS, FIRMS, IRWIN, S3/MinIO).
+- **Substrate layers IONe owns**: MCP federation hub; identity broker (OIDC, SAML SP, brokered SaaS OAuth, MFA); approval/audit gateway; thin UX shell with pluggable view types (map first, others later); push event ingress (signed webhooks + MCP notifications); cross-app workspace context (`workspace_peer_bindings`); federated catalog/search (defer until peer count > 3).
+- **Layers IONe explicitly does NOT own** (apps own these): PostGIS / TimescaleDB / app-specific DB extensions; background task queues for app workloads; tile servers and raster compute; format-aware exporters; compute observability of remote apps; schema modules / app code hosting.
 - **Federal-AI procurement tailwind**: OMB M-25-21 / M-25-22 favors on-prem + MCP-native + OSS. This is the buyer profile the IONe pricing doc already targets.
 
 ## Working in this repo
@@ -49,8 +52,9 @@ P7 is Tier 3 — protected against P2 (pipelines module) but cuttable if Stream 
 
 ## Cross-repo coordination
 
-- GroundPulse (`../eo/`) is the primary Stream P deliverable. IONe's UI/API should consume GroundPulse module output cleanly.
-- Marketing site (`../morton-analytics-web/`) — when IONe v0.1 ships publicly, update copy via that repo with the substrate-under-GroundPulse framing, not as a standalone product page.
+- **Reference apps**: GroundPulse (`../eo/`), TerraYield (`../eo_ag/`), bearingLineDash (`../bearingLineDash/`, future once it expands beyond QuickBooks). Each connects to IONe by satisfying the contract in `md/design/app-integration-playbook.md`.
+- IONe's UI/API renders refs and brokers identity; the apps own their data, compute, and frontends. Per-app MCP-server design docs live in each app repo, not in IONe.
+- Marketing site (`../morton-analytics-web/`) — when IONe v0.1 ships publicly, update copy with the integration-fabric framing (substrate for Morton's app portfolio), not standalone-product framing.
 
 ## When in doubt
 

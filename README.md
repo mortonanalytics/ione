@@ -1,25 +1,25 @@
 # IONe
 
-**An input-output network of federated, AI-native operational decision-support nodes.**
+**Integration fabric for federated, AI-native operational apps. The on-prem MCP substrate underneath domain-specific decision-support apps.**
 
-IONe is a single Rust binary + static UI that turns any collection of API-reachable systems (MCP servers, OpenAPI endpoints, hand-wired adapters) into a chat-first operational workspace. Each deployment is one node. Nodes federate peer-to-peer over MCP. A built-in generator↔adversarial LLM loop surfaces insights with an audit trail; a routing classifier decides what flows where; commands-down write-backs let IONe act, not just observe.
+IONe is a single Rust binary + static UI that federates a heterogeneous portfolio of operational apps into one workspace for an operator. Each connected app stays opinionated about its own data, compute, storage, and frontend; IONe handles federation over MCP, brokered identity, signed push event ingress, a generator↔adversarial LLM loop that gates app actions through human approval with audit trail, and a thin UX shell that renders refs (maps, tables, charts, documents) the apps provide.
 
-> Status: **pre-alpha**. v0.1.0 is a reference implementation of the federated-nodes thesis. Expect breakage.
+> Status: **pre-alpha**. v0.1.0 is a reference implementation of the federation thesis under the older chat-first framing; current architectural direction is captured in [md/design/ione-substrate.md](md/design/ione-substrate.md). Expect breakage.
 
 ## What it's for
 
-Organizations that run operational decision-support workflows across many data sources, with a chain-of-command that needs information up and commands down: USFS fire operations, FEMA emergency services, enterprise ops centers, and startups stitching novel cross-domain data into new products. The same substrate serves all of them — domain-specific curation lives inside each node's data; the platform doesn't care about the domain.
+Organizations that run operational decision-support workflows across many specialized apps, with a chain-of-command that needs information up and commands down. The reference deployments pair IONe with one or more domain apps: GroundPulse for infrastructure risk, TerraYield for crop-health intelligence, bearingLineDash for financial analytics. The same substrate serves them all — domain-specific data and compute live inside each app; IONe brokers identity, federates over MCP, gates actions through approval, and presents the unified pane of glass.
 
 ## Thesis
 
-See [md/design/ione-v1.md](md/design/ione-v1.md) and [md/strategy/market/ione-chat-first-data-ias.md](md/strategy/market/ione-chat-first-data-ias.md) for the full design and market context. Short version:
+The canonical reference is [md/design/ione-substrate.md](md/design/ione-substrate.md) (integration-fabric framing, 2026-05-12). The earlier chat-first design [md/design/ione-v1.md](md/design/ione-v1.md) and product-completion design [md/design/ione-complete.md](md/design/ione-complete.md) are preserved as historical context for what shipped on `main`. Short version of the current thesis:
 
-1. **Workspace is one primitive.** No design-time incident/ops split — lifecycle is a declarative property.
-2. **Any API-reachable system is a node.** Connectors are a hybrid: MCP primary, OpenAPI auto-adapter, hand-written Rust for top-priority integrations.
-3. **Nodes federate as peers.** Each node exposes itself as an MCP server; the same protocol does internal integrations and inter-node peering.
-4. **Insights are gen↔adversarial.** A generator LLM proposes; a critic model stress-tests; only survivors advance. The survivor's chain-of-reasoning is the audit trail.
-5. **Routing is classified, not coded.** An LLM classifier decides where each survivor flows (feed / notification / draft / peer). Topology is runtime.
-6. **Chat is the demo surface, not the engine.** The engine is connectors + workspace + gen↔adversarial + classified routing.
+1. **IONe is integration fabric, not a hosting platform.** Apps stay independent; IONe federates over MCP + brokered identity + approval/audit gateway + UX shell.
+2. **Any MCP-speaking app is a peer.** The contract apps satisfy lives at [md/design/app-integration-playbook.md](md/design/app-integration-playbook.md): MCP server + OAuth 2.1 + signed webhooks + view-hint resource metadata + foreign-tenant `whoami` + role declaration.
+3. **Identity is brokered.** IONe consumes one identity (OIDC, SAML 2.0 SP, MFA) and holds delegated tokens per app per user. Apps trust IONe-issued OAuth credentials.
+4. **State-changing app actions go through IONe's approval gateway.** Apps declare which tools require human-in-the-loop. IONe routes the operator's intent through a generator↔adversarial LLM survivor chain, then through approval, then invokes the app. Audit on every action.
+5. **The UX shell renders refs.** Apps own their tile servers, raster stores, report generators, time-series DBs. IONe embeds tile URLs, MIME-typed documents, and view-hinted resources from MCP metadata. No data is hosted in IONe that belongs to an app.
+6. **Chat is one surface, not the engine.** The engine is federation + identity broker + approval gateway. Chat, map, table, chart, document are surfaces over that engine.
 
 ## Quickstart
 

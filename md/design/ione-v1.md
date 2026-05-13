@@ -1,7 +1,7 @@
 # IONe v1 — Design Doc
 
 **Date:** 2026-04-19
-**Status:** Working doc — captures decisions from product-definition session. Lives until v0.1 ships; then becomes historical reference.
+**Status:** Superseded in framing by [ione-substrate.md](ione-substrate.md) (2026-05-12). This document captures the *application-shaped* v0.1 design — chat-first federated workspace product. Under the integration-fabric thesis, several premises here no longer hold (notably: "chat is the user surface" for the IONe-as-product framing, and the implicit assumption that IONe hosts all the data primitives). The body is preserved as historical reference and remains accurate for the application-layer features actually shipped on `main`. For current architectural direction, read [ione-substrate.md](ione-substrate.md) first.
 **Lineage:** Directly descended from the 2024 IONe whitepaper (`docs/ione_wp.pdf`). Same thesis — "input-output network" of analyst-driven services — now reconstituted as an AI-native, federated, chat-first product.
 
 ## Problem

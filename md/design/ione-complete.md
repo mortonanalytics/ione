@@ -1,7 +1,7 @@
 # IONe — Path to a Complete Product
 
 **Date:** 2026-04-23
-**Status:** Design ready for /implement
+**Status:** Superseded in framing by [ione-substrate.md](ione-substrate.md) (2026-05-12). The slices captured here (Demo Workspace, Ollama preflight, Guided Connector Setup, Publish-Don't-Poll, Split Activation, Failure UX, Funnel Telemetry, MCP OAuth 2.1, Peer Handshake, A11y) shipped successfully and form the application-layer baseline on `main`. Under the integration-fabric thesis, the application-layer polish documented here is no longer load-bearing for the v0.1 thesis — the substrate-layer table stakes (identity broker, foreign-tenant mapping, webhook ingress, tile passthrough, tool namespacing) take precedence. The body is preserved as historical reference for what shipped.
 **Source material:**
 - Market research: [md/strategy/market/ione-onboarding-ux.md](../strategy/market/ione-onboarding-ux.md)
 - Original v1 design: [md/design/ione-v1.md](ione-v1.md)
