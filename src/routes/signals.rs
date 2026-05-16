@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     response::Json,
 };
 use serde::Deserialize;
@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
+    auth::{ensure_workspace_in_org, AuthContext},
     error::AppError,
     models::{Severity, SignalSource},
     repos::SignalRepo,
@@ -22,9 +23,11 @@ pub struct ListSignalsQuery {
 
 pub async fn list_signals(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListSignalsQuery>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     let limit = query.limit.unwrap_or(100).min(500);
 
     let source_filter = query.source.as_deref().and_then(parse_signal_source);

@@ -7,11 +7,11 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthContext,
+    auth::{ensure_workspace_in_org, AuthContext},
     error::AppError,
     middleware::session_cookie::SessionId,
     models::{ActivationStepKey, ActivationTrack, Message, MessageRole},
-    repos::{ConversationRepo, MessageRepo, WorkspaceRepo},
+    repos::{ConversationRepo, MessageRepo},
     state::AppState,
 };
 
@@ -22,38 +22,33 @@ pub struct CreateConversationRequest {
     pub workspace_id: Option<Uuid>,
 }
 
-pub async fn list_conversations(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
+pub async fn list_conversations(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<Json<Value>, AppError> {
     let repo = ConversationRepo::new(state.pool.clone());
-    let items = repo
-        .list(state.default_user_id)
-        .await
-        .map_err(AppError::Internal)?;
+    let items = repo.list(ctx.user_id).await.map_err(AppError::Internal)?;
     Ok(Json(json!({ "items": items })))
 }
 
 pub async fn create_conversation(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Json(req): Json<CreateConversationRequest>,
 ) -> Result<Json<Value>, AppError> {
     // Default to the Operations workspace when none is supplied.
     let workspace_id = match req.workspace_id {
         Some(id) => {
-            // Validate the workspace exists; return 400 if not.
-            let ws_repo = WorkspaceRepo::new(state.pool.clone());
-            ws_repo
-                .get(id)
-                .await
-                .map_err(AppError::Internal)?
-                .ok_or_else(|| AppError::BadRequest(format!("workspace {} does not exist", id)))?;
+            ensure_workspace_in_org(&state.pool, id, ctx.org_id).await?;
             id
         }
-        None => state.default_workspace_id,
+        None => default_workspace_for_org(&state, ctx.org_id).await?,
     };
 
     let title = req.title.as_deref().unwrap_or("Untitled").to_string();
     let repo = ConversationRepo::new(state.pool.clone());
     let conv = repo
-        .create(state.default_user_id, &title, Some(workspace_id))
+        .create(ctx.user_id, &title, Some(workspace_id))
         .await
         .map_err(AppError::Internal)?;
     Ok(Json(
@@ -63,6 +58,7 @@ pub async fn create_conversation(
 
 pub async fn get_conversation(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
     let conv_repo = ConversationRepo::new(state.pool.clone());
@@ -73,6 +69,7 @@ pub async fn get_conversation(
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::BadRequest(format!("conversation {} not found", id)))?;
+    ensure_workspace_in_org(&state.pool, conv.workspace_id, ctx.org_id).await?;
 
     let messages = msg_repo.list(id).await.map_err(AppError::Internal)?;
 
@@ -108,48 +105,21 @@ pub(crate) async fn post_message(
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::BadRequest(format!("conversation {} not found", id)))?;
+    ensure_workspace_in_org(&state.pool, conv.workspace_id, ctx.org_id).await?;
 
     let msg_repo = MessageRepo::new(state.pool.clone());
 
     if conv.workspace_id == crate::demo::DEMO_WORKSPACE_ID {
         let reply = crate::demo::canned_chat::canned_response(&content);
-        let mut tx = state
-            .pool
-            .begin()
+        let assistant_msg = msg_repo
+            .append_user_and_assistant(id, &content, &reply, "canned")
             .await
-            .map_err(|e| AppError::Internal(e.into()))?;
-        sqlx::query_as::<_, Message>(
-            "INSERT INTO messages (conversation_id, role, content, model)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id, conversation_id, role, content, model, tokens_in, tokens_out, created_at",
-        )
-        .bind(id)
-        .bind(MessageRole::User)
-        .bind(&content)
-        .bind(Option::<&str>::None)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-        let assistant_msg = sqlx::query_as::<_, Message>(
-            "INSERT INTO messages (conversation_id, role, content, model)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id, conversation_id, role, content, model, tokens_in, tokens_out, created_at",
-        )
-        .bind(id)
-        .bind(MessageRole::Assistant)
-        .bind(reply)
-        .bind(Some("canned"))
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-        tx.commit()
-            .await
-            .map_err(|e| AppError::Internal(e.into()))?;
+            .map_err(AppError::Internal)?;
 
         let activation_repo = crate::repos::ActivationRepo::new(state.pool.clone());
         let inserted = activation_repo
             .mark(
-                state.default_user_id,
+                ctx.user_id,
                 conv.workspace_id,
                 ActivationTrack::DemoWalkthrough,
                 ActivationStepKey::AskedDemoQuestion,
@@ -159,7 +129,7 @@ pub(crate) async fn post_message(
         if inserted
             && activation_repo
                 .is_track_complete(
-                    state.default_user_id,
+                    ctx.user_id,
                     conv.workspace_id,
                     ActivationTrack::DemoWalkthrough,
                 )
@@ -228,4 +198,17 @@ fn build_prompt(history: &[Message], _model: &str) -> String {
     }
     parts.push("\nassistant:".to_string());
     parts.join("\n")
+}
+
+async fn default_workspace_for_org(state: &AppState, org_id: Uuid) -> Result<Uuid, AppError> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM workspaces
+         WHERE org_id = $1 AND name = 'Operations' AND closed_at IS NULL
+         ORDER BY created_at
+         LIMIT 1",
+    )
+    .bind(org_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("failed to resolve default workspace: {e}")))
 }

@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::{Peer, PeerStatus};
 
 pub struct PeerRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl PeerRepo {

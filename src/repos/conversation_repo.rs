@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::Conversation;
 
 pub struct ConversationRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl ConversationRepo {

@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::User;
 
 pub struct UserRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl UserRepo {

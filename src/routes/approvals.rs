@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthContext,
+    auth::{ensure_workspace_in_org, AuthContext},
     error::AppError,
     middleware::session_cookie::SessionId,
     models::{ActivationStepKey, ActivationTrack, ActorKind, ApprovalStatus},
@@ -24,9 +24,11 @@ pub struct ApprovalsQuery {
 /// GET /api/v1/workspaces/:id/approvals?status=pending|approved|rejected
 pub async fn list_approvals(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ApprovalsQuery>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id).await?;
     let status_filter = query.status.as_deref().and_then(parse_status);
     let repo = ApprovalRepo::new(state.pool.clone());
     let items = repo
@@ -85,9 +87,16 @@ pub async fn decide_approval(
     // If the approval is already in a terminal state matching the request, return it
     // as-is (idempotent path — no re-delivery).
     if existing.status == decision {
+        if let Some(workspace_id) = workspace_id {
+            ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id).await?;
+        }
         return Ok(Json(
             serde_json::to_value(&existing).map_err(|e| AppError::Internal(e.into()))?,
         ));
+    }
+
+    if let Some(workspace_id) = workspace_id {
+        ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id).await?;
     }
 
     // Decide the approval (only updates if currently pending).

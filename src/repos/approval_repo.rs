@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::{Approval, ApprovalStatus};
 
 pub struct ApprovalRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl ApprovalRepo {

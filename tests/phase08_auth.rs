@@ -567,12 +567,11 @@ async fn oidc_callback_exchanges_code_and_validates_id_token() {
     .fetch_one(&pool)
     .await
     .expect("mapped user");
-    let sessions: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_one(&pool)
-            .await
-            .expect("session count");
+    let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("session count");
     assert_eq!(sessions, 1);
 }
 
@@ -616,7 +615,9 @@ async fn oidc_callback_rejects_failed_token_exchange_without_user() {
         .redirect(Policy::none())
         .build()
         .expect("client")
-        .get(format!("{base}/auth/callback?code=bad-code&state=state-invalid"))
+        .get(format!(
+            "{base}/auth/callback?code=bad-code&state=state-invalid"
+        ))
         .header(header::COOKIE, cookie)
         .send()
         .await
@@ -702,6 +703,24 @@ async fn oidc_callback_with_signed_id_token_creates_user_and_membership() {
     );
 
     let user_id = user_row.0;
+
+    let federated_identity_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM federated_identities fi
+         JOIN trust_issuers ti ON ti.id = fi.issuer_id
+         WHERE fi.user_id = $1
+           AND fi.subject = 'user-1'
+           AND ti.issuer_url = $2",
+    )
+    .bind(user_id)
+    .bind(MOCK_ISSUER_URL)
+    .fetch_one(&pool)
+    .await
+    .expect("federated identity query failed");
+    assert_eq!(
+        federated_identity_count, 1,
+        "handle_test_callback must create the production federated_identities row"
+    );
 
     // --- memberships row ---
     let membership_row: Option<(Uuid, String, Option<String>)> = sqlx::query_as(
@@ -808,6 +827,78 @@ async fn oidc_callback_repeated_is_idempotent() {
         "calling handle_test_callback twice with same claims must produce exactly 1 \
          memberships row, got {}",
         membership_count
+    );
+
+    let federated_identity_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM federated_identities fi
+         JOIN trust_issuers ti ON ti.id = fi.issuer_id
+         WHERE fi.subject = 'idempotent-user'
+           AND ti.issuer_url = $1",
+    )
+    .bind(MOCK_ISSUER_URL)
+    .fetch_one(&pool)
+    .await
+    .expect("federated identity count query failed");
+
+    assert_eq!(
+        federated_identity_count, 1,
+        "calling handle_test_callback twice must produce exactly 1 federated identity row"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn oidc_callback_same_email_retry_updates_federated_identity() {
+    let (_base, pool) = spawn_app_with_auth_mode("oidc").await;
+    let org_id = default_org_id(&pool).await;
+    let _issuer_id = insert_mock_trust_issuer(&pool, org_id).await;
+
+    let first_claims = json!({
+        "sub":            "same-email-original",
+        "email":          "same-email@test",
+        "name":           "Same Email",
+        "ione_role":      "member",
+        "ione_coc_level": 0
+    });
+    let retry_claims = json!({
+        "sub":            "same-email-retry",
+        "email":          "same-email@test",
+        "name":           "Same Email Retry",
+        "ione_role":      "member",
+        "ione_coc_level": 0
+    });
+
+    ione::auth::handle_test_callback(&pool, MOCK_ISSUER_URL, first_claims)
+        .await
+        .expect("first handle_test_callback must succeed");
+    ione::auth::handle_test_callback(&pool, MOCK_ISSUER_URL, retry_claims)
+        .await
+        .expect("same-email retry must update identity instead of surfacing a 500");
+
+    let user_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users WHERE org_id = $1 AND email = 'same-email@test'",
+    )
+    .bind(org_id)
+    .fetch_one(&pool)
+    .await
+    .expect("same-email user count query failed");
+    assert_eq!(user_count, 1, "same-email retry must keep one user row");
+
+    let identity_subject: String = sqlx::query_scalar(
+        "SELECT fi.subject
+         FROM federated_identities fi
+         JOIN users u ON u.id = fi.user_id
+         WHERE u.org_id = $1 AND u.email = 'same-email@test'
+         LIMIT 1",
+    )
+    .bind(org_id)
+    .fetch_one(&pool)
+    .await
+    .expect("same-email federated identity query failed");
+    assert_eq!(
+        identity_subject, "same-email-retry",
+        "same-email retry must update the federated identity subject"
     );
 }
 

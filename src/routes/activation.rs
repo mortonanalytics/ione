@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthContext,
+    auth::{ensure_workspace_in_org, AuthContext},
     error::AppError,
     models::{ActivationStepKey, ActivationTrack},
     repos::ActivationRepo,
@@ -41,6 +41,7 @@ pub(crate) async fn list(
     Extension(ctx): Extension<AuthContext>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ListResp>, AppError> {
+    ensure_workspace_in_org(&state.pool, q.workspace_id, ctx.org_id).await?;
     let track = parse_track(&q.track)?;
     let repo = ActivationRepo::new(state.pool.clone());
     let progress = repo
@@ -114,6 +115,7 @@ pub(crate) async fn mark(
     Extension(ctx): Extension<AuthContext>,
     Json(body): Json<MarkBody>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, body.workspace_id, ctx.org_id).await?;
     let track = parse_track(&body.track)?;
     let step = parse_step(&body.step_key)?;
     let repo = ActivationRepo::new(state.pool.clone());
@@ -135,6 +137,7 @@ pub(crate) async fn dismiss(
     Extension(ctx): Extension<AuthContext>,
     Json(body): Json<DismissBody>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, body.workspace_id, ctx.org_id).await?;
     let track = parse_track(&body.track)?;
     let repo = ActivationRepo::new(state.pool.clone());
     repo.dismiss(ctx.user_id, body.workspace_id, track)

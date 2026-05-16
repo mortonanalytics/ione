@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::models::{PipelineEvent, PipelineEventInput, PipelineEventStage};
 
 pub struct PipelineEventRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 pub struct EventFilter {

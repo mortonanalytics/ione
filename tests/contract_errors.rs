@@ -67,6 +67,90 @@ async fn truncate_all(pool: &PgPool) {
     .expect("truncate failed");
 }
 
+async fn insert_foreign_workspace(pool: &PgPool) -> Uuid {
+    let org_id: Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Foreign Org') RETURNING id")
+            .fetch_one(pool)
+            .await
+            .expect("insert foreign org");
+
+    sqlx::query_scalar(
+        "INSERT INTO workspaces (org_id, name, domain, lifecycle)
+         VALUES ($1, 'Foreign Workspace', 'test', 'continuous')
+         RETURNING id",
+    )
+    .bind(org_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert foreign workspace")
+}
+
+async fn assert_forbidden(resp: reqwest::Response, route: &str) {
+    let status = resp.status();
+    let body: Value = resp.json().await.expect("error response json");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "{route} should reject cross-org workspace access; body={body}"
+    );
+    assert_eq!(body["error"], "forbidden", "{route} error kind");
+}
+
+#[tokio::test]
+#[ignore]
+async fn workspace_scoped_routes_reject_cross_org_workspace_ids() {
+    let (base, pool) = spawn_app().await;
+    let foreign_workspace_id = insert_foreign_workspace(&pool).await;
+    let client = reqwest::Client::new();
+
+    let get_routes = [
+        format!("/api/v1/workspaces/{foreign_workspace_id}/audit_events"),
+        format!("/api/v1/workspaces/{foreign_workspace_id}/artifacts"),
+        format!("/api/v1/workspaces/{foreign_workspace_id}/connectors"),
+        format!("/api/v1/workspaces/{foreign_workspace_id}/signals"),
+        format!("/api/v1/workspaces/{foreign_workspace_id}/survivors"),
+        format!("/api/v1/workspaces/{foreign_workspace_id}/approvals"),
+        format!("/api/v1/workspaces/{foreign_workspace_id}/feed"),
+        format!("/api/v1/workspaces/{foreign_workspace_id}/events"),
+        format!("/api/v1/workspaces/{foreign_workspace_id}/roles"),
+        format!("/api/v1/activation?workspaceId={foreign_workspace_id}&track=real_activation"),
+    ];
+
+    for route in get_routes {
+        let resp = client
+            .get(format!("{base}{route}"))
+            .send()
+            .await
+            .expect("GET route request");
+        assert_forbidden(resp, &route).await;
+    }
+
+    let activation_route = "/api/v1/activation/events";
+    let resp = client
+        .post(format!("{base}{activation_route}"))
+        .json(&serde_json::json!({
+            "workspaceId": foreign_workspace_id,
+            "track": "real_activation",
+            "stepKey": "added_connector"
+        }))
+        .send()
+        .await
+        .expect("activation event request");
+    assert_forbidden(resp, activation_route).await;
+
+    let conversations_route = "/api/v1/conversations";
+    let resp = client
+        .post(format!("{base}{conversations_route}"))
+        .json(&serde_json::json!({
+            "workspaceId": foreign_workspace_id,
+            "title": "cross-org"
+        }))
+        .send()
+        .await
+        .expect("conversation create request");
+    assert_forbidden(resp, conversations_route).await;
+}
+
 // ─── demo_read_only ───────────────────────────────────────────────────────────
 
 /// POSTing a connector to the demo workspace must return 403 with

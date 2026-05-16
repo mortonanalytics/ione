@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::{Workspace, WorkspaceLifecycle};
 
 pub struct WorkspaceRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl WorkspaceRepo {

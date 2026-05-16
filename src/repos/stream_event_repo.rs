@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::models::StreamEvent;
 
 pub struct StreamEventRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl StreamEventRepo {

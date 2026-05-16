@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::models::TrustIssuer;
 
 pub struct TrustIssuerRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl TrustIssuerRepo {

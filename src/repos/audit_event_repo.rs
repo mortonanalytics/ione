@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::{ActorKind, AuditEvent};
 
 pub struct AuditEventRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl AuditEventRepo {

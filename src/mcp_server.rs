@@ -23,7 +23,8 @@ use uuid::Uuid;
 
 use crate::{
     auth::{
-        extract_session_id_from_headers, mode_from_env, session_key_from_env, AuthContext, AuthMode,
+        ensure_workspace_in_org, extract_session_id_from_headers, mode_from_env,
+        session_key_from_env, AuthContext, AuthMode,
     },
     connectors::build_from_row,
     models::{ActorKind, ArtifactKind},
@@ -388,7 +389,9 @@ async fn tool_list_survivors(
     state: &AppState,
 ) -> anyhow::Result<Value> {
     let workspace_id = parse_uuid(&args, "workspace_id")?;
-    ensure_workspace_in_org(state, workspace_id, auth.org_id).await?;
+    ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let verdict = parse_optional_verdict(&args)?;
     let limit = args["limit"].as_i64().unwrap_or(50).clamp(1, 500);
 
@@ -423,7 +426,9 @@ async fn tool_search_stream_events(
     state: &AppState,
 ) -> anyhow::Result<Value> {
     let workspace_id = parse_uuid(&args, "workspace_id")?;
-    ensure_workspace_in_org(state, workspace_id, auth.org_id).await?;
+    ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let stream_id_filter = parse_optional_uuid(&args, "stream_id")?;
     let query_filter = args["query"].as_str().map(str::to_lowercase);
     let limit = args["limit"].as_i64().unwrap_or(50).clamp(1, 500);
@@ -519,7 +524,9 @@ async fn tool_propose_artifact(
     state: &AppState,
 ) -> anyhow::Result<Value> {
     let workspace_id = parse_uuid(&args, "workspace_id")?;
-    ensure_workspace_in_org(state, workspace_id, auth.org_id).await?;
+    ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     let kind_str = args["kind"]
         .as_str()
@@ -576,7 +583,9 @@ async fn tool_deliver_notification(
 ) -> anyhow::Result<Value> {
     let workspace_id = parse_uuid(&args, "workspace_id")?;
     let connector_id = parse_uuid(&args, "connector_id")?;
-    ensure_workspace_in_org(state, workspace_id, auth.org_id).await?;
+    ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let text = args["text"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -631,17 +640,6 @@ fn parse_uuid(args: &Value, field: &str) -> anyhow::Result<Uuid> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing required field: {}", field))?;
     Uuid::parse_str(s).map_err(|e| anyhow::anyhow!("invalid UUID for field '{}': {}", field, e))
-}
-
-async fn ensure_workspace_in_org(
-    state: &AppState,
-    workspace_id: Uuid,
-    org_id: Uuid,
-) -> anyhow::Result<()> {
-    WorkspaceRepo::new(state.pool.clone())
-        .ensure_in_org(workspace_id, org_id)
-        .await
-        .map_err(|_| anyhow::anyhow!("workspace not found"))
 }
 
 fn parse_optional_uuid(args: &Value, field: &str) -> anyhow::Result<Option<Uuid>> {

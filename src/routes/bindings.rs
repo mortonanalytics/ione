@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthContext,
+    auth::{ensure_workspace_in_org, AuthContext},
     error::AppError,
     repos::WorkspacePeerBindingRepo,
     services::workspace_peer_binding::{self, RefreshError},
@@ -34,6 +34,7 @@ pub async fn list_for_workspace(
     Extension(ctx): Extension<AuthContext>,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     let items = WorkspacePeerBindingRepo::new(state.pool.clone())
         .list_by_workspace(workspace_id, ctx.org_id)
         .await
@@ -58,6 +59,7 @@ pub async fn get_binding(
     Extension(ctx): Extension<AuthContext>,
     Path((workspace_id, binding_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     let binding = WorkspacePeerBindingRepo::new(state.pool.clone())
         .get_by_id_org_scoped(binding_id, ctx.org_id)
         .await
@@ -77,6 +79,7 @@ pub async fn create_binding(
     Path(workspace_id): Path<Uuid>,
     Json(req): Json<CreateBindingRequest>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     let tenant_id = validate_tenant_id(&req.foreign_tenant_id)?;
     validate_scope(&req.scope)?;
     let foreign_workspace_id = req

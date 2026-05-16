@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     response::{
         sse::{Event, KeepAlive, Sse},
         Json,
@@ -11,7 +11,11 @@ use std::convert::Infallible;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
-use crate::{error::AppError, state::AppState};
+use crate::{
+    auth::{ensure_workspace_in_org, AuthContext},
+    error::AppError,
+    state::AppState,
+};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,9 +40,11 @@ pub(crate) struct ListResp {
 
 pub(crate) async fn list_events(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(workspace_id): Path<Uuid>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ListResp>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     use crate::models::PipelineEventStage as Stage;
 
     let stage = match q.stage.as_deref() {
@@ -69,8 +75,10 @@ pub(crate) async fn list_events(
 
 pub(crate) async fn stream_events(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(workspace_id): Path<Uuid>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     let stream = state
         .pipeline_bus
         .subscribe_workspace(workspace_id)
@@ -79,5 +87,5 @@ pub(crate) async fn stream_events(
             Ok(Event::default().event("pipeline_event").data(data))
         });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

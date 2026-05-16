@@ -818,10 +818,10 @@ async fn mcp_tools_reject_cross_org_workspace_and_connector_ids() {
             "{name} must reject cross-org identifiers, got {body}"
         );
         assert!(
-            body["error"]["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("workspace not found"),
+            matches!(
+                body["error"]["message"].as_str().unwrap_or_default(),
+                "workspace not found" | "forbidden"
+            ),
             "{name} must not leak cross-org existence, got {body}"
         );
     }

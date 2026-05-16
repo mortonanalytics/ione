@@ -1,18 +1,14 @@
+use crate::models::TrustIssuer;
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::PgPool;
-
-use crate::models::TrustIssuer;
 
 pub struct IdpService<'a> {
-    #[allow(dead_code)]
-    pool: &'a PgPool,
     http: &'a reqwest::Client,
 }
 
 impl<'a> IdpService<'a> {
-    pub fn new(pool: &'a PgPool, http: &'a reqwest::Client) -> Self {
-        Self { pool, http }
+    pub fn new(http: &'a reqwest::Client) -> Self {
+        Self { http }
     }
 
     pub async fn authorize_url(

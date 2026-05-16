@@ -1,12 +1,18 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     response::Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{error::AppError, models::CriticVerdict, repos::SurvivorRepo, state::AppState};
+use crate::{
+    auth::{ensure_workspace_in_org, AuthContext},
+    error::AppError,
+    models::CriticVerdict,
+    repos::SurvivorRepo,
+    state::AppState,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct ListSurvivorsQuery {
@@ -16,9 +22,11 @@ pub struct ListSurvivorsQuery {
 
 pub async fn list_survivors(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListSurvivorsQuery>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     let limit = query.limit.unwrap_or(100).min(500);
 
     let verdict_filter = query.verdict.as_deref().and_then(parse_verdict);

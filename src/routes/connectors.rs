@@ -9,7 +9,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthContext,
+    auth::{ensure_workspace_in_org, AuthContext},
     connectors,
     error::AppError,
     middleware::session_cookie::SessionId,
@@ -39,8 +39,10 @@ pub struct ValidateBody {
 
 pub async fn list_connectors(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id).await?;
     let repo = ConnectorRepo::new(state.pool.clone());
     let items = repo.list(workspace_id).await.map_err(AppError::Internal)?;
     Ok(Json(json!({ "items": items })))
@@ -53,6 +55,10 @@ pub async fn create_connector(
     Extension(session): Extension<SessionId>,
     Json(req): Json<CreateConnectorRequest>,
 ) -> Response {
+    if let Err(err) = ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id).await {
+        return err.into_response();
+    }
+
     let kind = match &req.kind {
         ConnectorKind::Mcp => "mcp",
         ConnectorKind::Openapi => "openapi",

@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::{Connector, ConnectorKind, ConnectorStatus};
 
 pub struct ConnectorRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl ConnectorRepo {

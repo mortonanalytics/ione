@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthContext,
+    auth::{ensure_workspace_in_org, AuthContext},
     error::AppError,
     middleware::session_cookie::SessionId,
     models::WorkspaceLifecycle,
@@ -24,13 +24,12 @@ pub struct CreateWorkspaceRequest {
     pub parent_id: Option<Uuid>,
 }
 
-pub async fn list_workspaces(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
-    // Derive org_id from the default user's org via workspace list scoped to that org.
-    // For now all workspaces belong to the default org; org context comes from AppState
-    // in later phases. We list all workspaces scoped to the default org.
-    let org_id = get_default_org_id(&state).await?;
+pub async fn list_workspaces(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<Json<Value>, AppError> {
     let repo = WorkspaceRepo::new(state.pool.clone());
-    let items = repo.list(org_id).await.map_err(AppError::Internal)?;
+    let items = repo.list(ctx.org_id).await.map_err(AppError::Internal)?;
     Ok(Json(json!({ "items": items })))
 }
 
@@ -40,10 +39,18 @@ pub async fn create_workspace(
     Extension(session): Extension<SessionId>,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<Value>, AppError> {
-    let org_id = get_default_org_id(&state).await?;
     let repo = WorkspaceRepo::new(state.pool.clone());
+    if let Some(parent_id) = req.parent_id {
+        ensure_workspace_in_org(&state.pool, parent_id, ctx.org_id).await?;
+    }
     let ws = repo
-        .create(org_id, &req.name, &req.domain, req.lifecycle, req.parent_id)
+        .create(
+            ctx.org_id,
+            &req.name,
+            &req.domain,
+            req.lifecycle,
+            req.parent_id,
+        )
         .await
         .map_err(AppError::Internal)?;
     if ws.id != crate::demo::DEMO_WORKSPACE_ID {
@@ -63,8 +70,10 @@ pub async fn create_workspace(
 
 pub async fn get_workspace(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, id, ctx.org_id).await?;
     let repo = WorkspaceRepo::new(state.pool.clone());
     let ws = repo
         .get(id)
@@ -78,8 +87,10 @@ pub async fn get_workspace(
 
 pub async fn close_workspace(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, id, ctx.org_id).await?;
     let repo = WorkspaceRepo::new(state.pool.clone());
     // Verify workspace exists first
     repo.get(id)
@@ -95,18 +106,11 @@ pub async fn close_workspace(
 
 pub async fn list_roles(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     let repo = RoleRepo::new(state.pool.clone());
     let items = repo.list(workspace_id).await.map_err(AppError::Internal)?;
     Ok(Json(json!({ "items": items })))
-}
-
-/// Resolve the default org_id by looking up the user's org.
-async fn get_default_org_id(state: &AppState) -> Result<Uuid, AppError> {
-    sqlx::query_scalar::<_, Uuid>("SELECT org_id FROM users WHERE id = $1")
-        .bind(state.default_user_id)
-        .fetch_one(&state.pool)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("failed to resolve org_id: {}", e)))
 }

@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::{Severity, Signal, SignalSource};
 
 pub struct SignalRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl SignalRepo {

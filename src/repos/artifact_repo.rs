@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::{Artifact, ArtifactKind};
 
 pub struct ArtifactRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl ArtifactRepo {

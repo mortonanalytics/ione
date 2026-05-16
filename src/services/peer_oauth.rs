@@ -49,7 +49,6 @@ pub async fn begin_federation(
     peer_id: uuid::Uuid,
     peer_url: &str,
 ) -> Result<BeginResp, AppError> {
-    let client = reqwest::Client::new();
     let discovery_url = format!("{peer_url}/.well-known/oauth-authorization-server");
     let disc_value = crate::util::safe_http::fetch_public_metadata(
         &discovery_url,
@@ -66,7 +65,8 @@ pub async fn begin_federation(
     let redirect_uri = format!("{}/api/v1/peers/callback", state.config.oauth_issuer);
 
     let register_resp: RegisterResp = if disc.client_id_metadata_document_supported {
-        client
+        state
+            .http
             .post(&disc.registration_endpoint)
             .json(&RegisterCimd {
                 client_metadata_url: &self_client_metadata_url,
@@ -88,7 +88,8 @@ pub async fn begin_federation(
             "scope": "mcp",
             "token_endpoint_auth_method": "none"
         });
-        client
+        state
+            .http
             .post(&disc.registration_endpoint)
             .json(&body)
             .send()
@@ -162,7 +163,6 @@ pub async fn complete_callback(
     pending: &PendingFederation,
     code: &str,
 ) -> Result<()> {
-    let client = reqwest::Client::new();
     let form = [
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -170,7 +170,8 @@ pub async fn complete_callback(
         ("client_id", &pending.client_id),
         ("redirect_uri", &pending.redirect_uri),
     ];
-    let tokens: TokenResp = client
+    let tokens: TokenResp = state
+        .http
         .post(&pending.discovery.token_endpoint)
         .form(&form)
         .send()

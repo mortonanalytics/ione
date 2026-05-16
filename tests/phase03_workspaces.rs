@@ -742,7 +742,7 @@ async fn conversation_requires_workspace_id_after_phase_3() {
 /// REASON: requires DATABASE_URL and migration 0002.
 #[tokio::test]
 #[ignore]
-async fn conversation_with_nonexistent_workspace_id_returns_400_or_404() {
+async fn conversation_with_nonexistent_workspace_id_returns_4xx() {
     let (base, _pool) = spawn_app().await;
     let client = reqwest::Client::new();
 
@@ -760,7 +760,7 @@ async fn conversation_with_nonexistent_workspace_id_returns_400_or_404() {
 
     let status = resp.status().as_u16();
     assert!(
-        status == 400 || status == 404 || status == 422,
+        status == 400 || status == 403 || status == 404 || status == 422,
         "expected 4xx when workspaceId does not exist, got {}",
         status
     );

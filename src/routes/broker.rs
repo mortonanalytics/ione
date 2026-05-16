@@ -111,7 +111,8 @@ pub async fn callback(
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::BadRequest("invalid or expired broker state".into()))?;
     let provider = load_provider(&row.provider)?;
-    let token_resp: serde_json::Value = reqwest::Client::new()
+    let token_resp: serde_json::Value = state
+        .http
         .post(provider.token_url)
         .form(&[
             ("grant_type", "authorization_code"),

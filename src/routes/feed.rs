@@ -1,12 +1,17 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     response::Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{error::AppError, repos::RoutingDecisionRepo, state::AppState};
+use crate::{
+    auth::{ensure_workspace_in_org, AuthContext},
+    error::AppError,
+    repos::RoutingDecisionRepo,
+    state::AppState,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct FeedQuery {
@@ -17,9 +22,11 @@ pub struct FeedQuery {
 
 pub async fn get_feed(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<FeedQuery>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     let role_id = match query.role_id {
         Some(id) => id,
         None => {

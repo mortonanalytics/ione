@@ -131,14 +131,11 @@ async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
             .await?;
 
     for (workspace_id, _org_id) in workspaces {
-        let mut first_signal_emitted = false;
-        let mut first_survivor_emitted = false;
-        let mut first_decision_emitted = false;
-        let mut first_event_emitted = false;
+        let mut progress = PipelineProgress::default();
 
         // (a) Poll every active connector's streams
         if let Err(e) =
-            poll_workspace_connectors(state, workspace_id, &mut first_event_emitted).await
+            poll_workspace_connectors(state, workspace_id, &mut progress.first_event_emitted).await
         {
             emit_error_stage(
                 &state.pool,
@@ -154,119 +151,115 @@ async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
         }
 
         // (b) Run rules engine
-        match super::rules::evaluate_workspace(&state.pool, workspace_id).await {
-            Ok(n) if n > 0 => {
-                info!(workspace_id = %workspace_id, signals = n, "rules produced signals");
-                if !first_signal_emitted {
-                    match first_inserted_signal_id(&state.pool, workspace_id, "rule", n).await {
-                        Ok(Some(signal_id)) => {
-                            emit_stage(
-                                &state.pool,
-                                &state.pipeline_bus,
-                                workspace_id,
-                                None,
-                                None,
-                                PipelineEventStage::FirstSignal,
-                                Some(json!({
-                                    "signal_id": signal_id,
-                                    "source": "rule",
-                                })),
-                            )
-                            .await;
-                            emit_first_real_signal(state, workspace_id, signal_id, "rule").await;
-                            first_signal_emitted = true;
-                        }
-                        Ok(None) => {}
-                        Err(e) => warn!(
-                            workspace_id = %workspace_id,
-                            error = %e,
-                            "failed to load first rule signal for pipeline event"
-                        ),
-                    }
-                }
-            }
-            Ok(_) => {}
-            Err(e) => {
-                emit_error_stage(
-                    &state.pool,
-                    &state.pipeline_bus,
-                    workspace_id,
-                    None,
-                    None,
-                    "rules",
-                    &e,
-                )
-                .await;
-                warn!(workspace_id = %workspace_id, error = %e, "rules engine error");
-            }
-        }
+        let rules = super::rules::evaluate_workspace(&state.pool, workspace_id).await;
+        handle_signal_stage(state, workspace_id, &mut progress, "rules", "rule", rules).await;
 
         // (c) Run generator (unless IONE_SKIP_LIVE=1)
         if !skip_live {
-            match super::generator::run_for_workspace(&state.pool, workspace_id).await {
-                Ok(n) if n > 0 => {
-                    info!(workspace_id = %workspace_id, signals = n, "generator produced signals");
-                    if !first_signal_emitted {
-                        match first_inserted_signal_id(&state.pool, workspace_id, "generator", n)
-                            .await
-                        {
-                            Ok(Some(signal_id)) => {
-                                emit_stage(
-                                    &state.pool,
-                                    &state.pipeline_bus,
-                                    workspace_id,
-                                    None,
-                                    None,
-                                    PipelineEventStage::FirstSignal,
-                                    Some(json!({
-                                        "signal_id": signal_id,
-                                        "source": "generator",
-                                    })),
-                                )
-                                .await;
-                                emit_first_real_signal(state, workspace_id, signal_id, "generator")
-                                    .await;
-                            }
-                            Ok(None) => {}
-                            Err(e) => warn!(
-                                workspace_id = %workspace_id,
-                                error = %e,
-                                "failed to load first generator signal for pipeline event"
-                            ),
-                        }
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    emit_error_stage(
-                        &state.pool,
-                        &state.pipeline_bus,
-                        workspace_id,
-                        None,
-                        None,
-                        "generator",
-                        &e,
-                    )
-                    .await;
-                    warn!(workspace_id = %workspace_id, error = %e, "generator error");
-                }
-            }
+            let generator = super::generator::run_for_workspace(&state.pool, workspace_id).await;
+            handle_signal_stage(
+                state,
+                workspace_id,
+                &mut progress,
+                "generator",
+                "generator",
+                generator,
+            )
+            .await;
         }
 
         // (d) Run critic for new signals (those without a survivor yet).
         //     Budget: at most 20 signals per workspace per tick.
         if !skip_live {
-            run_critic_for_workspace(state, workspace_id, &mut first_survivor_emitted).await;
+            run_critic_for_workspace(state, workspace_id, &mut progress.first_survivor_emitted)
+                .await;
         }
 
         // (e) Run router for surviving survivors without routing decisions yet.
         //     Budget: 20 survivors per workspace per tick. Skipped when IONE_SKIP_LIVE=1.
         if !skip_live {
-            run_router_for_workspace(state, workspace_id, &mut first_decision_emitted).await;
+            run_router_for_workspace(state, workspace_id, &mut progress.first_decision_emitted)
+                .await;
         }
     }
 
     Ok(())
+}
+
+#[derive(Default)]
+struct PipelineProgress {
+    first_event_emitted: bool,
+    first_signal_emitted: bool,
+    first_survivor_emitted: bool,
+    first_decision_emitted: bool,
+}
+
+async fn handle_signal_stage(
+    state: &AppState,
+    workspace_id: uuid::Uuid,
+    progress: &mut PipelineProgress,
+    stage_name: &'static str,
+    source: &'static str,
+    result: anyhow::Result<usize>,
+) {
+    match result {
+        Ok(n) if n > 0 => {
+            info!(workspace_id = %workspace_id, signals = n, source, "signal stage produced signals");
+            emit_first_signal_for_source(state, workspace_id, progress, source, n).await;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            emit_error_stage(
+                &state.pool,
+                &state.pipeline_bus,
+                workspace_id,
+                None,
+                None,
+                stage_name,
+                &e,
+            )
+            .await;
+            warn!(workspace_id = %workspace_id, error = %e, stage = stage_name, "signal stage error");
+        }
+    }
+}
+
+async fn emit_first_signal_for_source(
+    state: &AppState,
+    workspace_id: uuid::Uuid,
+    progress: &mut PipelineProgress,
+    source: &'static str,
+    inserted_count: usize,
+) {
+    if progress.first_signal_emitted {
+        return;
+    }
+    match first_inserted_signal_id(&state.pool, workspace_id, source, inserted_count).await {
+        Ok(Some(signal_id)) => {
+            emit_stage(
+                &state.pool,
+                &state.pipeline_bus,
+                workspace_id,
+                None,
+                None,
+                PipelineEventStage::FirstSignal,
+                Some(json!({
+                    "signal_id": signal_id,
+                    "source": source,
+                })),
+            )
+            .await;
+            emit_first_real_signal(state, workspace_id, signal_id, source).await;
+            progress.first_signal_emitted = true;
+        }
+        Ok(None) => {}
+        Err(e) => warn!(
+            workspace_id = %workspace_id,
+            error = %e,
+            source,
+            "failed to load first signal for pipeline event"
+        ),
+    }
 }
 
 async fn emit_first_real_signal(

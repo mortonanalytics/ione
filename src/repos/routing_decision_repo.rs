@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::{RoutingDecision, RoutingTarget, SurvivorRow};
 
 pub struct RoutingDecisionRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl RoutingDecisionRepo {

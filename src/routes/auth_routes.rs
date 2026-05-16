@@ -7,8 +7,8 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        clear_session_set_cookie, extract_session_id_from_header, mode_from_env,
-        session_key_from_env, AuthMode, OIDC_ISSUER_COOKIE, OIDC_STATE_COOKIE,
+        clear_session_set_cookie, cookie_secure_attr, extract_session_id_from_header,
+        mode_from_env, session_key_from_env, AuthMode, OIDC_ISSUER_COOKIE, OIDC_STATE_COOKIE,
         OIDC_VERIFIER_COOKIE,
     },
     error::AppError,
@@ -73,25 +73,29 @@ pub async fn login(
     })?;
 
     let redirect_uri = format!("{}/auth/callback", state.config.oauth_issuer);
-    let http = reqwest::Client::new();
-    let (auth_url, state_token, verifier) = IdpService::new(&state.pool, &http)
+    let (auth_url, state_token, verifier) = IdpService::new(&state.http)
         .authorize_url(&trust_issuer, &redirect_uri)
         .await
         .map_err(AppError::Internal)?;
 
     // Store state + verifier in short-lived cookies on the response.
     let state_cookie = format!(
-        "{}={}; Max-Age=600; Path=/; HttpOnly; SameSite=Lax",
-        OIDC_STATE_COOKIE, state_token
+        "{}={}; Max-Age=600; Path=/; HttpOnly;{} SameSite=Lax",
+        OIDC_STATE_COOKIE,
+        state_token,
+        cookie_secure_attr()
     );
     let verifier_cookie = format!(
-        "{}={}; Max-Age=600; Path=/; HttpOnly; SameSite=Lax",
-        OIDC_VERIFIER_COOKIE, verifier
+        "{}={}; Max-Age=600; Path=/; HttpOnly;{} SameSite=Lax",
+        OIDC_VERIFIER_COOKIE,
+        verifier,
+        cookie_secure_attr()
     );
     let issuer_cookie = format!(
-        "{}={}; Max-Age=600; Path=/; HttpOnly; SameSite=Lax",
+        "{}={}; Max-Age=600; Path=/; HttpOnly;{} SameSite=Lax",
         OIDC_ISSUER_COOKIE,
-        percent_encode(&trust_issuer.issuer_url)
+        percent_encode(&trust_issuer.issuer_url),
+        cookie_secure_attr()
     );
 
     let resp = Response::builder()
@@ -159,8 +163,7 @@ pub async fn callback(
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::BadRequest("unknown issuer".into()))?;
     let redirect_uri = format!("{}/auth/callback", state.config.oauth_issuer);
-    let http = reqwest::Client::new();
-    let claims = IdpService::new(&state.pool, &http)
+    let claims = IdpService::new(&state.http)
         .exchange_code_for_claims(&ti, code, &verifier, &redirect_uri, state_param)
         .await
         .map_err(|e| AppError::BadRequest(format!("oidc callback failed: {e}")))?;
@@ -227,7 +230,10 @@ fn extract_cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a st
 }
 
 fn clear_oidc_cookie(name: &str) -> String {
-    format!("{name}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax")
+    format!(
+        "{name}=; Max-Age=0; Path=/; HttpOnly;{} SameSite=Lax",
+        cookie_secure_attr()
+    )
 }
 
 async fn resolve_default_org_id(state: &AppState) -> Result<uuid::Uuid, AppError> {

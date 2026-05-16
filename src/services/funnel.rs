@@ -17,6 +17,8 @@ use crate::state::AppState;
 
 const MAX_EVENTS_PER_WINDOW: usize = 10;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
+const MAX_RATE_LIMIT_SESSIONS: usize = 10_000;
+const RATE_LIMIT_SESSION_TTL: Duration = Duration::from_secs(60);
 
 static RATE_LIMITS: OnceLock<Mutex<HashMap<Uuid, VecDeque<Instant>>>> = OnceLock::new();
 
@@ -58,6 +60,22 @@ fn allow_event(session_id: Uuid) -> bool {
         tracing::warn!("funnel event rate limiter lock poisoned");
         return false;
     };
+
+    limits.retain(|_, events| {
+        events
+            .back()
+            .is_some_and(|event_at| now.duration_since(*event_at) < RATE_LIMIT_SESSION_TTL)
+    });
+    if limits.len() >= MAX_RATE_LIMIT_SESSIONS && !limits.contains_key(&session_id) {
+        if let Some(oldest_session) = limits
+            .iter()
+            .filter_map(|(id, events)| events.back().map(|last_seen| (*id, *last_seen)))
+            .min_by_key(|(_, last_seen)| *last_seen)
+            .map(|(id, _)| id)
+        {
+            limits.remove(&oldest_session);
+        }
+    }
 
     let events = limits.entry(session_id).or_default();
     while events

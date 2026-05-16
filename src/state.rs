@@ -26,7 +26,10 @@ impl AppState {
         default_user_id: Uuid,
         default_workspace_id: Uuid,
     ) -> Self {
-        let http = reqwest::Client::new();
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("failed to build shared HTTP client");
         let ollama = Arc::new(OllamaClient::new(config.ollama_base_url.clone()));
         let pipeline_bus = Arc::new(PipelineBus::new());
         Self {

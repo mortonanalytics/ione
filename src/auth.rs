@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::{
     error::AppError,
-    models::TrustIssuer,
-    repos::{MembershipRepo, RoleRepo, TrustIssuerRepo, UserRepo, UserSessionRepo},
+    repos::{TrustIssuerRepo, UserSessionRepo, WorkspaceRepo},
+    services::claim_mapper::ClaimMapper,
     state::AppState,
 };
 
@@ -305,6 +305,23 @@ pub async fn require_admin(ctx: &AuthContext, pool: &PgPool) -> Result<(), AppEr
     }
 }
 
+pub async fn ensure_workspace_in_org(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    org_id: Uuid,
+) -> Result<(), AppError> {
+    WorkspaceRepo::new(pool.clone())
+        .ensure_in_org(workspace_id, org_id)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("workspace not found") {
+                AppError::Forbidden
+            } else {
+                AppError::Internal(e)
+            }
+        })
+}
+
 // ─── Claim → User + Membership mapping ───────────────────────────────────────
 
 /// Public test hook: bypass the HTTP OIDC dance, run claim→user→membership
@@ -316,7 +333,6 @@ pub async fn handle_test_callback(
     claims: serde_json::Value,
 ) -> anyhow::Result<()> {
     let org_id = resolve_default_org_id(pool).await?;
-    let workspace_id = resolve_default_workspace_id(pool, org_id).await?;
 
     let ti_repo = TrustIssuerRepo::new(pool.clone());
     let trust_issuer = ti_repo
@@ -326,15 +342,9 @@ pub async fn handle_test_callback(
             anyhow::anyhow!("no trust_issuer registered for issuer_url={}", issuer_url)
         })?;
 
-    map_claims_to_user_and_membership(
-        pool,
-        org_id,
-        workspace_id,
-        &trust_issuer,
-        &claims,
-        issuer_url,
-    )
-    .await
+    ClaimMapper::map_to_user(pool, org_id, &trust_issuer, &claims)
+        .await
+        .map(|_| ())
 }
 
 async fn resolve_default_org_id(pool: &PgPool) -> anyhow::Result<Uuid> {
@@ -344,98 +354,20 @@ async fn resolve_default_org_id(pool: &PgPool) -> anyhow::Result<Uuid> {
         .map_err(|e| anyhow::anyhow!("failed to resolve default org_id: {}", e))
 }
 
-async fn resolve_default_workspace_id(pool: &PgPool, org_id: Uuid) -> anyhow::Result<Uuid> {
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM workspaces WHERE org_id = $1 AND name = 'Operations' LIMIT 1",
-    )
-    .bind(org_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to resolve default workspace_id: {}", e))
-}
-
-async fn map_claims_to_user_and_membership(
-    pool: &PgPool,
-    org_id: Uuid,
-    workspace_id: Uuid,
-    trust_issuer: &TrustIssuer,
-    claims: &serde_json::Value,
-    issuer_url: &str,
-) -> anyhow::Result<()> {
-    let mapping = &trust_issuer.claim_mapping;
-
-    let sub = claims["sub"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("claims missing 'sub'"))?;
-
-    let email_claim = mapping["email_claim"].as_str().unwrap_or("email");
-    let name_claim = mapping["name_claim"].as_str().unwrap_or("name");
-    let role_claim = mapping["role_claim"].as_str().unwrap_or("ione_role");
-    let coc_level_claim = mapping["coc_level_claim"]
-        .as_str()
-        .unwrap_or("ione_coc_level");
-
-    let email = claims[email_claim]
-        .as_str()
-        .or_else(|| claims["preferred_username"].as_str())
-        .unwrap_or(sub);
-
-    let display_name = claims[name_claim].as_str().unwrap_or(email);
-
-    let role_name = claims[role_claim].as_str().unwrap_or("member");
-    let coc_level = claims[coc_level_claim].as_i64().unwrap_or(0) as i32;
-
-    let workspace_name = mapping["workspace_name"].as_str().unwrap_or("Operations");
-
-    let target_workspace_id = if workspace_name == "Operations" {
-        workspace_id
-    } else {
-        resolve_workspace_by_name(pool, org_id, workspace_name)
-            .await?
-            .unwrap_or(workspace_id)
-    };
-
-    let user_repo = UserRepo::new(pool.clone());
-    let user = user_repo
-        .upsert_by_oidc_subject(org_id, email, display_name, sub)
-        .await?;
-
-    let role_repo = RoleRepo::new(pool.clone());
-    let role = role_repo
-        .upsert(target_workspace_id, role_name, coc_level)
-        .await?;
-
-    let federated_claim_ref = format!("{}@{}", sub, issuer_url);
-
-    let membership_repo = MembershipRepo::new(pool.clone());
-    membership_repo
-        .upsert_federated(user.id, target_workspace_id, role.id, &federated_claim_ref)
-        .await?;
-
-    Ok(())
-}
-
-async fn resolve_workspace_by_name(
-    pool: &PgPool,
-    org_id: Uuid,
-    name: &str,
-) -> anyhow::Result<Option<Uuid>> {
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM workspaces WHERE org_id = $1 AND name = $2 LIMIT 1",
-    )
-    .bind(org_id)
-    .bind(name)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to resolve workspace by name: {}", e))
-}
-
 // ─── Real OIDC callback (used in production, not in tests) ───────────────────
 
 /// Placeholder OIDC state cookie name used during login/callback.
 pub const OIDC_STATE_COOKIE: &str = "ione_oidc_state";
 pub const OIDC_VERIFIER_COOKIE: &str = "ione_oidc_verifier";
 pub const OIDC_ISSUER_COOKIE: &str = "ione_oidc_issuer";
+
+pub fn cookie_secure_attr() -> &'static str {
+    if std::env::var("IONE_COOKIE_INSECURE").is_ok() {
+        ""
+    } else {
+        " Secure;"
+    }
+}
 
 /// Build the PKCE challenge from a verifier (base64url(sha256(verifier))).
 pub fn pkce_challenge(verifier: &str) -> String {
@@ -455,8 +387,9 @@ pub fn random_url_safe_string() -> String {
 /// Produce a `Set-Cookie` header value that expires the session cookie.
 pub fn clear_session_set_cookie() -> String {
     format!(
-        "{}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax",
-        SESSION_COOKIE_NAME
+        "{}=; Max-Age=0; Path=/; HttpOnly;{} SameSite=Lax",
+        SESSION_COOKIE_NAME,
+        cookie_secure_attr()
     )
 }
 
@@ -466,8 +399,11 @@ pub fn set_session_cookie_header(user_id: Uuid) -> String {
     let exp = Utc::now() + chrono::Duration::seconds(SESSION_DEFAULT_TTL_SECS);
     let value = build_cookie_value(&key, user_id, exp);
     format!(
-        "{}={}; Max-Age={}; Path=/; HttpOnly; SameSite=Lax",
-        SESSION_COOKIE_NAME, value, SESSION_DEFAULT_TTL_SECS
+        "{}={}; Max-Age={}; Path=/; HttpOnly;{} SameSite=Lax",
+        SESSION_COOKIE_NAME,
+        value,
+        SESSION_DEFAULT_TTL_SECS,
+        cookie_secure_attr()
     )
 }
 
@@ -476,7 +412,10 @@ pub fn set_session_cookie_header_for_session(session_id: Uuid, exp: DateTime<Utc
     let max_age = (exp - Utc::now()).num_seconds().max(0);
     let value = build_cookie_value(&key, session_id, exp);
     format!(
-        "{}={}; Max-Age={}; Path=/; HttpOnly; SameSite=Lax",
-        SESSION_COOKIE_NAME, value, max_age
+        "{}={}; Max-Age={}; Path=/; HttpOnly;{} SameSite=Lax",
+        SESSION_COOKIE_NAME,
+        value,
+        max_age,
+        cookie_secure_attr()
     )
 }

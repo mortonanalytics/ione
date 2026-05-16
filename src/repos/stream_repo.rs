@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::Stream;
 
 pub struct StreamRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl StreamRepo {

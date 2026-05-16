@@ -81,13 +81,15 @@ pub async fn process_routing_decision(state: &AppState, routing_id: Uuid) -> any
         String,
         serde_json::Value,
         Uuid,
+        Uuid,
         String,
         String,
         String,
         Uuid,
     )> = sqlx::query_as(
         "SELECT rd.target_kind::TEXT, rd.target_ref,
-                    sig.id AS signal_id, sig.title, sig.body, sig.severity::TEXT,
+                    sig.id AS signal_id, s.id AS survivor_id,
+                    sig.title, sig.body, sig.severity::TEXT,
                     sig.workspace_id
              FROM routing_decisions rd
              JOIN survivors s ON s.id = rd.survivor_id
@@ -99,22 +101,22 @@ pub async fn process_routing_decision(state: &AppState, routing_id: Uuid) -> any
     .await
     .context("failed to fetch routing_decision")?;
 
-    let (target_kind, target_ref, _signal_id, signal_title, signal_body, severity, workspace_id) =
-        match row {
-            Some(r) => r,
-            None => {
-                warn!(routing_id = %routing_id, "process_routing_decision: routing_decision not found");
-                return Ok(());
-            }
-        };
-
-    // Fetch survivor_id for artifact creation.
-    let survivor_id: Uuid =
-        sqlx::query_scalar("SELECT survivor_id FROM routing_decisions WHERE id = $1")
-            .bind(routing_id)
-            .fetch_one(&state.pool)
-            .await
-            .context("failed to fetch survivor_id from routing_decision")?;
+    let (
+        target_kind,
+        target_ref,
+        _signal_id,
+        survivor_id,
+        signal_title,
+        signal_body,
+        severity,
+        workspace_id,
+    ) = match row {
+        Some(r) => r,
+        None => {
+            warn!(routing_id = %routing_id, "process_routing_decision: routing_decision not found");
+            return Ok(());
+        }
+    };
 
     match target_kind.as_str() {
         "feed" => {

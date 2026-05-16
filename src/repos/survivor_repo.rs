@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::{CriticVerdict, Survivor, SurvivorRow};
 
 pub struct SurvivorRepo {
-    pub pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl SurvivorRepo {

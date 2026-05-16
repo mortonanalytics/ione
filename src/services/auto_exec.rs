@@ -363,11 +363,10 @@ pub async fn evaluate(
             .get(policy.connector_id)
             .await
             .context("failed to look up connector for auto_exec policy")?;
-        if connector.is_none() {
+        let Some(connector) = connector else {
             // Connector not found — skip this policy, fall through.
             continue;
-        }
-        let connector = connector.unwrap();
+        };
         if connector.status != crate::models::ConnectorStatus::Active {
             continue;
         }
