@@ -171,23 +171,29 @@ pub async fn resolve_auth(state: &AppState, headers: &HeaderMap) -> Option<AuthC
         return Some(bearer_ctx);
     }
 
-    // 2. Session cookie path
+    // 2. Session cookie path. A signed-but-unresolvable cookie (e.g. session
+    // row truncated between requests, or a test helper that signs a user_id
+    // before the user_sessions row exists) must NOT short-circuit — fall
+    // through to the local-mode fallback so behavior is symmetric with
+    // `auth_middleware`, which never 401s in local mode.
     let key = session_key_from_env();
     if let Some(session_id) = extract_session_id_from_headers(&key, headers) {
-        let session = crate::repos::UserSessionRepo::new(state.pool.clone())
+        if let Some(session) = crate::repos::UserSessionRepo::new(state.pool.clone())
             .find_active(session_id)
             .await
             .ok()
-            .flatten()?;
-        return Some(AuthContext {
-            user_id: session.user_id,
-            org_id: session.org_id,
-            is_oidc: true,
-            is_mcp_peer: false,
-            active_role_id: None,
-            session_id: Some(session.id),
-            mfa_verified: session.mfa_verified,
-        });
+            .flatten()
+        {
+            return Some(AuthContext {
+                user_id: session.user_id,
+                org_id: session.org_id,
+                is_oidc: true,
+                is_mcp_peer: false,
+                active_role_id: None,
+                session_id: Some(session.id),
+                mfa_verified: session.mfa_verified,
+            });
+        }
     }
 
     // 3. Local mode fallback
