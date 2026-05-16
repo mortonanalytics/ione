@@ -209,6 +209,20 @@ impl WorkspacePeerBindingRepo {
         if !allowed {
             anyhow::bail!("binding target not found");
         }
+        let duplicate_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM workspace_peer_bindings
+                WHERE workspace_id = $1 AND peer_id = $2
+             )",
+        )
+        .bind(workspace_id)
+        .bind(peer_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to check duplicate workspace peer binding")?;
+        if duplicate_exists {
+            anyhow::bail!("duplicate workspace peer binding");
+        }
 
         sqlx::query_as::<_, WorkspacePeerBinding>(
             "INSERT INTO workspace_peer_bindings
