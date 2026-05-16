@@ -8,6 +8,8 @@ pub mod slack;
 pub mod smtp;
 pub mod validate;
 
+use sqlx::PgPool;
+
 use crate::models::{Connector, ConnectorKind};
 
 /// Describes a stream that a connector exposes by default.
@@ -56,7 +58,14 @@ pub trait ConnectorImpl: Send + Sync {
 /// 1. config["kind"] field if present (explicit kind hint).
 /// 2. name prefix matching (case-insensitive): "slack*" → Slack, "smtp*" → SMTP, "nws*" → NWS.
 pub fn build_from_row(conn: &Connector) -> anyhow::Result<Box<dyn ConnectorImpl>> {
-    build(conn.kind.clone(), &conn.name, &conn.config)
+    build_with_pool(conn.kind.clone(), &conn.name, &conn.config, None)
+}
+
+pub fn build_from_row_with_pool(
+    conn: &Connector,
+    pool: PgPool,
+) -> anyhow::Result<Box<dyn ConnectorImpl>> {
+    build_with_pool(conn.kind.clone(), &conn.name, &conn.config, Some(pool))
 }
 
 /// Build a connector implementation from request/DB fields.
@@ -64,6 +73,15 @@ pub fn build(
     kind: ConnectorKind,
     name: &str,
     config: &serde_json::Value,
+) -> anyhow::Result<Box<dyn ConnectorImpl>> {
+    build_with_pool(kind, name, config, None)
+}
+
+pub fn build_with_pool(
+    kind: ConnectorKind,
+    name: &str,
+    config: &serde_json::Value,
+    pool: Option<PgPool>,
 ) -> anyhow::Result<Box<dyn ConnectorImpl>> {
     match kind {
         ConnectorKind::RustNative => {
@@ -113,7 +131,7 @@ pub fn build(
             )
         }
         ConnectorKind::Mcp => {
-            let c = mcp_client::McpClientConnector::from_config(config)?;
+            let c = mcp_client::McpClientConnector::from_config(config, pool)?;
             Ok(Box::new(c))
         }
         ConnectorKind::Openapi => {

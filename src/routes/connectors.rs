@@ -406,7 +406,8 @@ async fn do_poll_stream(state: AppState, stream_id: Uuid) -> Result<Json<Value>,
         })?;
 
     // Dispatch to the connector implementation
-    let impl_ = connectors::build_from_row(&connector).map_err(AppError::Internal)?;
+    let impl_ = connectors::build_from_row_with_pool(&connector, state.pool.clone())
+        .map_err(AppError::Internal)?;
     let cursor = event_repo
         .latest_observed_at(stream_id)
         .await

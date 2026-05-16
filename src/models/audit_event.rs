@@ -23,4 +23,5 @@ pub struct AuditEvent {
     pub object_id: Option<Uuid>,
     pub payload: serde_json::Value,
     pub created_at: DateTime<Utc>,
+    pub foreign_tenant_id: Option<String>,
 }

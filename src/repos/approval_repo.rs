@@ -14,12 +14,23 @@ impl ApprovalRepo {
     }
 
     pub async fn create_pending(&self, artifact_id: Uuid) -> anyhow::Result<Approval> {
+        self.create_pending_with_foreign_tenant(artifact_id, None)
+            .await
+    }
+
+    pub async fn create_pending_with_foreign_tenant(
+        &self,
+        artifact_id: Uuid,
+        foreign_tenant_id: Option<&str>,
+    ) -> anyhow::Result<Approval> {
         sqlx::query_as::<_, Approval>(
-            "INSERT INTO approvals (artifact_id, status)
-             VALUES ($1, 'pending'::approval_status)
-             RETURNING id, artifact_id, approver_user_id, status, comment, decided_at",
+            "INSERT INTO approvals (artifact_id, status, foreign_tenant_id)
+             VALUES ($1, 'pending'::approval_status, $2)
+             RETURNING id, artifact_id, approver_user_id, status, comment, decided_at,
+                       foreign_tenant_id",
         )
         .bind(artifact_id)
+        .bind(foreign_tenant_id)
         .fetch_one(&self.pool)
         .await
         .context("failed to create pending approval")
@@ -35,7 +46,7 @@ impl ApprovalRepo {
         match status_filter {
             Some(status) => sqlx::query_as::<_, Approval>(
                 "SELECT ap.id, ap.artifact_id, ap.approver_user_id, ap.status,
-                            ap.comment, ap.decided_at
+                            ap.comment, ap.decided_at, ap.foreign_tenant_id
                      FROM approvals ap
                      JOIN artifacts art ON art.id = ap.artifact_id
                      WHERE art.workspace_id = $1
@@ -49,7 +60,7 @@ impl ApprovalRepo {
             .context("failed to list approvals with status filter"),
             None => sqlx::query_as::<_, Approval>(
                 "SELECT ap.id, ap.artifact_id, ap.approver_user_id, ap.status,
-                            ap.comment, ap.decided_at
+                            ap.comment, ap.decided_at, ap.foreign_tenant_id
                      FROM approvals ap
                      JOIN artifacts art ON art.id = ap.artifact_id
                      WHERE art.workspace_id = $1
@@ -64,7 +75,8 @@ impl ApprovalRepo {
 
     pub async fn get(&self, id: Uuid) -> anyhow::Result<Option<Approval>> {
         sqlx::query_as::<_, Approval>(
-            "SELECT id, artifact_id, approver_user_id, status, comment, decided_at
+            "SELECT id, artifact_id, approver_user_id, status, comment, decided_at,
+                    foreign_tenant_id
              FROM approvals
              WHERE id = $1",
         )
@@ -94,7 +106,8 @@ impl ApprovalRepo {
                  decided_at = now()
              WHERE id = $1
                AND status = 'pending'::approval_status
-             RETURNING id, artifact_id, approver_user_id, status, comment, decided_at",
+             RETURNING id, artifact_id, approver_user_id, status, comment, decided_at,
+                       foreign_tenant_id",
         )
         .bind(id)
         .bind(decision)
@@ -109,7 +122,8 @@ impl ApprovalRepo {
             None => {
                 // Row was not pending — return the current state.
                 sqlx::query_as::<_, Approval>(
-                    "SELECT id, artifact_id, approver_user_id, status, comment, decided_at
+                    "SELECT id, artifact_id, approver_user_id, status, comment, decided_at,
+                            foreign_tenant_id
                      FROM approvals
                      WHERE id = $1",
                 )

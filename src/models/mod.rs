@@ -22,6 +22,7 @@ pub mod trust_issuer;
 pub mod user;
 pub mod user_session;
 pub mod workspace;
+pub mod workspace_peer_binding;
 
 pub use activation::*;
 pub use approval::{Approval, ApprovalStatus};
@@ -47,3 +48,4 @@ pub use trust_issuer::TrustIssuer;
 pub use user::User;
 pub use user_session::UserSession;
 pub use workspace::{Workspace, WorkspaceLifecycle};
+pub use workspace_peer_binding::{BindingStatus, WorkspacePeerBinding};

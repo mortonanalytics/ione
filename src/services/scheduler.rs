@@ -496,7 +496,10 @@ async fn poll_workspace_connectors(
             continue;
         }
 
-        let impl_ = match crate::connectors::build_from_row(&connector) {
+        let impl_ = match crate::connectors::build_from_row_with_pool(
+            &connector,
+            state.pool.clone(),
+        ) {
             Ok(c) => c,
             Err(e) => {
                 emit_error_stage(

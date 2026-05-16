@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthContext,
     error::AppError,
-    repos::{ConnectorRepo, PeerRepo, StreamRepo},
+    repos::{ConnectorRepo, PeerRepo, StreamRepo, WorkspacePeerBindingRepo},
     services::peer::auto_create_connector_for_peer,
     state::AppState,
 };
@@ -171,8 +171,10 @@ pub(crate) async fn callback(
 
 pub(crate) async fn get_manifest(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(peer_id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_peer_in_org(&state, peer_id, ctx.org_id).await?;
     let manifest = fetch_manifest_over_mcp(&state, peer_id)
         .await
         .map_err(AppError::Internal)?;
@@ -181,9 +183,11 @@ pub(crate) async fn get_manifest(
 
 pub(crate) async fn authorize_allowlist(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(peer_id): Path<Uuid>,
     Json(body): Json<AuthorizeAllowlistBody>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_peer_in_org(&state, peer_id, ctx.org_id).await?;
     let allowlist = Value::Array(body.tool_allowlist.into_iter().map(Value::String).collect());
     let peer_repo = PeerRepo::new(state.pool.clone());
     peer_repo
@@ -195,11 +199,17 @@ pub(crate) async fn authorize_allowlist(
 
 pub(crate) async fn delete_peer(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(peer_id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_peer_in_org(&state, peer_id, ctx.org_id).await?;
     let peer_repo = PeerRepo::new(state.pool.clone());
     peer_repo
         .set_status(peer_id, "revoked")
+        .await
+        .map_err(AppError::Internal)?;
+    WorkspacePeerBindingRepo::new(state.pool.clone())
+        .set_inactive_for_peer(peer_id)
         .await
         .map_err(AppError::Internal)?;
     Ok(Json(json!({ "ok": true })))
@@ -209,8 +219,10 @@ pub(crate) async fn delete_peer(
 /// Creates the mcp_client connector in the workspace and triggers a first poll.
 pub async fn subscribe_peer(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path((workspace_id, peer_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_workspace_and_peer_in_org(&state, workspace_id, peer_id, ctx.org_id).await?;
     let peer_repo = PeerRepo::new(state.pool.clone());
     let peer = peer_repo
         .get(peer_id)
@@ -222,12 +234,71 @@ pub async fn subscribe_peer(
         .await
         .map_err(AppError::Internal)?;
 
+    let binding = match crate::services::workspace_peer_binding::bind_on_subscribe(
+        &state.pool,
+        workspace_id,
+        &peer,
+    )
+    .await
+    {
+        Ok(binding) => Some(binding),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                workspace_id = %workspace_id,
+                peer_id = %peer.id,
+                "bind_on_subscribe failed; subscribe continues without binding"
+            );
+            None
+        }
+    };
+
     // Trigger first poll: create default streams for this connector.
     trigger_first_poll(&state, connector.id);
 
-    Ok(Json(
-        serde_json::to_value(&connector).map_err(|e| AppError::Internal(e.into()))?,
-    ))
+    Ok(Json(json!({
+        "connector": connector,
+        "binding": binding,
+    })))
+}
+
+async fn ensure_peer_in_org(state: &AppState, peer_id: Uuid, org_id: Uuid) -> Result<(), AppError> {
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM peers WHERE id = $1 AND org_id = $2)")
+            .bind(peer_id)
+            .bind(org_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+    if !exists {
+        return Err(AppError::NotFound("peer not found".into()));
+    }
+    Ok(())
+}
+
+async fn ensure_workspace_and_peer_in_org(
+    state: &AppState,
+    workspace_id: Uuid,
+    peer_id: Uuid,
+    org_id: Uuid,
+) -> Result<(), AppError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM workspaces w, peers p
+            WHERE w.id = $1 AND p.id = $2
+              AND w.org_id = $3 AND p.org_id = $3
+         )",
+    )
+    .bind(workspace_id)
+    .bind(peer_id)
+    .bind(org_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
+    if !exists {
+        return Err(AppError::NotFound("workspace or peer not found".into()));
+    }
+    Ok(())
 }
 
 /// Spawn a background task to create streams and poll them for the first time.
@@ -241,7 +312,7 @@ fn trigger_first_poll(state: &AppState, connector_id: Uuid) {
 }
 
 async fn first_poll_connector(pool: &sqlx::PgPool, connector_id: Uuid) -> anyhow::Result<()> {
-    use crate::connectors::build_from_row;
+    use crate::connectors::build_from_row_with_pool;
     use crate::repos::StreamEventRepo;
 
     let connector_repo = ConnectorRepo::new(pool.clone());
@@ -253,7 +324,7 @@ async fn first_poll_connector(pool: &sqlx::PgPool, connector_id: Uuid) -> anyhow
         .await?
         .ok_or_else(|| anyhow::anyhow!("connector {} not found", connector_id))?;
 
-    let impl_ = build_from_row(&connector)?;
+    let impl_ = build_from_row_with_pool(&connector, pool.clone())?;
     let descriptors = impl_.default_streams().await?;
 
     for desc in descriptors {

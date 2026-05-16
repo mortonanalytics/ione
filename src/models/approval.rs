@@ -20,4 +20,5 @@ pub struct Approval {
     pub status: ApprovalStatus,
     pub comment: Option<String>,
     pub decided_at: Option<DateTime<Utc>>,
+    pub foreign_tenant_id: Option<String>,
 }

@@ -11,6 +11,9 @@ pub enum AppError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    #[error("unprocessable entity: {0}")]
+    UnprocessableEntity(String),
+
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -38,6 +41,15 @@ pub enum AppError {
     #[error("connector error: {0}")]
     ConnectorError(String),
 
+    #[error("workspace binding conflict: foreign_tenant_id changed from {old} to {new}")]
+    WorkspaceBindingConflict { old: String, new: String },
+
+    #[error("whoami unreachable for peer {peer_id}: {message}")]
+    WhoamiUnreachable {
+        peer_id: uuid::Uuid,
+        message: String,
+    },
+
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -49,6 +61,14 @@ impl IntoResponse for AppError {
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": "bad_request",
+                    "message": msg,
+                })),
+            )
+                .into_response(),
+            AppError::UnprocessableEntity(msg) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "unprocessable_entity",
                     "message": msg,
                 })),
             )
@@ -136,6 +156,25 @@ impl IntoResponse for AppError {
                 })),
             )
                 .into_response(),
+            AppError::WorkspaceBindingConflict { old, new } => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "workspace_binding_conflict",
+                    "message": format!("foreign_tenant_id changed from {} to {}", old, new),
+                    "old": old,
+                    "new": new,
+                })),
+            )
+                .into_response(),
+            AppError::WhoamiUnreachable { peer_id, message } => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": "whoami_unreachable",
+                    "message": format!("whoami unreachable for peer {}: {}", peer_id, message),
+                    "peerId": peer_id,
+                })),
+            )
+                .into_response(),
             AppError::Internal(e) => {
                 tracing::error!(error = %e, "internal application error");
                 (
@@ -160,6 +199,7 @@ mod tests {
     async fn every_variant_has_nonempty_error_and_message() {
         let cases: Vec<AppError> = vec![
             AppError::BadRequest("x".into()),
+            AppError::UnprocessableEntity("x".into()),
             AppError::NotFound("y".into()),
             AppError::Unauthorized,
             AppError::Forbidden,
@@ -175,6 +215,14 @@ mod tests {
                 pull_command: "ollama pull llama3.2".into(),
             },
             AppError::ConnectorError("connector failed".into()),
+            AppError::WorkspaceBindingConflict {
+                old: "old".into(),
+                new: "new".into(),
+            },
+            AppError::WhoamiUnreachable {
+                peer_id: uuid::Uuid::nil(),
+                message: "offline".into(),
+            },
             AppError::Internal(anyhow::anyhow!("test")),
         ];
 

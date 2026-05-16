@@ -2447,6 +2447,8 @@ async function loadMcpClients() {
 
 let mcpClientsInterval = null;
 let currentPeerId = null;
+let currentBindingId = null;
+let currentBindings = [];
 
 document.getElementById('peer-federate-open-btn')?.addEventListener('click', () => {
   const dialog = document.getElementById('peer-federate-dialog');
@@ -2468,6 +2470,7 @@ function closePeerDialog() {
   const dialog = document.getElementById('peer-federate-dialog');
   dialog?.close?.();
   currentPeerId = null;
+  currentBindings = [];
 }
 
 function showPeerStep(step) {
@@ -2565,6 +2568,7 @@ document.getElementById('peer-federate-confirm')?.addEventListener('click', asyn
       skipErrorToast: true,
     });
     track('peer_federation_activated', { toolCount: checked.length }, window.activeWorkspace?.id || null);
+    await loadBindings(currentPeerId);
     showPeerStep('done');
   } catch (err) {
     if (errEl) {
@@ -2573,6 +2577,141 @@ document.getElementById('peer-federate-confirm')?.addEventListener('click', asyn
     }
   }
 });
+
+document.getElementById('peer-bindings-refresh')?.addEventListener('click', () => {
+  if (currentPeerId) loadBindings(currentPeerId);
+});
+
+document.getElementById('binding-edit-close')?.addEventListener('click', () => {
+  document.getElementById('binding-edit-dialog')?.close?.();
+});
+
+document.getElementById('binding-edit-save')?.addEventListener('click', async () => {
+  const workspaceId = window.activeWorkspace?.id;
+  if (!workspaceId || !currentBindingId) return;
+  const errEl = document.getElementById('binding-edit-error');
+  if (errEl) {
+    errEl.hidden = true;
+    errEl.textContent = '';
+  }
+  let scope;
+  try {
+    scope = JSON.parse(document.getElementById('binding-edit-scope')?.value || '{}');
+  } catch (_err) {
+    if (errEl) {
+      errEl.textContent = 'Scope must be valid JSON.';
+      errEl.hidden = false;
+    }
+    return;
+  }
+  try {
+    await apiFetch(`/api/v1/workspaces/${workspaceId}/bindings/${currentBindingId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        foreignTenantId: document.getElementById('binding-edit-tenant')?.value || '',
+        foreignWorkspaceId: document.getElementById('binding-edit-workspace')?.value || null,
+        scope,
+      }),
+    });
+    document.getElementById('binding-edit-dialog')?.close?.();
+    if (currentPeerId) loadBindings(currentPeerId);
+  } catch (err) {
+    if (errEl) {
+      errEl.textContent = err.message || String(err);
+      errEl.hidden = false;
+    }
+  }
+});
+
+async function loadBindings(peerId) {
+  const body = document.getElementById('peer-bindings-body');
+  if (!body) return;
+  body.innerHTML = '<tr><td colspan="4">Loading...</td></tr>';
+  try {
+    const data = await apiFetch(`/api/v1/peers/${peerId}/bindings`, { skipErrorToast: true });
+    currentBindings = data.items || [];
+    renderBindings(currentBindings);
+  } catch (_err) {
+    body.innerHTML = '<tr><td colspan="4">Could not load bindings.</td></tr>';
+  }
+}
+
+function renderBindings(bindings) {
+  const body = document.getElementById('peer-bindings-body');
+  if (!body) return;
+  body.innerHTML = '';
+  if (!bindings.length) {
+    body.innerHTML = '<tr><td colspan="4">No workspace bindings yet.</td></tr>';
+    return;
+  }
+  bindings.forEach((binding) => {
+    const row = document.createElement('tr');
+    row.innerHTML = `
+      <td><span class="binding-status binding-status--${binding.status || 'pending'}">${binding.status || 'pending'}</span></td>
+      <td>${escapeHtml(binding.foreignTenantId || '')}</td>
+      <td>${escapeHtml(binding.foreignWorkspaceId || '')}</td>
+      <td class="peer-bindings-actions">
+        <button type="button" data-binding-action="refresh" data-id="${binding.id}">Refresh</button>
+        <button type="button" data-binding-action="edit" data-id="${binding.id}">Edit</button>
+        <button type="button" data-binding-action="delete" data-id="${binding.id}">Delete</button>
+      </td>
+    `;
+    body.appendChild(row);
+  });
+  body.querySelectorAll('[data-binding-action]').forEach((button) => {
+    button.addEventListener('click', handleBindingAction);
+  });
+}
+
+async function handleBindingAction(event) {
+  const button = event.currentTarget;
+  const id = button?.dataset?.id;
+  const action = button?.dataset?.bindingAction;
+  const workspaceId = window.activeWorkspace?.id;
+  if (!id || !action || !workspaceId) return;
+  if (action === 'edit') {
+    editBinding(id);
+    return;
+  }
+  if (action === 'refresh') {
+    await apiFetch(`/api/v1/workspaces/${workspaceId}/bindings/${id}/refresh`, {
+      method: 'POST',
+      skipErrorToast: true,
+    }).catch((err) => showError('binding_refresh_failed', err.message || String(err), 'Check the peer and try again.'));
+  }
+  if (action === 'delete') {
+    await apiFetch(`/api/v1/workspaces/${workspaceId}/bindings/${id}`, { method: 'DELETE' });
+  }
+  if (currentPeerId) loadBindings(currentPeerId);
+}
+
+function editBinding(bindingId) {
+  const binding = currentBindings.find((item) => item.id === bindingId);
+  if (!binding) return;
+  currentBindingId = bindingId;
+  const tenantInput = document.getElementById('binding-edit-tenant');
+  const workspaceInput = document.getElementById('binding-edit-workspace');
+  const scopeInput = document.getElementById('binding-edit-scope');
+  if (tenantInput) tenantInput.value = binding.foreignTenantId || '';
+  if (workspaceInput) workspaceInput.value = binding.foreignWorkspaceId || '';
+  if (scopeInput) scopeInput.value = JSON.stringify(binding.scope || {}, null, 2);
+  const errEl = document.getElementById('binding-edit-error');
+  if (errEl) {
+    errEl.hidden = true;
+    errEl.textContent = '';
+  }
+  document.getElementById('binding-edit-dialog')?.showModal?.();
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
 
 function openMcpConnectDialog() {
   const dialog = document.getElementById('mcp-connect-dialog');

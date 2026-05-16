@@ -52,6 +52,7 @@ pub async fn auto_create_connector_for_peer(
         "mcp_url": peer.mcp_url,
         "bearer_token": bearer_token,
         "peer_id": peer.id,
+        "workspace_id": workspace_id,
     });
 
     connector_repo

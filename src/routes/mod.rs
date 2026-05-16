@@ -19,6 +19,7 @@ pub mod approvals;
 pub mod artifacts;
 pub mod audit_events;
 pub mod auth_routes;
+pub mod bindings;
 pub mod broker;
 pub mod chat;
 pub mod connectors;
@@ -129,6 +130,20 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/workspaces/:id/roles", get(workspaces::list_roles))
         .route(
+            "/api/v1/workspaces/:id/bindings",
+            get(bindings::list_for_workspace).post(bindings::create_binding),
+        )
+        .route(
+            "/api/v1/workspaces/:id/bindings/:bindingId",
+            get(bindings::get_binding)
+                .patch(bindings::patch_binding)
+                .delete(bindings::delete_binding),
+        )
+        .route(
+            "/api/v1/workspaces/:id/bindings/:bindingId/refresh",
+            post(bindings::refresh_binding),
+        )
+        .route(
             "/api/v1/workspaces/:id/artifacts",
             get(artifacts::list_artifacts),
         )
@@ -175,6 +190,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/peers/:id/authorize",
             post(peers::authorize_allowlist),
         )
+        .route("/api/v1/peers/:id/bindings", get(bindings::list_for_peer))
         .route("/api/v1/peers/:id", delete(peers::delete_peer))
         .route(
             "/api/v1/workspaces/:id/peers/:peerId/subscribe",

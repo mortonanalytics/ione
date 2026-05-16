@@ -22,6 +22,7 @@ pub mod survivor_repo;
 pub mod trust_issuer_repo;
 pub mod user_repo;
 pub mod user_session_repo;
+pub mod workspace_peer_binding_repo;
 pub mod workspace_repo;
 
 pub use activation_repo::*;
@@ -47,4 +48,5 @@ pub use survivor_repo::SurvivorRepo;
 pub use trust_issuer_repo::TrustIssuerRepo;
 pub use user_repo::UserRepo;
 pub use user_session_repo::UserSessionRepo;
+pub use workspace_peer_binding_repo::WorkspacePeerBindingRepo;
 pub use workspace_repo::WorkspaceRepo;

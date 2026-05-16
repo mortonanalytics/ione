@@ -5,7 +5,10 @@ use uuid::Uuid;
 use crate::{
     connectors::build_from_row,
     models::{ActorKind, ApprovalStatus, ArtifactKind, ConnectorStatus, PeerStatus},
-    repos::{ApprovalRepo, ArtifactRepo, AuditEventRepo, ConnectorRepo, PeerRepo},
+    repos::{
+        ApprovalRepo, ArtifactRepo, AuditEventRepo, ConnectorRepo, PeerRepo,
+        WorkspacePeerBindingRepo,
+    },
     services::{
         auto_exec::{self, AutoExecOutcome},
         peer::check_sharing_policy,
@@ -183,7 +186,7 @@ async fn process_notification(
     let connector_id = connector.id;
     let text = format!("[IONe Alert] {}: {}", signal_title, signal_body);
 
-    match build_from_row(&connector) {
+    match crate::connectors::build_from_row_with_pool(&connector, state.pool.clone()) {
         Ok(impl_) => {
             match impl_
                 .invoke("send", serde_json::json!({ "text": text }))
@@ -588,23 +591,21 @@ async fn process_peer(
         .await?
         .ok_or_else(|| anyhow::anyhow!("connector {} not found", connector_id))?;
 
-    match build_from_row(&connector) {
+    match crate::connectors::build_from_row_with_pool(&connector, state.pool.clone()) {
         Ok(impl_) => {
-            // Resolve the peer's own workspace id by calling list_workspaces on it.
-            // For simplicity, pass workspace_id = nil and let the peer use its own default.
-            let args = serde_json::json!({
-                "workspace_id": Uuid::nil().to_string(),
-                "kind": "briefing",
-                "content": {
-                    "title": signal_title,
-                    "body": signal_body,
-                    "severity": severity,
-                },
-                "source_survivor_id": survivor_id.to_string(),
-            });
-
-            // We need a real workspace_id on the peer. Fetch it via list_workspaces.
-            let peer_workspace_id = resolve_peer_workspace_id(&*impl_).await;
+            let active_binding =
+                active_binding_for_peer(&state.pool, workspace_id, peer_id).await?;
+            let peer_workspace_id = match active_binding
+                .as_ref()
+                .and_then(|b| b.foreign_workspace_id.clone())
+                .filter(|id| !id.is_empty())
+            {
+                Some(id) => id,
+                None => resolve_peer_workspace_id(&*impl_).await,
+            };
+            let foreign_tenant_id = active_binding
+                .as_ref()
+                .map(|binding| binding.foreign_tenant_id.as_str());
 
             let final_args = serde_json::json!({
                 "workspace_id": peer_workspace_id,
@@ -616,7 +617,6 @@ async fn process_peer(
                 },
                 "source_survivor_id": survivor_id.to_string(),
             });
-            let _ = args; // replaced by final_args
 
             match impl_.invoke("propose_artifact", final_args).await {
                 Ok(_) => {
@@ -625,13 +625,14 @@ async fn process_peer(
                         peer_id = %peer_id,
                         "peer_delivered"
                     );
-                    write_peer_audit(
+                    write_peer_audit_with_foreign_tenant(
                         &audit_repo,
                         workspace_id,
                         routing_id,
                         peer_id,
                         "peer_delivered",
                         serde_json::json!({ "routing_id": routing_id }),
+                        foreign_tenant_id,
                     )
                     .await?;
                 }
@@ -681,6 +682,17 @@ async fn process_peer(
     Ok(())
 }
 
+async fn active_binding_for_peer(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    peer_id: Uuid,
+) -> anyhow::Result<Option<crate::models::WorkspacePeerBinding>> {
+    let binding = WorkspacePeerBindingRepo::new(pool.clone())
+        .get_by_workspace_peer(workspace_id, peer_id)
+        .await?;
+    Ok(binding.filter(|binding| binding.status == crate::models::BindingStatus::Active))
+}
+
 async fn resolve_peer_workspace_id(impl_: &dyn crate::connectors::ConnectorImpl) -> String {
     // Call list_workspaces on the peer and return the first workspace id.
     // If this fails, fall back to nil UUID — propose_artifact will fail with a useful error.
@@ -706,8 +718,29 @@ async fn write_peer_audit(
     verb: &str,
     payload: serde_json::Value,
 ) -> anyhow::Result<()> {
+    write_peer_audit_with_foreign_tenant(
+        audit_repo,
+        workspace_id,
+        routing_id,
+        peer_id,
+        verb,
+        payload,
+        None,
+    )
+    .await
+}
+
+async fn write_peer_audit_with_foreign_tenant(
+    audit_repo: &AuditEventRepo,
+    workspace_id: Uuid,
+    routing_id: Uuid,
+    peer_id: Uuid,
+    verb: &str,
+    payload: serde_json::Value,
+    foreign_tenant_id: Option<&str>,
+) -> anyhow::Result<()> {
     audit_repo
-        .insert(
+        .insert_with_foreign_tenant(
             Some(workspace_id),
             ActorKind::System,
             &format!("peer:{}", peer_id),
@@ -715,6 +748,7 @@ async fn write_peer_audit(
             "peer",
             Some(peer_id),
             payload,
+            foreign_tenant_id,
         )
         .await
         .with_context(|| format!("failed to write {} audit event", verb))?;

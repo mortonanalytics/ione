@@ -59,7 +59,7 @@ async fn spawn_app() -> (String, PgPool) {
 
 async fn truncate_all(pool: &PgPool) {
     sqlx::query(
-        "TRUNCATE audit_events, approvals, artifacts,
+        "TRUNCATE workspace_peer_bindings, audit_events, approvals, artifacts,
                   trust_issuers, peers, routing_decisions, survivors, signals,
                   stream_events, streams, connectors,
                   memberships, roles, messages, conversations,
@@ -358,7 +358,7 @@ async fn subscribe_creates_mcp_connector_in_workspace() {
 
     let body: Value = resp.json().await.expect("response not JSON");
     assert_eq!(
-        body["kind"].as_str().unwrap_or(""),
+        body["connector"]["kind"].as_str().unwrap_or(""),
         "mcp",
         "created connector must have kind=mcp, got: {}",
         body
@@ -431,7 +431,9 @@ async fn mcp_client_poll_fetches_survivors_from_peer() {
     assert_eq!(resp.status(), StatusCode::OK, "subscribe must return 200");
 
     let connector_body: Value = resp.json().await.expect("response not JSON");
-    let connector_id_str = connector_body["id"].as_str().expect("connector id missing");
+    let connector_id_str = connector_body["connector"]["id"]
+        .as_str()
+        .expect("connector id missing");
     let connector_id = Uuid::parse_str(connector_id_str).expect("connector id invalid");
 
     // Wait for the background first-poll to complete.

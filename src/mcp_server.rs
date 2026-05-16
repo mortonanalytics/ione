@@ -478,7 +478,7 @@ const FORBIDDEN_PROPOSE_KINDS: &[&str] = &["notification_draft", "resource_order
 
 async fn tool_propose_artifact(
     args: Value,
-    _auth: &AuthContext,
+    auth: &AuthContext,
     state: &AppState,
 ) -> anyhow::Result<Value> {
     let workspace_id = parse_uuid(&args, "workspace_id")?;
@@ -507,7 +507,10 @@ async fn tool_propose_artifact(
         .insert(workspace_id, kind, source_survivor_id, content, None)
         .await?;
 
-    let approval = approval_repo.create_pending(artifact.id).await?;
+    let foreign_tenant_id = auth.is_mcp_peer.then(|| auth.org_id.to_string());
+    let approval = approval_repo
+        .create_pending_with_foreign_tenant(artifact.id, foreign_tenant_id.as_deref())
+        .await?;
 
     Ok(json!({
         "artifact_id": artifact.id,
@@ -565,8 +568,9 @@ async fn tool_deliver_notification(
     };
 
     let audit_repo = AuditEventRepo::new(state.pool.clone());
+    let foreign_tenant_id = auth.is_mcp_peer.then(|| auth.org_id.to_string());
     audit_repo
-        .insert(
+        .insert_with_foreign_tenant(
             Some(workspace_id),
             actor_kind,
             &auth.user_id.to_string(),
@@ -574,6 +578,7 @@ async fn tool_deliver_notification(
             "connector",
             Some(connector_id),
             json!({ "source": "mcp", "text_len": text.len() }),
+            foreign_tenant_id.as_deref(),
         )
         .await?;
 
@@ -628,6 +633,21 @@ async fn dispatch_method(
     match req.method.as_str() {
         "initialize" => handle_initialize(req.id),
         "tools/list" => handle_tools_list(req.id),
+        "resources/list" => handle_resources_list(req.id),
+        "resources/read" => {
+            let auth = match resolve_auth(state, headers).await {
+                Some(a) => a,
+                None => {
+                    return JsonRpcResponse::err(
+                        req.id,
+                        -32001,
+                        "unauthorized: valid session cookie or bearer JWT required",
+                        None,
+                    )
+                }
+            };
+            handle_resources_read(req.id, req.params.unwrap_or(Value::Null), &auth, state).await
+        }
         "tools/call" => {
             let auth = match resolve_auth(state, headers).await {
                 Some(a) => a,
@@ -656,7 +676,8 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
                 "version": env!("CARGO_PKG_VERSION")
             },
             "capabilities": {
-                "tools": {}
+                "tools": {},
+                "resources": {}
             }
         }),
     )
@@ -664,6 +685,84 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
 
 fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
     JsonRpcResponse::ok(id, json!({ "tools": tool_list() }))
+}
+
+fn handle_resources_list(id: Option<Value>) -> JsonRpcResponse {
+    JsonRpcResponse::ok(
+        id,
+        json!({
+            "resources": [{
+                "uri": "whoami://",
+                "name": "Caller identity",
+                "mimeType": "application/vnd.ione.whoami+json"
+            }]
+        }),
+    )
+}
+
+async fn handle_resources_read(
+    id: Option<Value>,
+    params: Value,
+    auth: &AuthContext,
+    state: &AppState,
+) -> JsonRpcResponse {
+    let uri = match params["uri"].as_str() {
+        Some(uri) if !uri.is_empty() => uri,
+        _ => return JsonRpcResponse::err(id, -32602, "params.uri is required", None),
+    };
+    if uri != "whoami://" {
+        return JsonRpcResponse::err(id, -32602, "resource not found", None);
+    }
+
+    match build_whoami_payload(auth, state).await {
+        Ok(payload) => JsonRpcResponse::ok(
+            id,
+            json!({
+                "contents": [{
+                    "uri": "whoami://",
+                    "mimeType": "application/vnd.ione.whoami+json",
+                    "text": payload.to_string()
+                }]
+            }),
+        ),
+        Err(e) => JsonRpcResponse::err(id, -32000, e.to_string(), None),
+    }
+}
+
+async fn build_whoami_payload(auth: &AuthContext, state: &AppState) -> anyhow::Result<Value> {
+    let email: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(auth.user_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let org_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM organizations WHERE id = $1")
+            .bind(auth.org_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let roles: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT r.name
+         FROM memberships m
+         JOIN roles r ON r.id = m.role_id
+         JOIN workspaces w ON w.id = m.workspace_id
+         WHERE m.user_id = $1 AND w.org_id = $2
+         ORDER BY r.name",
+    )
+    .bind(auth.user_id)
+    .bind(auth.org_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    let peer_id = std::env::var("IONE_BIND").unwrap_or_else(|_| "ione".to_string());
+
+    Ok(json!({
+        "peer_id": peer_id,
+        "foreign_tenant_id": auth.org_id.to_string(),
+        "foreign_tenant_name": org_name,
+        "foreign_workspace_id": Value::Null,
+        "foreign_user_id": auth.user_id.to_string(),
+        "foreign_user_email": email,
+        "foreign_roles": roles,
+    }))
 }
 
 async fn handle_tools_call(
@@ -747,7 +846,7 @@ fn build_init_event() -> Event {
     let payload = json!({
         "protocolVersion": "2025-03",
         "serverInfo": { "name": "ione", "version": env!("CARGO_PKG_VERSION") },
-        "capabilities": { "tools": {} }
+        "capabilities": { "tools": {}, "resources": {} }
     });
     Event::default()
         .event("initialize")

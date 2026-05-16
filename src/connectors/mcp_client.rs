@@ -11,29 +11,44 @@
 /// invoke(op, args): calls the peer's MCP tool `op` with `args`. Used for outbound
 /// peer writes (e.g. propose_artifact).
 use serde_json::{json, Value};
+use sqlx::PgPool;
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::connectors::{ConnectorImpl, PollResult, StreamDescriptor, StreamEventInput};
-use crate::models::ConnectorKind;
+use crate::models::{BindingStatus, ConnectorKind};
+use crate::repos::WorkspacePeerBindingRepo;
 
 pub struct McpClientConnector {
     pub mcp_url: String,
     pub bearer_token: String,
     pub http: reqwest::Client,
+    pub workspace_id: Option<Uuid>,
+    pub peer_id: Option<Uuid>,
+    pub pool: Option<PgPool>,
 }
 
 impl McpClientConnector {
-    pub fn from_config(config: &Value) -> anyhow::Result<Self> {
+    pub fn from_config(config: &Value, pool: Option<PgPool>) -> anyhow::Result<Self> {
         let mcp_url = config["mcp_url"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("mcp_client config missing 'mcp_url'"))?
             .to_string();
         let bearer_token = config["bearer_token"].as_str().unwrap_or("").to_string();
+        let workspace_id = config["workspace_id"]
+            .as_str()
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let peer_id = config["peer_id"]
+            .as_str()
+            .and_then(|s| Uuid::parse_str(s).ok());
 
         Ok(Self {
             mcp_url,
             bearer_token,
             http: reqwest::Client::new(),
+            workspace_id,
+            peer_id,
+            pool,
         })
     }
 
@@ -109,7 +124,7 @@ impl ConnectorImpl for McpClientConnector {
 
         // list_survivors and search_stream_events require workspace_id.
         // Resolve all workspace ids and aggregate results.
-        let workspace_ids = self.resolve_all_peer_workspace_ids().await;
+        let workspace_ids = self.resolve_workspace_ids_with_binding().await;
         let now = chrono::Utc::now();
         let mut all_events = Vec::new();
 
@@ -183,6 +198,29 @@ impl McpClientConnector {
                 vec![]
             }
         }
+    }
+
+    async fn resolve_workspace_ids_with_binding(&self) -> Vec<String> {
+        if let (Some(pool), Some(workspace_id), Some(peer_id)) =
+            (&self.pool, self.workspace_id, self.peer_id)
+        {
+            match WorkspacePeerBindingRepo::new(pool.clone())
+                .get_by_workspace_peer(workspace_id, peer_id)
+                .await
+            {
+                Ok(Some(binding)) if binding.status == BindingStatus::Active => {
+                    if let Some(foreign_workspace_id) = binding.foreign_workspace_id {
+                        if !foreign_workspace_id.is_empty() {
+                            return vec![foreign_workspace_id];
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => warn!("mcp_client: binding lookup failed during poll: {}", e),
+            }
+        }
+
+        self.resolve_all_peer_workspace_ids().await
     }
 
     /// Resolve the peer's first workspace id via tools/call list_workspaces.

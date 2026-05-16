@@ -355,8 +355,44 @@
 
     <section id="peer-federate-step-done" class="peer-federate-step" hidden>
       <p>Peer is active. The allowed tools are now callable from this IONe node.</p>
+      <section id="peer-bindings" class="peer-bindings">
+        <header class="peer-bindings-header">
+          <h3>Workspace bindings</h3>
+          <button type="button" id="peer-bindings-refresh">Refresh</button>
+        </header>
+        <table class="peer-bindings-table">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Foreign tenant</th>
+              <th>Foreign workspace</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="peer-bindings-body"></tbody>
+        </table>
+      </section>
       <div class="peer-federate-actions">
         <button type="button" id="peer-federate-close-done">Done</button>
+      </div>
+    </section>
+  </dialog>
+
+  <dialog id="binding-edit-dialog" class="peer-federate-dialog" aria-labelledby="binding-edit-title">
+    <header class="peer-federate-header">
+      <h2 id="binding-edit-title">Edit binding</h2>
+      <button type="button" id="binding-edit-close" aria-label="Close">×</button>
+    </header>
+    <section class="peer-federate-step">
+      <label for="binding-edit-tenant">Foreign tenant</label>
+      <input id="binding-edit-tenant" type="text" />
+      <label for="binding-edit-workspace">Foreign workspace</label>
+      <input id="binding-edit-workspace" type="text" />
+      <label for="binding-edit-scope">Scope</label>
+      <textarea id="binding-edit-scope" rows="6"></textarea>
+      <p id="binding-edit-error" class="peer-federate-error" hidden></p>
+      <div class="peer-federate-actions">
+        <button type="button" id="binding-edit-save">Save</button>
       </div>
     </section>
   </dialog>
