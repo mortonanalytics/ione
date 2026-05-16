@@ -174,6 +174,14 @@ async fn insert_workspace(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
     .expect("insert workspace failed")
 }
 
+async fn insert_org(pool: &PgPool, name: &str) -> Uuid {
+    sqlx::query_scalar("INSERT INTO organizations (name) VALUES ($1) RETURNING id")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("insert org failed")
+}
+
 async fn insert_signal(pool: &PgPool, workspace_id: Uuid, title: &str, severity: &str) -> Uuid {
     sqlx::query_scalar(
         "INSERT INTO signals (workspace_id, source, title, body, severity, evidence)
@@ -328,6 +336,39 @@ async fn create_peer_requires_existing_issuer_id() {
         !body["error"].is_null(),
         "response must contain an error field"
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn create_peer_rejects_cross_org_issuer_id() {
+    let (base, pool) = spawn_app().await;
+    let other_org = insert_org(&pool, "Other Peer Org").await;
+    let (issuer_id, _secret) =
+        insert_trust_issuer(&pool, other_org, "https://issuer-other-peer.test", "mcp").await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v1/peers", base))
+        .json(&json!({
+            "name": "Cross Org Peer",
+            "mcpUrl": "https://peer-cross-org.example.com/mcp",
+            "issuerId": issuer_id,
+            "sharingPolicy": {}
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/peers failed");
+
+    assert!(
+        resp.status().is_client_error(),
+        "cross-org issuer_id must return 4xx, got: {}",
+        resp.status()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM peers WHERE issuer_id = $1")
+        .bind(issuer_id)
+        .fetch_one(&pool)
+        .await
+        .expect("peer count");
+    assert_eq!(count, 0);
 }
 
 // ─── Test 4: subscribe_creates_mcp_connector_in_workspace ────────────────────

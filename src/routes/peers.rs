@@ -62,11 +62,11 @@ pub async fn list_peers(
 /// POST /api/v1/peers — begin OAuth federation with a peer.
 pub async fn create_peer(
     State(state): State<AppState>,
-    Extension(_ctx): Extension<AuthContext>,
+    Extension(ctx): Extension<AuthContext>,
     Json(req): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
     if req.get("peerUrl").is_none() {
-        return create_legacy_peer(state, req).await;
+        return create_legacy_peer(state, ctx, req).await;
     }
 
     let req: CreatePeerRequest = serde_json::from_value(req)
@@ -75,9 +75,10 @@ pub async fn create_peer(
         return Err(AppError::BadRequest("peerUrl is required".into()));
     }
 
-    let issuer_id = ensure_local_peer_issuer(&state).await?;
+    let issuer_id = ensure_local_peer_issuer(&state, ctx.org_id).await?;
     let peer = crate::services::peer::register_peer(
         &state.pool,
+        ctx.org_id,
         &peer_name_from_url(&req.peer_url),
         &req.peer_url,
         issuer_id,
@@ -96,7 +97,11 @@ pub async fn create_peer(
     })))
 }
 
-async fn create_legacy_peer(state: AppState, req: Value) -> Result<Json<Value>, AppError> {
+async fn create_legacy_peer(
+    state: AppState,
+    ctx: AuthContext,
+    req: Value,
+) -> Result<Json<Value>, AppError> {
     let req: LegacyCreatePeerRequest = serde_json::from_value(req)
         .map_err(|e| AppError::BadRequest(format!("invalid peer request: {e}")))?;
     if req.name.is_empty() {
@@ -110,6 +115,7 @@ async fn create_legacy_peer(state: AppState, req: Value) -> Result<Json<Value>, 
 
     let peer = crate::services::peer::register_peer(
         &state.pool,
+        ctx.org_id,
         &req.name,
         &req.mcp_url,
         req.issuer_id,
@@ -343,13 +349,7 @@ async fn first_poll_connector(pool: &sqlx::PgPool, connector_id: Uuid) -> anyhow
     Ok(())
 }
 
-async fn ensure_local_peer_issuer(state: &AppState) -> Result<Uuid, AppError> {
-    let org_id: Uuid = sqlx::query_scalar("SELECT org_id FROM workspaces WHERE id = $1")
-        .bind(state.default_workspace_id)
-        .fetch_one(&state.pool)
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-
+async fn ensure_local_peer_issuer(state: &AppState, org_id: Uuid) -> Result<Uuid, AppError> {
     sqlx::query_scalar(
         "INSERT INTO trust_issuers (org_id, issuer_url, audience, jwks_uri, claim_mapping)
          VALUES ($1, $2, $3, $4, $5)

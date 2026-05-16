@@ -59,6 +59,23 @@ impl ConnectorRepo {
         .context("failed to get connector")
     }
 
+    pub async fn get_for_workspace(
+        &self,
+        id: Uuid,
+        workspace_id: Uuid,
+    ) -> anyhow::Result<Option<Connector>> {
+        sqlx::query_as::<_, Connector>(
+            "SELECT id, workspace_id, kind, name, config, status, last_error, created_at
+             FROM connectors
+             WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to get connector for workspace")
+    }
+
     pub async fn update_status(
         &self,
         id: Uuid,

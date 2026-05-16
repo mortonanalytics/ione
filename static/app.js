@@ -2449,6 +2449,8 @@ let mcpClientsInterval = null;
 let currentPeerId = null;
 let currentBindingId = null;
 let currentBindings = [];
+let peerAuthorizeUrl = null;
+let bindingDialogReturnFocus = null;
 
 document.getElementById('peer-federate-open-btn')?.addEventListener('click', () => {
   const dialog = document.getElementById('peer-federate-dialog');
@@ -2460,6 +2462,9 @@ document.getElementById('peer-federate-open-btn')?.addEventListener('click', () 
     errEl.hidden = true;
     errEl.textContent = '';
   }
+  peerAuthorizeUrl = null;
+  const fallback = document.getElementById('peer-federate-popup-fallback');
+  if (fallback) fallback.hidden = true;
   dialog?.showModal?.();
 });
 
@@ -2471,6 +2476,7 @@ function closePeerDialog() {
   dialog?.close?.();
   currentPeerId = null;
   currentBindings = [];
+  peerAuthorizeUrl = null;
 }
 
 function showPeerStep(step) {
@@ -2492,8 +2498,13 @@ document.getElementById('peer-federate-start')?.addEventListener('click', async 
       skipErrorToast: true,
     });
     currentPeerId = data.id;
+    peerAuthorizeUrl = data.authorizeUrl;
     track('peer_federation_started', null, window.activeWorkspace?.id || null);
-    window.open(data.authorizeUrl, '_blank', 'noopener,noreferrer');
+    const popup = window.open(data.authorizeUrl, '_blank', 'noopener,noreferrer');
+    const fallback = document.getElementById('peer-federate-popup-fallback');
+    const link = document.getElementById('peer-federate-authorize-link');
+    if (link) link.href = data.authorizeUrl || '#';
+    if (fallback) fallback.hidden = !!popup;
     showPeerStep('waiting');
   } catch (_err) {
     showError('peer_unreachable', `Couldn't reach ${url}.`, 'Check the URL and try again.');
@@ -2583,7 +2594,7 @@ document.getElementById('peer-bindings-refresh')?.addEventListener('click', () =
 });
 
 document.getElementById('binding-edit-close')?.addEventListener('click', () => {
-  document.getElementById('binding-edit-dialog')?.close?.();
+  closeBindingDialog();
 });
 
 document.getElementById('binding-edit-save')?.addEventListener('click', async () => {
@@ -2614,7 +2625,7 @@ document.getElementById('binding-edit-save')?.addEventListener('click', async ()
         scope,
       }),
     });
-    document.getElementById('binding-edit-dialog')?.close?.();
+    closeBindingDialog();
     if (currentPeerId) loadBindings(currentPeerId);
   } catch (err) {
     if (errEl) {
@@ -2627,7 +2638,7 @@ document.getElementById('binding-edit-save')?.addEventListener('click', async ()
 async function loadBindings(peerId) {
   const body = document.getElementById('peer-bindings-body');
   if (!body) return;
-  body.innerHTML = '<tr><td colspan="4">Loading...</td></tr>';
+  body.innerHTML = '<tr><td colspan="5">Loading...</td></tr>';
   try {
     const data = await apiFetch(`/api/v1/peers/${peerId}/bindings`, { skipErrorToast: true });
     currentBindings = data.items || [];
@@ -2642,13 +2653,17 @@ function renderBindings(bindings) {
   if (!body) return;
   body.innerHTML = '';
   if (!bindings.length) {
-    body.innerHTML = '<tr><td colspan="4">No workspace bindings yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="5">No workspace bindings yet.</td></tr>';
+    renderBindingsPendingCallout(bindings);
     return;
   }
+  renderBindingsPendingCallout(bindings);
   bindings.forEach((binding) => {
+    const status = binding.status || 'pending';
     const row = document.createElement('tr');
     row.innerHTML = `
-      <td><span class="binding-status binding-status--${binding.status || 'pending'}">${binding.status || 'pending'}</span></td>
+      <td>${escapeHtml(bindingWorkspaceLabel(binding.workspaceId))}</td>
+      <td><span class="binding-status binding-status--${status}">${bindingStatusLabel(status)}</span></td>
       <td>${escapeHtml(binding.foreignTenantId || '')}</td>
       <td>${escapeHtml(binding.foreignWorkspaceId || '')}</td>
       <td class="peer-bindings-actions">
@@ -2678,9 +2693,13 @@ async function handleBindingAction(event) {
     await apiFetch(`/api/v1/workspaces/${workspaceId}/bindings/${id}/refresh`, {
       method: 'POST',
       skipErrorToast: true,
-    }).catch((err) => showError('binding_refresh_failed', err.message || String(err), 'Check the peer and try again.'));
+    }).catch((err) => {
+      const drift = err.body?.old && err.body?.new ? ` Stored tenant: ${err.body.old}. Peer reported: ${err.body.new}.` : '';
+      showError('binding_refresh_failed', (err.message || String(err)) + drift, 'Check the peer and try again.');
+    });
   }
   if (action === 'delete') {
+    if (!confirm('Delete this workspace binding?')) return;
     await apiFetch(`/api/v1/workspaces/${workspaceId}/bindings/${id}`, { method: 'DELETE' });
   }
   if (currentPeerId) loadBindings(currentPeerId);
@@ -2701,7 +2720,47 @@ function editBinding(bindingId) {
     errEl.hidden = true;
     errEl.textContent = '';
   }
-  document.getElementById('binding-edit-dialog')?.showModal?.();
+  const dialog = document.getElementById('binding-edit-dialog');
+  bindingDialogReturnFocus = document.activeElement;
+  dialog?.showModal?.();
+  tenantInput?.focus?.();
+}
+
+function closeBindingDialog() {
+  const dialog = document.getElementById('binding-edit-dialog');
+  dialog?.close?.();
+  if (bindingDialogReturnFocus && typeof bindingDialogReturnFocus.focus === 'function') {
+    bindingDialogReturnFocus.focus();
+  }
+  bindingDialogReturnFocus = null;
+}
+
+document.getElementById('binding-edit-dialog')?.addEventListener('close', () => {
+  if (bindingDialogReturnFocus && typeof bindingDialogReturnFocus.focus === 'function') {
+    bindingDialogReturnFocus.focus();
+  }
+  bindingDialogReturnFocus = null;
+});
+
+function renderBindingsPendingCallout(bindings) {
+  const callout = document.getElementById('peer-bindings-pending-callout');
+  if (!callout) return;
+  callout.hidden = !bindings.some((binding) => (binding.status || 'pending') === 'pending');
+}
+
+function bindingWorkspaceLabel(workspaceId) {
+  const ws = workspaces.find((item) => item.id === workspaceId);
+  return ws ? workspaceLabel(ws) : (workspaceId || '');
+}
+
+function bindingStatusLabel(status) {
+  const labels = {
+    active: 'Active',
+    pending: 'Pending - needs tenant ID',
+    conflict: 'Conflict - tenant changed',
+    inactive: 'Inactive',
+  };
+  return labels[status] || status;
 }
 
 function escapeHtml(value) {

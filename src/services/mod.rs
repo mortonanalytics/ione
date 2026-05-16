@@ -17,4 +17,5 @@ pub mod session_service;
 pub mod workspace_peer_binding;
 
 pub use identity_audit_writer::{IdentityAuditWriter, IdentityEvent};
+pub use idp_service::IdpService;
 pub use session_service::SessionService;

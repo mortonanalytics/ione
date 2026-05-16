@@ -160,6 +160,14 @@ async fn insert_workspace(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
     .expect("insert workspace failed")
 }
 
+async fn insert_org(pool: &PgPool, name: &str) -> Uuid {
+    sqlx::query_scalar("INSERT INTO organizations (name) VALUES ($1) RETURNING id")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("insert org failed")
+}
+
 /// Seed a signal and return its id.
 async fn insert_signal(pool: &PgPool, workspace_id: Uuid, title: &str) -> Uuid {
     sqlx::query_scalar(
@@ -228,6 +236,20 @@ async fn insert_connector_and_event(
     .expect("insert stream event failed");
 
     (connector_id, stream_id)
+}
+
+async fn insert_connector(pool: &PgPool, workspace_id: Uuid, name: &str, config: Value) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO connectors (workspace_id, kind, name, config)
+         VALUES ($1, 'rust_native'::connector_kind, $2, $3)
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(name)
+    .bind(config)
+    .fetch_one(pool)
+    .await
+    .expect("insert connector failed")
 }
 
 /// Mint a signed HS256 JWT for testing.
@@ -724,6 +746,85 @@ async fn mcp_tools_call_propose_artifact_rejects_forbidden_kind() {
         "no artifact must be created for forbidden kind, got count={}",
         count
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn mcp_tools_reject_cross_org_workspace_and_connector_ids() {
+    let (base, pool) = spawn_app().await;
+
+    let other_org = insert_org(&pool, "Other MCP Org").await;
+    let other_ws = insert_workspace(&pool, other_org, "Other MCP WS").await;
+    let sig = insert_signal(&pool, other_ws, "Other org signal").await;
+    insert_survivor(&pool, sig).await;
+    let (_other_connector_with_event, other_stream) =
+        insert_connector_and_event(&pool, other_ws, "other-events", json!({})).await;
+    let other_delivery_connector = insert_connector(
+        &pool,
+        other_ws,
+        "other-delivery",
+        json!({ "webhook_url": "http://127.0.0.1:9/" }),
+    )
+    .await;
+
+    for (id, name, arguments) in [
+        (
+            31,
+            "list_survivors",
+            json!({ "workspace_id": other_ws.to_string(), "limit": 10 }),
+        ),
+        (
+            32,
+            "search_stream_events",
+            json!({
+                "workspace_id": other_ws.to_string(),
+                "stream_id": other_stream.to_string(),
+                "limit": 10
+            }),
+        ),
+        (
+            33,
+            "propose_artifact",
+            json!({
+                "workspace_id": other_ws.to_string(),
+                "kind": "briefing",
+                "content": { "summary": "cross-org" }
+            }),
+        ),
+        (
+            34,
+            "deliver_notification",
+            json!({
+                "workspace_id": other_ws.to_string(),
+                "connector_id": other_delivery_connector.to_string(),
+                "text": "cross-org"
+            }),
+        ),
+    ] {
+        let resp = mcp_post(
+            &base,
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": { "name": name, "arguments": arguments }
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = resp.json().await.expect("response json");
+        assert!(
+            !body["error"].is_null(),
+            "{name} must reject cross-org identifiers, got {body}"
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("workspace not found"),
+            "{name} must not leak cross-org existence, got {body}"
+        );
+    }
 }
 
 // ─── Test 8: deliver_notification invokes connector ────────────────────────────

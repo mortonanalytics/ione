@@ -349,10 +349,10 @@ fn hash_code(code: &str) -> String {
 
 fn totp_code(secret: &[u8], counter: u64) -> String {
     use hmac::{Hmac, Mac};
-    type HmacSha256 = Hmac<Sha256>;
+    type HmacSha1 = Hmac<sha1::Sha1>;
     let mut msg = [0u8; 8];
     msg.copy_from_slice(&counter.to_be_bytes());
-    let mut mac = HmacSha256::new_from_slice(secret).expect("hmac key");
+    let mut mac = HmacSha1::new_from_slice(secret).expect("hmac key");
     mac.update(&msg);
     let hash = mac.finalize().into_bytes();
     let offset = (hash[hash.len() - 1] & 0x0f) as usize;
@@ -361,4 +361,14 @@ fn totp_code(secret: &[u8], counter: u64) -> String {
         | ((hash[offset + 2] as u32) << 8)
         | (hash[offset + 3] as u32);
     format!("{:06}", binary % 1_000_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::totp_code;
+
+    #[test]
+    fn totp_uses_sha1_compatible_hotp_vector() {
+        assert_eq!(totp_code(b"12345678901234567890", 1), "287082");
+    }
 }

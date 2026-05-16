@@ -55,11 +55,15 @@
 /// ──────────────────────────────────────────────────────────────────────────
 use std::net::SocketAddr;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::{header, redirect::Policy, StatusCode};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::net::TcpListener;
 use uuid::Uuid;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
 const MOCK_ISSUER_URL: &str = "http://mock-issuer.test";
@@ -129,6 +133,13 @@ async fn default_org_id(pool: &PgPool) -> Uuid {
         .expect("default org not found — bootstrap seed missing (expected failure)")
 }
 
+async fn default_user_id(pool: &PgPool) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM users WHERE email = 'default@localhost' LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .expect("default user not found")
+}
+
 /// Returns the id of the seeded "Operations" workspace.
 async fn ops_workspace_id(pool: &PgPool) -> Uuid {
     sqlx::query_scalar("SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1")
@@ -185,6 +196,60 @@ async fn issue_db_session_cookie(pool: &PgPool, user_id: Uuid, org_id: Uuid) -> 
     .await
     .expect("insert user_session failed");
     ione::auth::set_session_cookie_header_for_session(session_id, expires_at)
+}
+
+#[tokio::test]
+#[ignore]
+async fn broker_state_is_consumed_once_and_expiry_is_sql_scoped() {
+    let (_base, pool) = spawn_app().await;
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+    let repo = ione::repos::BrokerCredentialRepo::new(pool.clone());
+    let provider = format!("provider-{}", Uuid::new_v4());
+    repo.create_pending(
+        user_id,
+        org_id,
+        &provider,
+        "",
+        &["read".to_string()],
+        "state-once",
+        "verifier-once",
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    )
+    .await
+    .expect("create pending");
+
+    let consumed = repo
+        .consume_by_state("state-once")
+        .await
+        .expect("consume state")
+        .expect("state should exist");
+    assert_eq!(consumed.code_verifier.as_deref(), Some("verifier-once"));
+    assert!(consumed.state_token.is_none());
+    assert!(repo
+        .consume_by_state("state-once")
+        .await
+        .expect("replay consume")
+        .is_none());
+
+    let expired_provider = format!("provider-{}", Uuid::new_v4());
+    repo.create_pending(
+        user_id,
+        org_id,
+        &expired_provider,
+        "",
+        &["read".to_string()],
+        "state-expired",
+        "verifier-expired",
+        chrono::Utc::now() - chrono::Duration::minutes(1),
+    )
+    .await
+    .expect("create expired pending");
+    assert!(repo
+        .consume_by_state("state-expired")
+        .await
+        .expect("expired consume")
+        .is_none());
 }
 
 // ─── 1. trust_issuer_unique_constraint ────────────────────────────────────────
@@ -314,9 +379,26 @@ async fn local_mode_me_returns_default_user() {
 async fn oidc_login_redirects_to_issuer() {
     let (base, pool) = spawn_app_with_auth_mode("oidc").await;
     let org_id = default_org_id(&pool).await;
+    let issuer = MockServer::start().await;
+    let issuer_url = issuer.uri();
 
-    // Register the mock issuer so the server can look it up.
-    insert_mock_trust_issuer(&pool, org_id).await;
+    insert_trust_issuer(
+        &pool,
+        org_id,
+        &issuer_url,
+        MOCK_AUDIENCE,
+        &format!("{issuer_url}/jwks"),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/openid-configuration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authorization_endpoint": format!("{issuer_url}/authorize"),
+            "token_endpoint": format!("{issuer_url}/token"),
+            "jwks_uri": format!("{issuer_url}/jwks")
+        })))
+        .mount(&issuer)
+        .await;
 
     // Use a non-redirecting client so we can inspect the 302 directly.
     let client = reqwest::Client::builder()
@@ -328,7 +410,7 @@ async fn oidc_login_redirects_to_issuer() {
         .get(format!(
             "{}/auth/login?issuer={}",
             base,
-            urlencoding::encode(MOCK_ISSUER_URL)
+            urlencoding::encode(&issuer_url)
         ))
         .send()
         .await
@@ -393,6 +475,160 @@ async fn oidc_callback_rejects_bad_state() {
          (route not registered — expected failure)",
         status
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn oidc_callback_exchanges_code_and_validates_id_token() {
+    let (base, pool) = spawn_app_with_auth_mode("oidc").await;
+    let org_id = default_org_id(&pool).await;
+    let issuer = MockServer::start().await;
+    let issuer_url = issuer.uri();
+    let secret = b"phase08-oidc-secret";
+    let kid = "phase08-kid";
+    let state = "state-valid";
+    let code = "auth-code-valid";
+    insert_trust_issuer(
+        &pool,
+        org_id,
+        &issuer_url,
+        MOCK_AUDIENCE,
+        &format!("{issuer_url}/jwks"),
+    )
+    .await;
+
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some(kid.to_string());
+    let id_token = encode(
+        &header,
+        &json!({
+            "sub": "real-callback-user",
+            "email": "real-callback@example.test",
+            "name": "Real Callback",
+            "iss": issuer_url,
+            "aud": MOCK_AUDIENCE,
+            "nonce": state,
+            "exp": chrono::Utc::now().timestamp() + 300,
+            "iat": chrono::Utc::now().timestamp(),
+        }),
+        &EncodingKey::from_secret(secret),
+    )
+    .expect("sign id token");
+
+    Mock::given(method("GET"))
+        .and(path("/.well-known/openid-configuration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authorization_endpoint": format!("{issuer_url}/authorize"),
+            "token_endpoint": format!("{issuer_url}/token"),
+            "jwks_uri": format!("{issuer_url}/jwks")
+        })))
+        .mount(&issuer)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "keys": [{
+                "kty": "oct",
+                "kid": kid,
+                "alg": "HS256",
+                "k": URL_SAFE_NO_PAD.encode(secret),
+            }]
+        })))
+        .mount(&issuer)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id_token": id_token,
+            "token_type": "Bearer"
+        })))
+        .mount(&issuer)
+        .await;
+
+    let cookie = format!(
+        "ione_oidc_state={state}; ione_oidc_verifier=verifier-valid; ione_oidc_issuer={}",
+        urlencoding::encode(&issuer_url)
+    );
+    let resp = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .build()
+        .expect("client")
+        .get(format!("{base}/auth/callback?code={code}&state={state}"))
+        .header(header::COOKIE, cookie)
+        .header("x-ione-test-issuer", "https://attacker.invalid")
+        .send()
+        .await
+        .expect("callback");
+
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    let user_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM users WHERE oidc_subject = 'real-callback-user' AND email = 'real-callback@example.test'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("mapped user");
+    let sessions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .expect("session count");
+    assert_eq!(sessions, 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn oidc_callback_rejects_failed_token_exchange_without_user() {
+    let (base, pool) = spawn_app_with_auth_mode("oidc").await;
+    let org_id = default_org_id(&pool).await;
+    let issuer = MockServer::start().await;
+    let issuer_url = issuer.uri();
+    insert_trust_issuer(
+        &pool,
+        org_id,
+        &issuer_url,
+        MOCK_AUDIENCE,
+        &format!("{issuer_url}/jwks"),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/openid-configuration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authorization_endpoint": format!("{issuer_url}/authorize"),
+            "token_endpoint": format!("{issuer_url}/token"),
+            "jwks_uri": format!("{issuer_url}/jwks")
+        })))
+        .mount(&issuer)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": "invalid_grant"
+        })))
+        .mount(&issuer)
+        .await;
+
+    let cookie = format!(
+        "ione_oidc_state=state-invalid; ione_oidc_verifier=verifier-invalid; ione_oidc_issuer={}",
+        urlencoding::encode(&issuer_url)
+    );
+    let resp = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .build()
+        .expect("client")
+        .get(format!("{base}/auth/callback?code=bad-code&state=state-invalid"))
+        .header(header::COOKIE, cookie)
+        .send()
+        .await
+        .expect("callback");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let users: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE oidc_subject = 'bad-code'")
+            .fetch_one(&pool)
+            .await
+            .expect("user count");
+    assert_eq!(users, 0);
 }
 
 // ─── 5. oidc_callback_with_signed_id_token_creates_user_and_membership ────────

@@ -1888,6 +1888,15 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   margin: 0;
 }
 
+.peer-bindings-callout {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  color: #7c2d12;
+  font-size: 0.82rem;
+  margin: 0.75rem 0 0;
+  padding: 0.65rem 0.75rem;
+}
+
 .peer-bindings-table {
   border-collapse: collapse;
   margin-top: 0.75rem;
@@ -1909,10 +1918,10 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .binding-status {
   border: 1px solid var(--border, #d0d0d0);
-  border-radius: 999px;
+  border-radius: 6px;
   display: inline-block;
   font-size: 0.75rem;
-  line-height: 1;
+  line-height: 1.2;
   padding: 0.25rem 0.45rem;
 }
 

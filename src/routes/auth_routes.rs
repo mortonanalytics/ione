@@ -7,13 +7,13 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        clear_session_set_cookie, extract_session_id_from_header, mode_from_env, pkce_challenge,
-        random_url_safe_string, session_key_from_env, AuthMode, OIDC_ISSUER_COOKIE,
-        OIDC_STATE_COOKIE, OIDC_VERIFIER_COOKIE,
+        clear_session_set_cookie, extract_session_id_from_header, mode_from_env,
+        session_key_from_env, AuthMode, OIDC_ISSUER_COOKIE, OIDC_STATE_COOKIE,
+        OIDC_VERIFIER_COOKIE,
     },
     error::AppError,
     repos::{TrustIssuerRepo, UserSessionRepo},
-    services::{IdentityAuditWriter, SessionService},
+    services::{IdentityAuditWriter, IdpService, SessionService},
     state::AppState,
 };
 
@@ -72,25 +72,12 @@ pub async fn login(
         ))
     })?;
 
-    let state_token = random_url_safe_string();
-    let verifier = random_url_safe_string();
-    let challenge = pkce_challenge(&verifier);
-
-    // URL-encode the client_id manually (no urlencoding dep in main deps).
-    let client_id_encoded = percent_encode(&trust_issuer.audience);
-
-    // Build the authorization URL.
-    let auth_url = format!(
-        "{}/protocol/openid-connect/auth\
-         ?client_id={}\
-         &response_type=code\
-         &redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fauth%2Fcallback\
-         &scope=openid%20email%20profile\
-         &state={}\
-         &code_challenge={}\
-         &code_challenge_method=S256",
-        trust_issuer.issuer_url, client_id_encoded, state_token, challenge,
-    );
+    let redirect_uri = format!("{}/auth/callback", state.config.oauth_issuer);
+    let http = reqwest::Client::new();
+    let (auth_url, state_token, verifier) = IdpService::new(&state.pool, &http)
+        .authorize_url(&trust_issuer, &redirect_uri)
+        .await
+        .map_err(AppError::Internal)?;
 
     // Store state + verifier in short-lived cookies on the response.
     let state_cookie = format!(
@@ -154,28 +141,29 @@ pub async fn callback(
     }
 
     let org_id = resolve_default_org_id(&state).await?;
-    let issuer_url = headers
-        .get("x-ione-test-issuer")
+    let verifier = headers
+        .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
+        .and_then(|s| extract_cookie_value(s, OIDC_VERIFIER_COOKIE))
         .map(str::to_owned)
-        .or_else(|| {
-            headers
-                .get(header::COOKIE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| extract_cookie_value(s, OIDC_ISSUER_COOKIE))
-                .map(percent_decode)
-        })
-        .unwrap_or_else(|| "http://localhost:8080/realms/ione".to_string());
+        .ok_or_else(|| AppError::BadRequest("missing oidc verifier cookie".into()))?;
+    let issuer_url = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| extract_cookie_value(s, OIDC_ISSUER_COOKIE))
+        .map(percent_decode)
+        .ok_or_else(|| AppError::BadRequest("missing oidc issuer cookie".into()))?;
     let ti = TrustIssuerRepo::new(state.pool.clone())
         .find_by_issuer_url(org_id, &issuer_url)
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::BadRequest("unknown issuer".into()))?;
-    let claims = serde_json::json!({
-        "sub": format!("oidc:{}", code),
-        "email": format!("{}@example.invalid", code),
-        "name": "OIDC User"
-    });
+    let redirect_uri = format!("{}/auth/callback", state.config.oauth_issuer);
+    let http = reqwest::Client::new();
+    let claims = IdpService::new(&state.pool, &http)
+        .exchange_code_for_claims(&ti, code, &verifier, &redirect_uri, state_param)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("oidc callback failed: {e}")))?;
     let user =
         crate::services::claim_mapper::ClaimMapper::map_to_user(&state.pool, org_id, &ti, &claims)
             .await

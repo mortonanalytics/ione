@@ -337,6 +337,9 @@
     <section id="peer-federate-step-waiting" class="peer-federate-step" hidden>
       <p>A new tab opened for you to sign in at the peer. Come back when you're done.</p>
       <p class="peer-federate-hint" id="peer-federate-waiting-hint">Waiting for sign-in...</p>
+      <p class="peer-federate-hint" id="peer-federate-popup-fallback" hidden>
+        Popup blocked. <a id="peer-federate-authorize-link" href="#" target="_blank" rel="noopener noreferrer">Open sign-in</a>.
+      </p>
       <div class="peer-federate-actions">
         <button type="button" id="peer-federate-manifest">I'm done - fetch tools</button>
       </div>
@@ -360,9 +363,13 @@
           <h3>Workspace bindings</h3>
           <button type="button" id="peer-bindings-refresh">Refresh</button>
         </header>
+        <p id="peer-bindings-pending-callout" class="peer-bindings-callout" hidden>
+          One or more bindings are pending - the peer did not respond to whoami. Click Edit on a pending row and enter the foreign tenant ID.
+        </p>
         <table class="peer-bindings-table">
           <thead>
             <tr>
+              <th>Workspace</th>
               <th>Status</th>
               <th>Foreign tenant</th>
               <th>Foreign workspace</th>
@@ -389,6 +396,7 @@
       <label for="binding-edit-workspace">Foreign workspace</label>
       <input id="binding-edit-workspace" type="text" />
       <label for="binding-edit-scope">Scope</label>
+      <p class="peer-federate-hint">Optional JSON constraints for this binding. Leave as an empty object unless the peer requires a narrower scope.</p>
       <textarea id="binding-edit-scope" rows="6"></textarea>
       <p id="binding-edit-error" class="peer-federate-error" hidden></p>
       <div class="peer-federate-actions">

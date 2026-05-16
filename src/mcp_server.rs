@@ -165,10 +165,21 @@ fn tool_list() -> Value {
 /// Returns `None` when auth is required but absent/invalid.
 pub async fn resolve_auth(state: &AppState, headers: &HeaderMap) -> Option<AuthContext> {
     let mode = mode_from_env();
+    let bearer_token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim);
 
     // 1. Bearer JWT path
     if let Some(bearer_ctx) = try_bearer_auth(state, headers).await {
         return Some(bearer_ctx);
+    }
+    if bearer_token
+        .map(|token| jsonwebtoken::decode_header(token).is_ok())
+        .unwrap_or(false)
+    {
+        return None;
     }
 
     // 2. Session cookie path. A signed-but-unresolvable cookie (e.g. session
@@ -265,19 +276,43 @@ async fn verify_jwt_against_issuer(
     org_id: Uuid,
     state: &AppState,
 ) -> Option<AuthContext> {
-    use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+    use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 
-    // For local/test issuers we expect an HMAC-SHA256 secret in jwks_uri as
-    // "secret:<base64url>". For real JWKS, Phase 12 can add RSA key fetching.
-    let secret = issuer.jwks_uri.strip_prefix("secret:")?;
-    let key_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        secret.trim(),
-    )
-    .ok()?;
-    let key = DecodingKey::from_secret(&key_bytes);
+    let header = decode_header(token).ok()?;
+    let (key, algorithm) = if let Some(secret) = issuer.jwks_uri.strip_prefix("secret:") {
+        let key_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            secret.trim(),
+        )
+        .ok()?;
+        (DecodingKey::from_secret(&key_bytes), Algorithm::HS256)
+    } else {
+        let jwks: jsonwebtoken::jwk::JwkSet = reqwest::get(&issuer.jwks_uri)
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let kid = header.kid.as_deref();
+        let jwk = jwks.keys.iter().find(|key| {
+            kid.is_none()
+                || key
+                    .common
+                    .key_id
+                    .as_deref()
+                    .map(|key_id| Some(key_id) == kid)
+                    .unwrap_or(false)
+        })?;
+        let alg = match header.alg {
+            Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 => header.alg,
+            _ => return None,
+        };
+        (DecodingKey::from_jwk(jwk).ok()?, alg)
+    };
 
-    let mut validation = Validation::new(Algorithm::HS256);
+    let mut validation = Validation::new(algorithm);
     validation.set_audience(&[&issuer.audience]);
     validation.set_issuer(&[&issuer.issuer_url]);
 
@@ -349,10 +384,11 @@ async fn tool_list_workspaces(auth: &AuthContext, state: &AppState) -> anyhow::R
 
 async fn tool_list_survivors(
     args: Value,
-    _auth: &AuthContext,
+    auth: &AuthContext,
     state: &AppState,
 ) -> anyhow::Result<Value> {
     let workspace_id = parse_uuid(&args, "workspace_id")?;
+    ensure_workspace_in_org(state, workspace_id, auth.org_id).await?;
     let verdict = parse_optional_verdict(&args)?;
     let limit = args["limit"].as_i64().unwrap_or(50).clamp(1, 500);
 
@@ -383,10 +419,11 @@ fn parse_optional_verdict(args: &Value) -> anyhow::Result<Option<crate::models::
 
 async fn tool_search_stream_events(
     args: Value,
-    _auth: &AuthContext,
+    auth: &AuthContext,
     state: &AppState,
 ) -> anyhow::Result<Value> {
     let workspace_id = parse_uuid(&args, "workspace_id")?;
+    ensure_workspace_in_org(state, workspace_id, auth.org_id).await?;
     let stream_id_filter = parse_optional_uuid(&args, "stream_id")?;
     let query_filter = args["query"].as_str().map(str::to_lowercase);
     let limit = args["limit"].as_i64().unwrap_or(50).clamp(1, 500);
@@ -482,6 +519,7 @@ async fn tool_propose_artifact(
     state: &AppState,
 ) -> anyhow::Result<Value> {
     let workspace_id = parse_uuid(&args, "workspace_id")?;
+    ensure_workspace_in_org(state, workspace_id, auth.org_id).await?;
 
     let kind_str = args["kind"]
         .as_str()
@@ -538,6 +576,7 @@ async fn tool_deliver_notification(
 ) -> anyhow::Result<Value> {
     let workspace_id = parse_uuid(&args, "workspace_id")?;
     let connector_id = parse_uuid(&args, "connector_id")?;
+    ensure_workspace_in_org(state, workspace_id, auth.org_id).await?;
     let text = args["text"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -549,9 +588,9 @@ async fn tool_deliver_notification(
 
     let connector_repo = ConnectorRepo::new(state.pool.clone());
     let connector = connector_repo
-        .get(connector_id)
+        .get_for_workspace(connector_id, workspace_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("connector {} not found", connector_id))?;
+        .ok_or_else(|| anyhow::anyhow!("connector not found"))?;
 
     let impl_ = build_from_row(&connector)?;
 
@@ -592,6 +631,17 @@ fn parse_uuid(args: &Value, field: &str) -> anyhow::Result<Uuid> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing required field: {}", field))?;
     Uuid::parse_str(s).map_err(|e| anyhow::anyhow!("invalid UUID for field '{}': {}", field, e))
+}
+
+async fn ensure_workspace_in_org(
+    state: &AppState,
+    workspace_id: Uuid,
+    org_id: Uuid,
+) -> anyhow::Result<()> {
+    WorkspaceRepo::new(state.pool.clone())
+        .ensure_in_org(workspace_id, org_id)
+        .await
+        .map_err(|_| anyhow::anyhow!("workspace not found"))
 }
 
 fn parse_optional_uuid(args: &Value, field: &str) -> anyhow::Result<Option<Uuid>> {

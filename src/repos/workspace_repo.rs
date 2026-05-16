@@ -64,6 +64,19 @@ impl WorkspaceRepo {
         .context("failed to get workspace")
     }
 
+    pub async fn ensure_in_org(&self, id: Uuid, org_id: Uuid) -> anyhow::Result<()> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM workspaces WHERE id = $1 AND org_id = $2)",
+        )
+        .bind(id)
+        .bind(org_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to verify workspace org")?;
+        anyhow::ensure!(exists, "workspace not found");
+        Ok(())
+    }
+
     pub async fn close(&self, id: Uuid) -> anyhow::Result<Workspace> {
         sqlx::query_as::<_, Workspace>(
             "UPDATE workspaces

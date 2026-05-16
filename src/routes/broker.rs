@@ -106,17 +106,10 @@ pub async fn callback(
         .ok_or_else(|| AppError::BadRequest("missing state".into()))?;
     let repo = BrokerCredentialRepo::new(state.pool.clone());
     let row = repo
-        .find_by_state(&state_token)
+        .consume_by_state(&state_token)
         .await
         .map_err(AppError::Internal)?
-        .ok_or_else(|| AppError::BadRequest("invalid broker state".into()))?;
-    if row
-        .state_expires_at
-        .map(|ts| ts < chrono::Utc::now())
-        .unwrap_or(true)
-    {
-        return Err(AppError::BadRequest("broker_state_expired".into()));
-    }
+        .ok_or_else(|| AppError::BadRequest("invalid or expired broker state".into()))?;
     let provider = load_provider(&row.provider)?;
     let token_resp: serde_json::Value = reqwest::Client::new()
         .post(provider.token_url)

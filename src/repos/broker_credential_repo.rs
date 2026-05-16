@@ -78,6 +78,24 @@ impl BrokerCredentialRepo {
         .context("failed to find broker credential by state")
     }
 
+    pub async fn consume_by_state(
+        &self,
+        state_token: &str,
+    ) -> anyhow::Result<Option<BrokerCredential>> {
+        sqlx::query_as::<_, BrokerCredential>(
+            "UPDATE broker_credentials
+             SET state_token = NULL
+             WHERE state_token = $1 AND state_expires_at > now()
+             RETURNING id, user_id, org_id, provider, label, scopes, access_token_ciphertext,
+                refresh_token_ciphertext, token_expires_at, state_token, code_verifier,
+                state_expires_at, created_at",
+        )
+        .bind(state_token)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to consume broker credential state")
+    }
+
     pub async fn find_user_provider(
         &self,
         user_id: Uuid,

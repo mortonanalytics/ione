@@ -8,6 +8,7 @@ use crate::repos::{ConnectorRepo, PeerRepo, TrustIssuerRepo};
 /// Register a new peer. Validates that the issuer_id exists before inserting.
 pub async fn register_peer(
     pool: &PgPool,
+    org_id: Uuid,
     name: &str,
     mcp_url: &str,
     issuer_id: Uuid,
@@ -16,16 +17,17 @@ pub async fn register_peer(
     validate_mcp_url(mcp_url)?;
     validate_name(name)?;
 
-    // Validate issuer exists. We look across all orgs since peers are global.
-    let issuer_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trust_issuers WHERE id = $1)")
-            .bind(issuer_id)
-            .fetch_one(pool)
-            .await
-            .context("failed to check issuer existence")?;
+    let issuer_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM trust_issuers WHERE id = $1 AND org_id = $2)",
+    )
+    .bind(issuer_id)
+    .bind(org_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to check issuer existence")?;
 
     if !issuer_exists {
-        anyhow::bail!("issuer_id '{}' not found in trust_issuers", issuer_id);
+        anyhow::bail!("issuer_id '{}' not found in caller org", issuer_id);
     }
 
     let repo = PeerRepo::new(pool.clone());
