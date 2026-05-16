@@ -24,9 +24,13 @@ Without this mapping, three things break:
 - Binding metadata surfaced in the operator UI (peer detail and subscribe-peer flow).
 - Binding-aware audit: every approval and audit row referencing a peer carries the resolved `foreign_tenant_id` from the binding.
 
+**Routing scope clarification (added 2026-05-15 after code-side review).** v0.1 DOES drive workspace selection from the binding for the two existing call sites that already pass a `workspace_id` arg to peer tools: `McpClientConnector::poll` (which iterates remote workspaces today) and `delivery::peer_route_briefing` (which picks the first remote workspace today). When an active binding exists for `(workspace_id, peer_id)`, those sites use `binding.foreign_workspace_id` instead of the heuristic. When no binding exists or it is non-active, they fall through to current behavior. This is necessary for audit/approval enrichment to be honest — without it, `approvals.foreign_tenant_id` would record the intended tenant while the call landed somewhere else.
+
+What v0.1 does NOT do: inject `foreign_workspace_id` into tools that did not already take a `workspace_id` arg. The MCP protocol does not change; only the value passed to existing parameters changes.
+
 **Explicitly out of scope (v0.2 or later):**
 - **Multi-tenant per workspace** (one IONe workspace binding to two foreign workspaces in the same peer). v0.1 enforces 1:1 on `(workspace_id, peer_id)`. The regional-ops use case is real but not v0.1.
-- **Routing-level injection** of `foreign_workspace_id` into tool-call arguments. v0.1 records the mapping for display/audit; the foreign workspace is still authoritatively scoped by the OAuth token's subject inside the peer app. The MCP protocol does not change.
+- **Generalized arg injection** into arbitrary peer tools. v0.1 only updates the two existing call sites that already pass `workspace_id`. A general "bindings inject foreign IDs everywhere" mechanism waits for a use case.
 - **Background `whoami` refresh sweep.** v0.1 supports manual refresh via an endpoint; an automated sweep waits until peer count justifies it.
 - **Cross-org bindings** (one IONe org's workspace binding to a peer registered in another IONe org).
 
