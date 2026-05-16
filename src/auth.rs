@@ -314,8 +314,11 @@ pub async fn ensure_workspace_in_org(
         .ensure_in_org(workspace_id, org_id)
         .await
         .map_err(|e| {
+            // Cross-org access returns 404, not 403, so existence of resources
+            // in other orgs is not leaked to the caller. Matches the pattern
+            // used in routes/bindings.rs and routes/peers.rs::ensure_peer_in_org.
             if e.to_string().contains("workspace not found") {
-                AppError::Forbidden
+                AppError::NotFound("workspace not found".into())
             } else {
                 AppError::Internal(e)
             }

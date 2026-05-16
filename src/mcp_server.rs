@@ -391,7 +391,7 @@ async fn tool_list_survivors(
     let workspace_id = parse_uuid(&args, "workspace_id")?;
     ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id)
         .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        .map_err(map_workspace_access_err)?;
     let verdict = parse_optional_verdict(&args)?;
     let limit = args["limit"].as_i64().unwrap_or(50).clamp(1, 500);
 
@@ -428,7 +428,7 @@ async fn tool_search_stream_events(
     let workspace_id = parse_uuid(&args, "workspace_id")?;
     ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id)
         .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        .map_err(map_workspace_access_err)?;
     let stream_id_filter = parse_optional_uuid(&args, "stream_id")?;
     let query_filter = args["query"].as_str().map(str::to_lowercase);
     let limit = args["limit"].as_i64().unwrap_or(50).clamp(1, 500);
@@ -526,7 +526,7 @@ async fn tool_propose_artifact(
     let workspace_id = parse_uuid(&args, "workspace_id")?;
     ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id)
         .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        .map_err(map_workspace_access_err)?;
 
     let kind_str = args["kind"]
         .as_str()
@@ -585,7 +585,7 @@ async fn tool_deliver_notification(
     let connector_id = parse_uuid(&args, "connector_id")?;
     ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id)
         .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        .map_err(map_workspace_access_err)?;
     let text = args["text"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -634,6 +634,18 @@ async fn tool_deliver_notification(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Collapse cross-org and missing-workspace into one stable message so MCP
+/// callers cannot distinguish "wrong org" from "no such row" from internal
+/// errors. Internal errors still bubble their detail (they are not a leak
+/// vector — the caller already knows their request reached the handler).
+fn map_workspace_access_err(e: crate::error::AppError) -> anyhow::Error {
+    use crate::error::AppError;
+    match e {
+        AppError::NotFound(_) | AppError::Forbidden => anyhow::anyhow!("workspace not found"),
+        other => anyhow::anyhow!(other.to_string()),
+    }
+}
 
 fn parse_uuid(args: &Value, field: &str) -> anyhow::Result<Uuid> {
     let s = args[field]

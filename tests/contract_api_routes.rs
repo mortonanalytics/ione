@@ -68,6 +68,27 @@ fn route_registered(status: u16) -> bool {
     status != 404 && status != 405
 }
 
+/// Authenticated handlers that 404 on missing/cross-org resources still prove
+/// the route is wired up (router 404 has no body; handler 404 returns a JSON
+/// `{ "error": ... }` payload). Use this for routes that have org-scope guards.
+async fn assert_route_registered_or_handler_404(resp: reqwest::Response, route: &str) {
+    let status = resp.status().as_u16();
+    if status != 404 && status != 405 {
+        return;
+    }
+    if status == 405 {
+        panic!("{route} returned 405 — route not registered for this method");
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        body.get("error").is_some(),
+        "{route} returned 404 with no JSON error body — route not registered",
+    );
+}
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -169,11 +190,7 @@ async fn route_get_workspace_events_registered() {
         .send()
         .await
         .expect("request failed");
-    assert!(
-        route_registered(resp.status().as_u16()),
-        "GET /api/v1/workspaces/:id/events returned {} — route not registered",
-        resp.status()
-    );
+    assert_route_registered_or_handler_404(resp, "GET /api/v1/workspaces/:id/events").await;
 }
 
 #[tokio::test]
@@ -189,11 +206,7 @@ async fn route_get_workspace_events_stream_registered() {
         .send()
         .await
         .expect("request failed");
-    assert!(
-        route_registered(resp.status().as_u16()),
-        "GET /api/v1/workspaces/:id/events/stream returned {} — route not registered",
-        resp.status()
-    );
+    assert_route_registered_or_handler_404(resp, "GET /api/v1/workspaces/:id/events/stream").await;
 }
 
 // ─── OAuth / MCP authorization server ────────────────────────────────────────
@@ -328,11 +341,7 @@ async fn route_get_peers_manifest_registered() {
         .send()
         .await
         .expect("request failed");
-    assert!(
-        route_registered(resp.status().as_u16()),
-        "GET /api/v1/peers/:id/manifest returned {} — route not registered",
-        resp.status()
-    );
+    assert_route_registered_or_handler_404(resp, "GET /api/v1/peers/:id/manifest").await;
 }
 
 #[tokio::test]

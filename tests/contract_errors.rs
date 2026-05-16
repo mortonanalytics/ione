@@ -86,14 +86,17 @@ async fn insert_foreign_workspace(pool: &PgPool) -> Uuid {
 }
 
 async fn assert_forbidden(resp: reqwest::Response, route: &str) {
+    // Cross-org access returns 404, not 403, so existence in other orgs is
+    // not leaked. The function name is preserved for clarity at call sites
+    // but the assertion matches the design: don't leak existence.
     let status = resp.status();
     let body: Value = resp.json().await.expect("error response json");
     assert_eq!(
         status,
-        reqwest::StatusCode::FORBIDDEN,
-        "{route} should reject cross-org workspace access; body={body}"
+        reqwest::StatusCode::NOT_FOUND,
+        "{route} should reject cross-org workspace access with 404 (no existence leak); body={body}"
     );
-    assert_eq!(body["error"], "forbidden", "{route} error kind");
+    assert_eq!(body["error"], "not_found", "{route} error kind");
 }
 
 #[tokio::test]

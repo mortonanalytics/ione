@@ -112,7 +112,7 @@ pub(crate) async fn post_message(
     if conv.workspace_id == crate::demo::DEMO_WORKSPACE_ID {
         let reply = crate::demo::canned_chat::canned_response(&content);
         let assistant_msg = msg_repo
-            .append_user_and_assistant(id, &content, &reply, "canned")
+            .append_user_and_assistant(id, &content, reply, "canned")
             .await
             .map_err(AppError::Internal)?;
 

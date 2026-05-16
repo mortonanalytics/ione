@@ -77,7 +77,10 @@ pub async fn process_routing_decision(state: &AppState, routing_id: Uuid) -> any
     }
 
     // Fetch the routing_decision + signal context.
-    let row: Option<(
+    //
+    // Tuple shape: (target_kind, target_ref, signal_id, survivor_id,
+    //               signal_title, signal_body, severity, workspace_id).
+    type RoutingRow = (
         String,
         serde_json::Value,
         Uuid,
@@ -86,7 +89,8 @@ pub async fn process_routing_decision(state: &AppState, routing_id: Uuid) -> any
         String,
         String,
         Uuid,
-    )> = sqlx::query_as(
+    );
+    let row: Option<RoutingRow> = sqlx::query_as(
         "SELECT rd.target_kind::TEXT, rd.target_ref,
                     sig.id AS signal_id, s.id AS survivor_id,
                     sig.title, sig.body, sig.severity::TEXT,
