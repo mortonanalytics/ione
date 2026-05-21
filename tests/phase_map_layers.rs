@@ -206,7 +206,8 @@ async fn map_layers_rejects_cross_org_workspace_without_leak() {
     let resp = get_layers(&base, other_workspace).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body: Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "workspace not found");
+    assert_eq!(body["error"], "not_found");
+    assert_eq!(body["message"], "workspace not found");
 }
 
 #[tokio::test]

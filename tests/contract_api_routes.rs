@@ -206,6 +206,19 @@ async fn route_get_workspace_events_stream_registered() {
     assert_route_registered_or_handler_404(resp, "GET /api/v1/workspaces/:id/events/stream").await;
 }
 
+#[tokio::test]
+#[ignore]
+async fn route_get_workspace_map_layers_registered() {
+    let (base, _pool) = spawn_app().await;
+    let ws_id = Uuid::new_v4();
+    let resp = reqwest::Client::new()
+        .get(format!("{}/api/v1/workspaces/{}/map-layers", base, ws_id))
+        .send()
+        .await
+        .expect("request failed");
+    assert_route_registered_or_handler_404(resp, "GET /api/v1/workspaces/:id/map-layers").await;
+}
+
 // ─── OAuth / MCP authorization server ────────────────────────────────────────
 
 #[tokio::test]
