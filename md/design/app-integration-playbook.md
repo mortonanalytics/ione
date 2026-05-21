@@ -88,10 +88,37 @@ Each resource returned by `resources/list` carries view-hint metadata so IONe's 
 ```
 
 Supported `ione_view` values (v0.1):
-- `map` — `metadata.tile_url` (XYZ template), `metadata.bounds`, `metadata.attribution`. Optionally `vector_url` for PMTiles.
+- `map` — `metadata.tile_url` (XYZ template), `metadata.bounds`, `metadata.attribution`. Optional fields: `metadata.layer_name`, `metadata.opacity`, `metadata.vector_url`.
 - `chart` (deferred to v0.2) — `chart_type`, axis hints, series list
 - `table` (deferred to v0.2) — column schema
 - `document` (deferred to v0.2) — `metadata.download_url`, MIME type
+
+Map resource metadata:
+
+```json
+{
+  "uri": "gp://aoi/12345/displacement-map",
+  "name": "AOI 12345 displacement map",
+  "mimeType": "application/vnd.ione.map+json",
+  "metadata": {
+    "ione_view": "map",
+    "tile_url": "https://tiles.example.com/aoi/12345/{z}/{x}/{y}.png",
+    "bounds": [-112.75, 45.4, -111.9, 46.1],
+    "attribution": "Example Tiles",
+    "layer_name": "Displacement",
+    "opacity": 0.7,
+    "vector_url": "https://tiles.example.com/aoi/12345/displacement.pmtiles"
+  }
+}
+```
+
+Map field requirements:
+- `tile_url` is a browser-reachable XYZ raster tile template. IONe does not proxy tile requests in v0.1.
+- `bounds` is a flat GeoJSON bbox array: `[west, south, east, north]`.
+- `attribution` is displayed as text by the IONe shell; apps must not rely on HTML rendering.
+- `layer_name` overrides the resource `name` in map layer controls.
+- `opacity` is a float from `0.0` to `1.0`; omitted means fully opaque.
+- `vector_url` is pass-through metadata for PMTiles/vector layers; IONe v0.1 does not render it.
 
 Apps may include resources with no `ione_view`; IONe surfaces them as opaque references with name + description only.
 
