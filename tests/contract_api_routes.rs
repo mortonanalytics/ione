@@ -79,10 +79,7 @@ async fn assert_route_registered_or_handler_404(resp: reqwest::Response, route: 
     if status == 405 {
         panic!("{route} returned 405 — route not registered for this method");
     }
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .unwrap_or(serde_json::Value::Null);
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
     assert!(
         body.get("error").is_some(),
         "{route} returned 404 with no JSON error body — route not registered",

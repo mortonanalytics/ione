@@ -334,8 +334,11 @@ function formatDate(iso) {
 function appendMessage(role, text) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
-  div.textContent = (role === 'user' ? 'You: ' : 'Model: ') + text;
+  const prefix = (role === 'user' ? 'You: ' : 'Model: ');
+  div.dataset.rawText = prefix + text;
+  div.textContent = div.dataset.rawText;
   transcript.appendChild(div);
+  injectResourceChips(div);
   transcript.scrollTop = transcript.scrollHeight;
 }
 
@@ -565,6 +568,10 @@ function setActiveWorkspace(ws) {
   // If the connectors tab is active, reload connectors for the new workspace.
   if (activeTab === 'connectors') {
     loadConnectors(ws.id);
+  }
+
+  if (activeTab === 'map') {
+    updateMapLayers(ws.id);
   }
 
   // If the signals tab is active, reload signals for the new workspace.
@@ -989,17 +996,19 @@ newWorkspaceForm.addEventListener('submit', async (e) => {
 /* ── Tab state ── */
 
 const tabChat          = document.getElementById('tab-chat');
+const tabMap           = document.getElementById('tab-map');
 const tabConnectors    = document.getElementById('tab-connectors');
 const tabSignals       = document.getElementById('tab-signals');
 const tabSurvivors     = document.getElementById('tab-survivors');
 const tabApprovals     = document.getElementById('tab-approvals');
 const panelChat        = document.getElementById('panel-chat');
+const panelMap         = document.getElementById('panel-map');
 const panelConnectors  = document.getElementById('panel-connectors');
 const panelSignals     = document.getElementById('panel-signals');
 const panelSurvivors   = document.getElementById('panel-survivors');
 const panelApprovals   = document.getElementById('panel-approvals');
 
-let activeTab = 'chat'; // 'chat' | 'connectors' | 'signals' | 'survivors' | 'approvals'
+let activeTab = 'chat'; // 'chat' | 'map' | 'connectors' | 'signals' | 'survivors' | 'approvals'
 
 function switchTab(name) {
   // Stop auto-refresh when leaving a polling tab.
@@ -1018,6 +1027,10 @@ function switchTab(name) {
   tabChat.setAttribute('aria-selected', String(name === 'chat'));
   tabChat.classList.toggle('tab--active', name === 'chat');
   panelChat.hidden = name !== 'chat';
+
+  tabMap.setAttribute('aria-selected', String(name === 'map'));
+  tabMap.classList.toggle('tab--active', name === 'map');
+  panelMap.hidden = name !== 'map';
 
   tabConnectors.setAttribute('aria-selected', String(name === 'connectors'));
   tabConnectors.classList.toggle('tab--active', name === 'connectors');
@@ -1039,6 +1052,12 @@ function switchTab(name) {
     loadConnectors(activeWorkspace.id);
   }
 
+  if (name === 'map' && activeWorkspace && mapLoadedWorkspaceId !== activeWorkspace.id) {
+    updateMapLayers(activeWorkspace.id);
+  } else if (name === 'map' && window.mapInstance) {
+    window.mapInstance.resize();
+  }
+
   if (name === 'signals' && activeWorkspace) {
     loadSignals();
     startSignalsPolling();
@@ -1056,16 +1075,21 @@ function switchTab(name) {
 }
 
 tabChat.addEventListener('click', () => switchTab('chat'));
+tabMap.addEventListener('click', () => switchTab('map'));
 tabConnectors.addEventListener('click', () => switchTab('connectors'));
 tabSignals.addEventListener('click', () => switchTab('signals'));
 tabSurvivors.addEventListener('click', () => switchTab('survivors'));
 tabApprovals.addEventListener('click', () => switchTab('approvals'));
 
 tabChat.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabMap.focus(); tabMap.click(); }
+});
+tabMap.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabChat.focus(); tabChat.click(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
 });
 tabConnectors.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabChat.focus(); tabChat.click(); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabMap.focus(); tabMap.click(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); tabSignals.focus(); tabSignals.click(); }
 });
 tabSignals.addEventListener('keydown', (e) => {
@@ -1079,6 +1103,304 @@ tabSurvivors.addEventListener('keydown', (e) => {
 tabApprovals.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); tabSurvivors.focus(); tabSurvivors.click(); }
 });
+
+/* ── Map panel ── */
+
+let mapInstance = null;
+let mapLayerItems = [];
+let mapLoadedWorkspaceId = null;
+const mapLayerIds = new Set();
+const mapSourceIds = new Set();
+const RESOURCE_URI_RE = /\b([a-z][a-z0-9+\-.]*:\/\/[^\s"<>]+)/gi;
+
+function initMapPanel() {
+  const connectBtn = document.getElementById('map-connect-peer');
+  const retryBtn = document.getElementById('map-error-retry');
+  const toggleBtn = document.getElementById('map-layer-toggle');
+  const list = document.getElementById('map-layer-list');
+
+  connectBtn?.addEventListener('click', () => switchTab('connectors'));
+  retryBtn?.addEventListener('click', () => {
+    if (activeWorkspace) updateMapLayers(activeWorkspace.id);
+  });
+  toggleBtn?.addEventListener('click', () => {
+    const expanded = toggleBtn.getAttribute('aria-expanded') !== 'false';
+    toggleBtn.setAttribute('aria-expanded', String(!expanded));
+    list.hidden = expanded;
+  });
+  setupMapKeyboard();
+}
+
+async function updateMapLayers(workspaceId) {
+  mapLoadedWorkspaceId = workspaceId;
+  showMapState('loading');
+  try {
+    const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/map-layers`);
+    if (!activeWorkspace || activeWorkspace.id !== workspaceId) return;
+    mapLayerItems = data.items || [];
+    const failed = data.peersFailed || [];
+    const peersOk = data.peersOk || [];
+
+    if (mapLayerItems.length === 0) {
+      destroyMap();
+      renderLayerControl([]);
+      if (failed.length > 0 && peersOk.length === 0) {
+        showMapError(`Could not reach any connected peer (${failed.length} failed). The data source may be temporarily unavailable.`);
+      } else {
+        showMapState('empty');
+      }
+      rehydrateTranscriptChips();
+      return;
+    }
+
+    showMapState('canvas');
+    renderMapLayers(mapLayerItems);
+    renderLayerControl(mapLayerItems);
+    if (failed.length > 0) markFailedPeers(failed);
+    rehydrateTranscriptChips();
+  } catch (err) {
+    mapLoadedWorkspaceId = null;
+    destroyMap();
+    renderLayerControl([]);
+    showMapError('Could not load map layers. ' + err.message);
+  }
+}
+
+function renderMapLayers(items) {
+  if (typeof maplibregl === 'undefined') {
+    showMapError('Map view requires MapLibre GL JS. Check your network connection.');
+    return;
+  }
+
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const attributions = items
+    .map((item) => item.meta.attribution)
+    .filter(Boolean)
+    .map(escapeHtml);
+
+  destroyMap();
+  mapInstance = new maplibregl.Map({
+    container: 'map-canvas',
+    style: { version: 8, sources: {}, layers: [] },
+    keyboard: true,
+    fadeDuration: reduceMotion ? 0 : 300,
+    attributionControl: false,
+  });
+  window.mapInstance = mapInstance;
+  if (attributions.length > 0) {
+    mapInstance.addControl(new maplibregl.AttributionControl({
+      customAttribution: attributions,
+      compact: true,
+    }));
+  }
+  mapInstance.on('load', () => addLayersToMap(items, reduceMotion));
+}
+
+function addLayersToMap(items, reduceMotion) {
+  const bounds = new maplibregl.LngLatBounds();
+  let hasBounds = false;
+
+  items.forEach((item) => {
+    const sourceId = sourceIdForItem(item);
+    const layerId = layerIdForItem(item);
+    mapSourceIds.add(sourceId);
+    mapLayerIds.add(layerId);
+
+    mapInstance.addSource(sourceId, { type: 'raster', tiles: [item.meta.tileUrl], tileSize: 256 });
+    mapInstance.addLayer({
+      id: layerId,
+      type: 'raster',
+      source: sourceId,
+      paint: { 'raster-opacity': item.meta.opacity ?? 1.0 },
+    });
+
+    if (Array.isArray(item.meta.bounds) && item.meta.bounds.length === 4) {
+      const [w, s, e, n] = item.meta.bounds;
+      bounds.extend([w, s]);
+      bounds.extend([e, n]);
+      hasBounds = true;
+    }
+  });
+
+  if (hasBounds && !bounds.isEmpty()) {
+    mapInstance.fitBounds(bounds, { padding: 20, animate: !reduceMotion });
+  }
+}
+
+function renderLayerControl(items) {
+  const list = document.getElementById('map-layer-list');
+  list.innerHTML = '';
+  items.forEach((item) => {
+    const layerId = layerIdForItem(item);
+    const label = item.meta.layerName || item.name || item.uri;
+    const li = document.createElement('li');
+    li.className = 'layer-row';
+    li.dataset.uri = item.uri;
+    li.dataset.peerId = item.peerId;
+    li.innerHTML = `
+      <label>
+        <input type="checkbox" checked data-layer-id="${escapeHtml(layerId)}" />
+        <span>${escapeHtml(label)}</span>
+      </label>
+      ${item.meta.opacity != null ? `<input type="range" min="0" max="1" step="0.05"
+        value="${escapeHtml(item.meta.opacity)}" data-layer-id="${escapeHtml(layerId)}"
+        aria-label="Opacity for ${escapeHtml(label)}" />` : ''}
+      <span class="layer-error-icon" hidden aria-label="Tiles unavailable"></span>
+    `;
+    li.querySelector('input[type=checkbox]').addEventListener('change', (e) => {
+      if (mapInstance && mapInstance.getLayer(layerId)) {
+        mapInstance.setLayoutProperty(layerId, 'visibility', e.target.checked ? 'visible' : 'none');
+      }
+    });
+    const slider = li.querySelector('input[type=range]');
+    if (slider) {
+      slider.addEventListener('input', (e) => {
+        if (mapInstance && mapInstance.getLayer(layerId)) {
+          mapInstance.setPaintProperty(layerId, 'raster-opacity', Number(e.target.value));
+        }
+      });
+    }
+    list.appendChild(li);
+  });
+}
+
+function setupMapKeyboard() {
+  const canvas = document.getElementById('map-canvas');
+  canvas.addEventListener('keydown', (e) => {
+    if (!mapInstance) return;
+    const pan = 100;
+    if (e.key === 'ArrowRight') mapInstance.panBy([pan, 0]);
+    else if (e.key === 'ArrowLeft') mapInstance.panBy([-pan, 0]);
+    else if (e.key === 'ArrowUp') mapInstance.panBy([0, -pan]);
+    else if (e.key === 'ArrowDown') mapInstance.panBy([0, pan]);
+    else if (e.key === '+') mapInstance.zoomIn();
+    else if (e.key === '-') mapInstance.zoomOut();
+    else if (e.key === 'Escape') document.getElementById('map-layer-toggle').focus();
+    else return;
+    e.preventDefault();
+  });
+}
+
+function showMapState(state) {
+  document.getElementById('map-loading').hidden = state !== 'loading';
+  document.getElementById('map-empty').hidden = state !== 'empty';
+  document.getElementById('map-error').hidden = state !== 'error';
+  document.getElementById('map-canvas-container').hidden = state !== 'canvas';
+}
+
+function showMapError(msg) {
+  document.getElementById('map-error-msg').textContent = msg;
+  showMapState('error');
+}
+
+function clearMapLayers() {
+  if (!mapInstance) return;
+  Array.from(mapLayerIds).reverse().forEach((id) => {
+    if (mapInstance.getLayer(id)) mapInstance.removeLayer(id);
+    mapLayerIds.delete(id);
+  });
+  Array.from(mapSourceIds).reverse().forEach((id) => {
+    if (mapInstance.getSource(id)) mapInstance.removeSource(id);
+    mapSourceIds.delete(id);
+  });
+}
+
+function destroyMap() {
+  if (!mapInstance) return;
+  clearMapLayers();
+  mapInstance.remove();
+  mapInstance = null;
+  window.mapInstance = null;
+}
+
+function markFailedPeers(failed) {
+  const list = document.getElementById('map-layer-list');
+  failed.forEach((peer) => {
+    const li = document.createElement('li');
+    li.className = 'layer-row layer-row--error';
+    li.dataset.peerId = peer.peerId;
+    li.innerHTML = `<span class="layer-error-icon" aria-hidden="true"></span><span>${escapeHtml(peer.peerName || 'Peer')} unavailable</span>`;
+    li.title = peer.error || 'Peer unavailable';
+    list.appendChild(li);
+  });
+}
+
+function sourceIdForItem(item) {
+  return 'src-' + layerTokenForItem(item);
+}
+
+function layerIdForItem(item) {
+  return 'lyr-' + layerTokenForItem(item);
+}
+
+function layerTokenForItem(item) {
+  let hash = 0;
+  const raw = `${item.peerId}:${item.uri}`;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash = ((hash << 5) - hash + raw.charCodeAt(i)) | 0;
+  }
+  return `${item.peerId}-${Math.abs(hash)}`;
+}
+
+function rehydrateTranscriptChips() {
+  transcript.querySelectorAll('.message[data-raw-text]').forEach((el) => {
+    el.textContent = el.dataset.rawText;
+    injectResourceChips(el);
+  });
+}
+
+function injectResourceChips(messageEl) {
+  const walker = document.createTreeWalker(messageEl, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+
+  nodes.forEach((textNode) => {
+    const text = textNode.textContent;
+    if (!RESOURCE_URI_RE.test(text)) return;
+    RESOURCE_URI_RE.lastIndex = 0;
+
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    let match;
+    while ((match = RESOURCE_URI_RE.exec(text)) !== null) {
+      const uri = match[1];
+      const item = mapLayerItems.find((candidate) => candidate.uri === uri);
+      if (!item) continue;
+
+      frag.appendChild(document.createTextNode(text.slice(last, match.index)));
+      const chip = document.createElement('button');
+      chip.className = 'resource-chip';
+      chip.type = 'button';
+      chip.dataset.uri = uri;
+      chip.textContent = item.meta.layerName || item.name || uri;
+
+      const viewBtn = document.createElement('button');
+      viewBtn.className = 'chip-view-map';
+      viewBtn.type = 'button';
+      viewBtn.dataset.uri = uri;
+      viewBtn.setAttribute('aria-label', 'View in Map');
+      viewBtn.textContent = 'Map';
+      viewBtn.addEventListener('click', () => highlightMapLayer(uri));
+
+      frag.appendChild(chip);
+      frag.appendChild(viewBtn);
+      last = match.index + match[0].length;
+    }
+    frag.appendChild(document.createTextNode(text.slice(last)));
+    textNode.parentNode.replaceChild(frag, textNode);
+  });
+}
+
+function highlightMapLayer(uri) {
+  switchTab('map');
+  const row = document.querySelector(`#map-layer-list .layer-row[data-uri="${CSS.escape(uri)}"]`);
+  if (!row) return;
+  row.scrollIntoView({ block: 'nearest' });
+  row.classList.add('layer-row--highlight');
+  setTimeout(() => row.classList.remove('layer-row--highlight'), 1500);
+}
+
+initMapPanel();
 
 /* ── Connector + Stream API helpers ── */
 

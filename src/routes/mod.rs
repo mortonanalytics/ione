@@ -26,6 +26,7 @@ pub mod connectors;
 pub mod conversations;
 pub mod feed;
 pub mod health;
+pub mod map_layers;
 pub mod mcp_clients;
 pub mod me;
 pub mod mfa;
@@ -97,6 +98,10 @@ pub fn router(state: AppState) -> Router {
             get(workspaces::list_workspaces).post(workspaces::create_workspace),
         )
         .route("/api/v1/workspaces/:id", get(workspaces::get_workspace))
+        .route(
+            "/api/v1/workspaces/:id/map-layers",
+            get(map_layers::list_map_layers),
+        )
         .route(
             "/api/v1/workspaces/:id/close",
             post(workspaces::close_workspace),
