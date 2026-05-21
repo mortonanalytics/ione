@@ -3,3 +3,7 @@
 .env
 .env.local
 .DS_Store
+/node_modules
+/test-results
+/.playwright-mcp
+/playwright-report
