@@ -344,3 +344,25 @@ async fn delivery_pass_creates_foreign_tenant_approval_for_gated_signal() {
     .expect("approval");
     assert_eq!(tenant.as_deref(), Some("t-acme"));
 }
+
+#[tokio::test]
+#[ignore]
+async fn oversized_body_is_rejected_before_handling() {
+    // AC-9: the 256 KB DefaultBodyLimit must reject before the handler reads the
+    // body. Regression guard for the unauthenticated-endpoint DoS control.
+    let (base, pool) = spawn_app().await;
+    let (org_id, _) = default_ids(&pool).await;
+    let peer_id = insert_peer(&pool, org_id, "active").await;
+    let secret = provision(&base, peer_id).await;
+
+    let big = "x".repeat(300 * 1024); // 300 KB > 256 KB cap
+    let ts = Utc::now().timestamp();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/webhooks/peer/{peer_id}"))
+        .header("X-IONe-Signature", signed_headers(&secret, &big, ts))
+        .body(big)
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
