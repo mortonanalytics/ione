@@ -1,5 +1,5 @@
 use anyhow::Context;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::models::{Peer, PeerStatus};
@@ -76,6 +76,58 @@ impl PeerRepo {
         .fetch_optional(&self.pool)
         .await
         .context("failed to get peer")
+    }
+
+    pub async fn set_webhook_secret(&self, peer_id: Uuid, ciphertext: &[u8]) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE peers
+             SET webhook_secret_ciphertext = $1
+             WHERE id = $2",
+        )
+        .bind(ciphertext)
+        .bind(peer_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to set peer webhook secret")?;
+        Ok(())
+    }
+
+    pub async fn get_with_webhook_secret(
+        &self,
+        id: Uuid,
+    ) -> anyhow::Result<Option<(Peer, Option<Vec<u8>>)>> {
+        let row = sqlx::query(
+            "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+                    oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
+                    token_expires_at, tool_allowlist, webhook_secret_ciphertext
+             FROM peers
+             WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to get peer with webhook secret")?;
+
+        Ok(row.map(|row| {
+            let peer = Peer {
+                id: row.get("id"),
+                org_id: row.get("org_id"),
+                name: row.get("name"),
+                mcp_url: row.get("mcp_url"),
+                issuer_id: row.get("issuer_id"),
+                sharing_policy: row.get("sharing_policy"),
+                status: row.get("status"),
+                created_at: row.get("created_at"),
+                oauth_client_id: row.get("oauth_client_id"),
+                access_token_hash: row.get("access_token_hash"),
+                refresh_token_hash: row.get("refresh_token_hash"),
+                access_token_ciphertext: row.get("access_token_ciphertext"),
+                token_expires_at: row.get("token_expires_at"),
+                tool_allowlist: row.get("tool_allowlist"),
+            };
+            let secret = row.get("webhook_secret_ciphertext");
+            (peer, secret)
+        }))
     }
 
     pub async fn update_status(&self, id: Uuid, status: PeerStatus) -> anyhow::Result<Peer> {

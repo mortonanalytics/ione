@@ -20,6 +20,12 @@ pub enum AppError {
     #[error("unauthorized")]
     Unauthorized,
 
+    #[error("webhook rejected")]
+    WebhookRejected,
+
+    #[error("webhook unauthorized")]
+    WebhookUnauthorized,
+
     #[error("forbidden")]
     Forbidden,
 
@@ -88,6 +94,20 @@ impl IntoResponse for AppError {
                     "error": "unauthorized",
                     "message": "Sign in to access this resource.",
                     "hint": "Try signing in again."
+                })),
+            )
+                .into_response(),
+            AppError::WebhookRejected => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "webhook_rejected"
+                })),
+            )
+                .into_response(),
+            AppError::WebhookUnauthorized => (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": "webhook_unauthorized"
                 })),
             )
                 .into_response(),
@@ -202,6 +222,8 @@ mod tests {
             AppError::UnprocessableEntity("x".into()),
             AppError::NotFound("y".into()),
             AppError::Unauthorized,
+            AppError::WebhookRejected,
+            AppError::WebhookUnauthorized,
             AppError::Forbidden,
             AppError::MfaRequired,
             AppError::MfaEnrollmentRequired,
@@ -227,6 +249,10 @@ mod tests {
         ];
 
         for err in cases {
+            let webhook_error = matches!(
+                err,
+                AppError::WebhookRejected | AppError::WebhookUnauthorized
+            );
             let resp = err.into_response();
             let (parts, body) = resp.into_parts();
             let bytes = axum::body::to_bytes(body, 4096).await.expect("body");
@@ -236,7 +262,7 @@ mod tests {
                 "{parts:?} / {v}"
             );
             assert!(
-                v["message"].as_str().filter(|s| !s.is_empty()).is_some(),
+                webhook_error || v["message"].as_str().filter(|s| !s.is_empty()).is_some(),
                 "{parts:?} / {v}"
             );
         }

@@ -101,7 +101,7 @@ async fn spawn_app_with_auth_mode(auth_mode: &str) -> (String, PgPool) {
     // If trust_issuers does not exist yet, this fails — which is the expected
     // contract-red failure mode.
     sqlx::query(
-        "TRUNCATE trust_issuers, routing_decisions, survivors, signals, stream_events, streams,
+        "TRUNCATE webhook_events_seen, trust_issuers, routing_decisions, survivors, signals, stream_events, streams,
                   connectors, memberships, roles, messages, conversations,
                   workspaces, users, organizations
          RESTART IDENTITY CASCADE",

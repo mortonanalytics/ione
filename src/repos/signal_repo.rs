@@ -23,11 +23,12 @@ impl SignalRepo {
         evidence: serde_json::Value,
         severity: Severity,
         generator_model: Option<&str>,
+        approval_required: bool,
     ) -> anyhow::Result<Signal> {
         sqlx::query_as::<_, Signal>(
-            "INSERT INTO signals (workspace_id, source, title, body, evidence, severity, generator_model)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             RETURNING id, workspace_id, source, title, body, evidence, severity, generator_model, created_at",
+            "INSERT INTO signals (workspace_id, source, title, body, evidence, severity, generator_model, approval_required)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING id, workspace_id, source, title, body, evidence, severity, generator_model, approval_required, created_at",
         )
         .bind(workspace_id)
         .bind(source)
@@ -36,6 +37,7 @@ impl SignalRepo {
         .bind(evidence)
         .bind(severity)
         .bind(generator_model)
+        .bind(approval_required)
         .fetch_one(&self.pool)
         .await
         .context("failed to insert signal")
@@ -52,7 +54,7 @@ impl SignalRepo {
         match (source_filter, severity_filter) {
             (Some(src), Some(sev)) => {
                 sqlx::query_as::<_, Signal>(
-                    "SELECT id, workspace_id, source, title, body, evidence, severity, generator_model, created_at
+                    "SELECT id, workspace_id, source, title, body, evidence, severity, generator_model, approval_required, created_at
                      FROM signals
                      WHERE workspace_id = $1 AND source = $2 AND severity = $3
                      ORDER BY created_at DESC
@@ -68,7 +70,7 @@ impl SignalRepo {
             }
             (Some(src), None) => {
                 sqlx::query_as::<_, Signal>(
-                    "SELECT id, workspace_id, source, title, body, evidence, severity, generator_model, created_at
+                    "SELECT id, workspace_id, source, title, body, evidence, severity, generator_model, approval_required, created_at
                      FROM signals
                      WHERE workspace_id = $1 AND source = $2
                      ORDER BY created_at DESC
@@ -83,7 +85,7 @@ impl SignalRepo {
             }
             (None, Some(sev)) => {
                 sqlx::query_as::<_, Signal>(
-                    "SELECT id, workspace_id, source, title, body, evidence, severity, generator_model, created_at
+                    "SELECT id, workspace_id, source, title, body, evidence, severity, generator_model, approval_required, created_at
                      FROM signals
                      WHERE workspace_id = $1 AND severity = $2
                      ORDER BY created_at DESC
@@ -98,7 +100,7 @@ impl SignalRepo {
             }
             (None, None) => {
                 sqlx::query_as::<_, Signal>(
-                    "SELECT id, workspace_id, source, title, body, evidence, severity, generator_model, created_at
+                    "SELECT id, workspace_id, source, title, body, evidence, severity, generator_model, approval_required, created_at
                      FROM signals
                      WHERE workspace_id = $1
                      ORDER BY created_at DESC

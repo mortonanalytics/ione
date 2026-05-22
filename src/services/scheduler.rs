@@ -123,7 +123,14 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     })
 }
 
-async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
+pub async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
+    if let Err(e) = crate::repos::WebhookEventRepo::new(state.pool.clone())
+        .cleanup_expired()
+        .await
+    {
+        warn!(error = %e, "webhook dedup cleanup failed");
+    }
+
     // List all workspaces
     let workspaces: Vec<(uuid::Uuid, uuid::Uuid)> =
         sqlx::query_as("SELECT id, org_id FROM workspaces WHERE closed_at IS NULL")
@@ -181,9 +188,60 @@ async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
             run_router_for_workspace(state, workspace_id, &mut progress.first_decision_emitted)
                 .await;
         }
+
+        // Delivery is deterministic and should still drain existing routing decisions
+        // when live model stages are disabled.
+        run_delivery_for_workspace(state, workspace_id).await;
     }
 
     Ok(())
+}
+
+pub async fn run_delivery_for_workspace(state: &AppState, workspace_id: uuid::Uuid) {
+    const DELIVERY_BUDGET: i64 = 20;
+
+    let routing_ids: Vec<uuid::Uuid> = match sqlx::query_scalar(
+        "SELECT rd.id
+         FROM routing_decisions rd
+         JOIN survivors sv ON sv.id = rd.survivor_id
+         JOIN signals sig ON sig.id = sv.signal_id
+         WHERE sig.workspace_id = $1
+           AND rd.target_kind <> 'feed'::routing_target
+           AND NOT EXISTS (
+             SELECT 1 FROM audit_events ae
+             WHERE ae.payload->>'routing_id' = rd.id::text
+               AND ae.verb IN ('delivered', 'delivery_failed', 'drafted', 'peer_delivered', 'peer_delivery_failed')
+           )
+         ORDER BY rd.created_at ASC
+         LIMIT $2",
+    )
+    .bind(workspace_id)
+    .bind(DELIVERY_BUDGET)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!(workspace_id = %workspace_id, error = %e, "delivery: failed to query pending routing decisions");
+            return;
+        }
+    };
+
+    for routing_id in routing_ids {
+        if let Err(e) = super::delivery::process_routing_decision(state, routing_id).await {
+            emit_error_stage(
+                &state.pool,
+                &state.pipeline_bus,
+                workspace_id,
+                None,
+                None,
+                "delivery",
+                &e,
+            )
+            .await;
+            warn!(workspace_id = %workspace_id, routing_id = %routing_id, error = %e, "delivery error");
+        }
+    }
 }
 
 #[derive(Default)]

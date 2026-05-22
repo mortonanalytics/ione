@@ -449,7 +449,7 @@ async fn scheduler_run_router_for_survivor() {
 
     // Call the test hook that simulates a canned model response (no Ollama needed).
     let decisions: Vec<ione::models::RoutingDecision> =
-        ione::services::router::classify_with_response(&pool, survivor_id, raw, "flagged")
+        ione::services::router::classify_with_response(&pool, survivor_id, raw, "flagged", false)
             .await
             .expect("classify_with_response must not return Err — router not implemented (expected failure)");
 
@@ -635,7 +635,7 @@ async fn classifier_model_stored_on_decision() {
 
     let raw = r#"{"targets":[{"kind":"feed","rationale":"model storage test"}]}"#;
 
-    ione::services::router::classify_with_response(&pool, survivor_id, raw, "routine")
+    ione::services::router::classify_with_response(&pool, survivor_id, raw, "routine", false)
         .await
         .expect("classify_with_response failed (expected failure — router not implemented)");
 

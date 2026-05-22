@@ -59,7 +59,7 @@ async fn spawn_app() -> (String, PgPool) {
 
 async fn truncate_all(pool: &PgPool) {
     sqlx::query(
-        "TRUNCATE workspace_peer_bindings, audit_events, approvals, artifacts,
+        "TRUNCATE webhook_events_seen, workspace_peer_bindings, audit_events, approvals, artifacts,
                   trust_issuers, peers, routing_decisions, survivors, signals,
                   stream_events, streams, connectors,
                   memberships, roles, messages, conversations,

@@ -268,7 +268,11 @@ pub async fn subscribe_peer(
     })))
 }
 
-async fn ensure_peer_in_org(state: &AppState, peer_id: Uuid, org_id: Uuid) -> Result<(), AppError> {
+pub(crate) async fn ensure_peer_in_org(
+    state: &AppState,
+    peer_id: Uuid,
+    org_id: Uuid,
+) -> Result<(), AppError> {
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM peers WHERE id = $1 AND org_id = $2)")
             .bind(peer_id)

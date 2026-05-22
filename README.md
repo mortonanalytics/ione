@@ -127,6 +127,7 @@ Unset `IONE_SKIP_LIVE` to exercise the live Ollama generator/critic/router paths
 | `IONE_OAUTH_ISSUER` | `http://{IONE_BIND}` | Absolute issuer URL used in the OAuth discovery document |
 | `IONE_OAUTH_STATIC_BEARER` | unset | CI/headless escape hatch for `/mcp/*` |
 | `IONE_TOKEN_KEY` | required | 32-byte base64 or hex key for encrypting peer OAuth tokens |
+| `IONE_WEBHOOK_SECRET_KEY` | required | 32-byte base64 or hex key for encrypting inbound webhook signing secrets |
 | `IONE_ADMIN_FUNNEL` | unset | Gates `/api/v1/admin/funnel`; returns 404 when unset |
 | `IONE_SKIP_LIVE` | unset | Skip external network / Ollama calls in tests |
 | `IONE_HTTP_UA` | `IONe/0.1 …` | User-Agent for outbound fetches |

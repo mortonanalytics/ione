@@ -29,7 +29,7 @@ async fn spawn_app() -> (String, PgPool) {
         .expect("migration failed");
 
     sqlx::query(
-        "TRUNCATE oauth_auth_codes, oauth_access_tokens, oauth_refresh_tokens, oauth_clients,
+        "TRUNCATE webhook_events_seen, oauth_auth_codes, oauth_access_tokens, oauth_refresh_tokens, oauth_clients,
                   funnel_events, activation_progress, activation_dismissals,
                   audit_events, approvals, artifacts,
                   trust_issuers, peers, routing_decisions, survivors, signals,

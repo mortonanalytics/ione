@@ -143,6 +143,7 @@ pub async fn evaluate_workspace(pool: &PgPool, workspace_id: Uuid) -> anyhow::Re
                         evidence,
                         severity.clone(),
                         None,
+                        false,
                     )
                     .await
                     .context("failed to insert rule signal")?;

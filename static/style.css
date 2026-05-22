@@ -2054,6 +2054,23 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   padding-top: 1rem;
 }
 
+.peer-webhook-provision {
+  margin-top: 1rem;
+  border-top: 1px solid var(--border, #d0d0d0);
+  padding-top: 1rem;
+}
+
+.peer-webhook-secret-panel {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.peer-webhook-secret-panel input {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
 .peer-bindings-header {
   align-items: center;
   display: flex;

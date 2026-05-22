@@ -49,7 +49,7 @@ async fn already_processed(pool: &sqlx::PgPool, routing_id: Uuid) -> anyhow::Res
         "SELECT EXISTS(
             SELECT 1 FROM audit_events
             WHERE payload->>'routing_id' = $1::text
-              AND verb IN ('delivered', 'delivery_failed', 'drafted')
+              AND verb IN ('delivered', 'delivery_failed', 'drafted', 'peer_delivered', 'peer_delivery_failed')
          )",
     )
     .bind(routing_id)
@@ -108,7 +108,7 @@ pub async fn process_routing_decision(state: &AppState, routing_id: Uuid) -> any
     let (
         target_kind,
         target_ref,
-        _signal_id,
+        signal_id,
         survivor_id,
         signal_title,
         signal_body,
@@ -143,6 +143,7 @@ pub async fn process_routing_decision(state: &AppState, routing_id: Uuid) -> any
                 state,
                 routing_id,
                 workspace_id,
+                signal_id,
                 survivor_id,
                 &target_ref,
                 &signal_title,
@@ -284,31 +285,56 @@ async fn process_draft(
     state: &AppState,
     routing_id: Uuid,
     workspace_id: Uuid,
+    signal_id: Uuid,
     survivor_id: Uuid,
     target_ref: &serde_json::Value,
     signal_title: &str,
     signal_body: &str,
 ) -> anyhow::Result<()> {
+    let signal_gate: Option<(bool, serde_json::Value)> = sqlx::query_as(
+        "SELECT approval_required, evidence
+         FROM signals
+         WHERE id = $1",
+    )
+    .bind(signal_id)
+    .fetch_optional(&state.pool)
+    .await
+    .context("failed to fetch signal approval gate")?;
+    let (approval_required, evidence) = signal_gate.unwrap_or((false, serde_json::json!({})));
+    let foreign_tenant_id = evidence
+        .get("foreign_tenant_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     // Phase 10: try auto-exec first. If a policy matches, skip the approval path
     // entirely — auto_exec writes its own audit trail (auto_authorized +
     // delivered/delivery_failed). Any non-match outcome falls through to the
     // standard draft→approval path.
-    match auto_exec::evaluate_and_invoke(state, survivor_id).await {
-        Ok(AutoExecOutcome::Delivered { .. }) | Ok(AutoExecOutcome::DeliveryFailed { .. }) => {
-            info!(
-                routing_id = %routing_id,
-                survivor_id = %survivor_id,
-                "auto_exec consumed the draft path; skipping approval creation"
-            );
-            return Ok(());
+    if !approval_required {
+        match auto_exec::evaluate_and_invoke(state, survivor_id).await {
+            Ok(AutoExecOutcome::Delivered { .. }) | Ok(AutoExecOutcome::DeliveryFailed { .. }) => {
+                info!(
+                    routing_id = %routing_id,
+                    survivor_id = %survivor_id,
+                    "auto_exec consumed the draft path; skipping approval creation"
+                );
+                return Ok(());
+            }
+            Ok(_) => {
+                // NoMatch, RateLimited, ConnectorMissing, TemplateError — fall through
+                // to the human-approval draft.
+            }
+            Err(e) => {
+                warn!(routing_id = %routing_id, error = %e, "auto_exec evaluation failed; falling back to draft");
+            }
         }
-        Ok(_) => {
-            // NoMatch, RateLimited, ConnectorMissing, TemplateError — fall through
-            // to the human-approval draft.
-        }
-        Err(e) => {
-            warn!(routing_id = %routing_id, error = %e, "auto_exec evaluation failed; falling back to draft");
-        }
+    } else {
+        info!(
+            routing_id = %routing_id,
+            signal_id = %signal_id,
+            "approval_required signal bypasses auto_exec"
+        );
     }
 
     let artifact_repo = ArtifactRepo::new(state.pool.clone());
@@ -335,12 +361,12 @@ async fn process_draft(
         .context("failed to insert artifact for draft")?;
 
     let _approval = approval_repo
-        .create_pending(artifact.id)
+        .create_pending_with_foreign_tenant(artifact.id, foreign_tenant_id.as_deref())
         .await
         .context("failed to create pending approval")?;
 
     audit_repo
-        .insert(
+        .insert_with_foreign_tenant(
             Some(workspace_id),
             actor.kind(),
             &actor.actor_ref(),
@@ -348,6 +374,7 @@ async fn process_draft(
             "artifact",
             Some(artifact.id),
             serde_json::json!({ "routing_id": routing_id }),
+            foreign_tenant_id.as_deref(),
         )
         .await
         .context("failed to write drafted audit event")?;

@@ -23,6 +23,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     ione::util::token_crypto::validate_env_key()?;
+    ione::util::token_crypto::validate_webhook_secret_key()?;
 
     let pool = ione::db::connect(&database_url).await?;
     ione::db::migrate(&pool).await?;

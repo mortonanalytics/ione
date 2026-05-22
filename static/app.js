@@ -2799,6 +2799,7 @@ function closePeerDialog() {
   currentPeerId = null;
   currentBindings = [];
   peerAuthorizeUrl = null;
+  resetWebhookProvision();
 }
 
 function showPeerStep(step) {
@@ -2901,6 +2902,7 @@ document.getElementById('peer-federate-confirm')?.addEventListener('click', asyn
       skipErrorToast: true,
     });
     track('peer_federation_activated', { toolCount: checked.length }, window.activeWorkspace?.id || null);
+    resetWebhookProvision();
     await loadBindings(currentPeerId);
     showPeerStep('done');
   } catch (err) {
@@ -2914,6 +2916,44 @@ document.getElementById('peer-federate-confirm')?.addEventListener('click', asyn
 document.getElementById('peer-bindings-refresh')?.addEventListener('click', () => {
   if (currentPeerId) loadBindings(currentPeerId);
 });
+
+document.getElementById('peer-webhook-provision-btn')?.addEventListener('click', async () => {
+  if (!currentPeerId) return;
+  const button = document.getElementById('peer-webhook-provision-btn');
+  const oldText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Provisioning...';
+  }
+  try {
+    const data = await apiFetch(`/api/v1/peers/${currentPeerId}/webhook/provision`, {
+      method: 'POST',
+      skipErrorToast: true,
+    });
+    const panel = document.getElementById('peer-webhook-secret-panel');
+    const urlInput = document.getElementById('peer-webhook-url');
+    const secretInput = document.getElementById('peer-webhook-secret');
+    if (urlInput) urlInput.value = data.webhookUrl || '';
+    if (secretInput) secretInput.value = data.signingSecret || '';
+    if (panel) panel.hidden = false;
+  } catch (err) {
+    showError('webhook_provision_failed', err.message || String(err), 'Check peer access and try again.');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = oldText || 'Provision webhook';
+    }
+  }
+});
+
+function resetWebhookProvision() {
+  const panel = document.getElementById('peer-webhook-secret-panel');
+  const urlInput = document.getElementById('peer-webhook-url');
+  const secretInput = document.getElementById('peer-webhook-secret');
+  if (panel) panel.hidden = true;
+  if (urlInput) urlInput.value = '';
+  if (secretInput) secretInput.value = '';
+}
 
 document.getElementById('binding-edit-close')?.addEventListener('click', () => {
   closeBindingDialog();

@@ -47,6 +47,22 @@ fn severity_fallback(severity: &str) -> RoutingTarget {
     }
 }
 
+fn forced_target(approval_required: bool, severity: &str) -> Option<RoutingTarget> {
+    if approval_required || matches!(severity, "flagged" | "command") {
+        Some(RoutingTarget::Draft)
+    } else {
+        None
+    }
+}
+
+fn forced_decision(reason: &str) -> Vec<Decision> {
+    vec![Decision {
+        target_kind: RoutingTarget::Draft,
+        target_ref: serde_json::json!({}),
+        rationale: reason.to_string(),
+    }]
+}
+
 // ── Parse a routing_target kind string ──────────────────────────────────────
 
 fn parse_kind(s: &str) -> Option<RoutingTarget> {
@@ -177,10 +193,15 @@ pub async fn classify_with_response(
     survivor_id: Uuid,
     raw: &str,
     severity: &str,
+    approval_required: bool,
 ) -> anyhow::Result<Vec<RoutingDecision>> {
     let model = std::env::var("OLLAMA_ROUTER_MODEL").unwrap_or_else(|_| "qwen3:8b".to_string());
 
-    let decisions = parse_response(raw, severity);
+    let decisions = if forced_target(approval_required, severity).is_some() {
+        forced_decision("policy floor requires human approval")
+    } else {
+        parse_response(raw, severity)
+    };
     let repo = RoutingDecisionRepo::new(pool.clone());
 
     let mut rows = Vec::with_capacity(decisions.len());
@@ -229,8 +250,8 @@ pub async fn classify_survivor(
     }
 
     // Fetch survivor + its signal + workspace info.
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT sig.title, sig.body, sig.severity::TEXT
+    let row: Option<(String, String, String, bool)> = sqlx::query_as(
+        "SELECT sig.title, sig.body, sig.severity::TEXT, sig.approval_required
          FROM survivors s
          JOIN signals sig ON sig.id = s.signal_id
          WHERE s.id = $1",
@@ -240,13 +261,27 @@ pub async fn classify_survivor(
     .await
     .context("failed to fetch survivor/signal for routing")?;
 
-    let (title, body, severity_str) = match row {
+    let (title, body, severity_str, approval_required) = match row {
         Some(r) => r,
         None => {
             warn!(survivor_id = %survivor_id, "classify_survivor: survivor not found");
             return Ok(vec![]);
         }
     };
+
+    if forced_target(approval_required, &severity_str).is_some() {
+        let row = repo
+            .insert(
+                survivor_id,
+                RoutingTarget::Draft,
+                serde_json::json!({}),
+                "policy:forced",
+                "policy floor requires human approval",
+            )
+            .await
+            .context("failed to insert forced draft routing_decision")?;
+        return Ok(vec![row]);
+    }
 
     // Fetch workspace roles for CoC context.
     let workspace_id: Option<Uuid> = sqlx::query_scalar(

@@ -15,6 +15,7 @@ pub mod router;
 pub mod rules;
 pub mod scheduler;
 pub mod session_service;
+pub mod webhook_ingress;
 pub mod workspace_peer_binding;
 
 pub use identity_audit_writer::{IdentityAuditWriter, IdentityEvent};

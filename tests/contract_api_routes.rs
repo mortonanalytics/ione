@@ -51,7 +51,7 @@ async fn spawn_app() -> (String, PgPool) {
 
 async fn truncate_all(pool: &PgPool) {
     sqlx::query(
-        "TRUNCATE audit_events, approvals, artifacts,
+        "TRUNCATE webhook_events_seen, audit_events, approvals, artifacts,
                   trust_issuers, peers, routing_decisions, survivors, signals,
                   stream_events, streams, connectors,
                   memberships, roles, messages, conversations,
@@ -135,6 +135,39 @@ async fn route_post_activation_events_registered() {
     assert!(
         route_registered(resp.status().as_u16()),
         "POST /api/v1/activation/events returned {} — route not registered",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn route_post_peer_webhook_provision_registered() {
+    let (base, _pool) = spawn_app().await;
+    let peer_id = Uuid::new_v4();
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/v1/peers/{}/webhook/provision",
+            base, peer_id
+        ))
+        .send()
+        .await
+        .expect("request failed");
+    assert_route_registered_or_handler_404(resp, "POST /api/v1/peers/:id/webhook/provision").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn route_post_webhook_peer_registered() {
+    let (base, _pool) = spawn_app().await;
+    let peer_id = Uuid::new_v4();
+    let resp = reqwest::Client::new()
+        .post(format!("{}/webhooks/peer/{}", base, peer_id))
+        .send()
+        .await
+        .expect("request failed");
+    assert!(
+        route_registered(resp.status().as_u16()),
+        "POST /webhooks/peer/:peer_id returned {} — route not registered",
         resp.status()
     );
 }

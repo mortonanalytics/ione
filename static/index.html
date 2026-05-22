@@ -384,6 +384,18 @@
 
     <section id="peer-federate-step-done" class="peer-federate-step" hidden>
       <p>Peer is active. The allowed tools are now callable from this IONe node.</p>
+      <section id="peer-webhook-provision" class="peer-webhook-provision">
+        <header class="peer-bindings-header">
+          <h3>Webhook ingress</h3>
+          <button type="button" id="peer-webhook-provision-btn">Provision webhook</button>
+        </header>
+        <div id="peer-webhook-secret-panel" class="peer-webhook-secret-panel" hidden>
+          <label for="peer-webhook-url">Receiver URL</label>
+          <input id="peer-webhook-url" type="text" readonly />
+          <label for="peer-webhook-secret">Signing secret</label>
+          <input id="peer-webhook-secret" type="text" readonly />
+        </div>
+      </section>
       <section id="peer-bindings" class="peer-bindings">
         <header class="peer-bindings-header">
           <h3>Workspace bindings</h3>

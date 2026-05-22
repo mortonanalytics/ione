@@ -1,4 +1,5 @@
 use axum::{
+    extract::DefaultBodyLimit,
     http::{header, HeaderValue, Method},
     middleware::{from_fn, from_fn_with_state},
     routing::{delete, get, post},
@@ -37,6 +38,7 @@ pub mod public_issuers;
 pub mod signals;
 pub mod survivors;
 pub mod telemetry;
+pub mod webhooks;
 pub mod well_known;
 pub mod workspaces;
 
@@ -64,6 +66,10 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/broker/callback", get(broker::callback))
         .route("/auth/logout", post(auth_routes::logout))
         .route("/api/v1/peers/callback", get(peers::callback))
+        .route(
+            "/webhooks/peer/:peer_id",
+            post(webhooks::receive_webhook).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .with_state(state.clone());
 
     // Routes that run through the auth middleware.
@@ -191,6 +197,10 @@ pub fn router(state: AppState) -> Router {
             get(peers::list_peers).post(peers::create_peer),
         )
         .route("/api/v1/peers/:id/manifest", get(peers::get_manifest))
+        .route(
+            "/api/v1/peers/:id/webhook/provision",
+            post(webhooks::provision_webhook),
+        )
         .route(
             "/api/v1/peers/:id/authorize",
             post(peers::authorize_allowlist),

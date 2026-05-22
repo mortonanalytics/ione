@@ -148,6 +148,7 @@ Observations:
             evidence,
             severity,
             Some(model.as_str()),
+            false,
         )
         .await
         .context("failed to insert generator signal")?;

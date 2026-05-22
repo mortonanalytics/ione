@@ -31,5 +31,6 @@ pub struct Signal {
     pub evidence: serde_json::Value,
     pub severity: Severity,
     pub generator_model: Option<String>,
+    pub approval_required: bool,
     pub created_at: DateTime<Utc>,
 }

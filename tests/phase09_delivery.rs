@@ -100,7 +100,7 @@ async fn spawn_app() -> (String, PgPool) {
     // If any table does not exist yet this fails — that is the expected
     // contract-red failure mode.
     sqlx::query(
-        "TRUNCATE audit_events, approvals, artifacts,
+        "TRUNCATE webhook_events_seen, audit_events, approvals, artifacts,
                   trust_issuers, routing_decisions, survivors, signals,
                   stream_events, streams, connectors,
                   memberships, roles, messages, conversations,

@@ -54,7 +54,7 @@ async fn spawn_app_with_auth_mode(auth_mode: &str) -> (String, PgPool) {
         .expect("migration failed");
 
     sqlx::query(
-        "TRUNCATE audit_events, approvals, artifacts,
+        "TRUNCATE webhook_events_seen, audit_events, approvals, artifacts,
                   trust_issuers, routing_decisions, survivors, signals,
                   stream_events, streams, connectors,
                   memberships, roles, messages, conversations,
