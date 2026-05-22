@@ -42,29 +42,40 @@ For apps already using a corporate SSO (USDA eAuth via SAML, etc.), the OAuth su
 
 Reference: IONe's own implementation at [src/oauth/](../../src/oauth/) — apps can mirror its shape.
 
-### 3. Webhook receiver registration + push events
+### 3. Signed webhook push events
 
 Apps that produce events (alerts, lifecycle changes, anomalies) push them to IONe rather than relying on poll. The flow:
 
-- IONe registers a webhook endpoint with the app at federation time: `POST {app}/api/webhooks/register` with `{target_url, signing_secret, event_types[]}`.
-- The app POSTs events to `target_url` with header `X-IONe-Signature: t=<unix_ts>,v1=<hmac_sha256_hex>`.
-- Signature payload: `f"{t}.{request_body}"`, key = `signing_secret`.
-- Body envelope:
+**Provisioning (v0.1 — manual).** The IONe operator calls `POST /api/v1/peers/:id/webhook/provision` and receives a one-time `signingSecret` plus the per-peer `webhookUrl` (`{ione}/webhooks/peer/{peer_id}`). The operator pastes both into the app's webhook config. The secret is shown once; re-provisioning rotates it. *Automatic registration (IONe POSTing `{app}/api/webhooks/register`) is deferred to v0.2 — do not implement an app-side registration endpoint for v0.1.*
+
+**Sending events.** The app POSTs each event to its `webhookUrl` with header:
+
+```
+X-IONe-Signature: t=<unix_ts>,v1=<hmac_sha256_hex>
+```
+
+- The peer is identified by the `peer_id` in the **URL path** (it selects which signing secret IONe verifies against); the HMAC is the authentication. The body's `peer_id` must equal the path `peer_id`.
+- Signature: `HMAC-SHA256` over the **bytes** `t.as_bytes() ++ b"." ++ raw_body_bytes`, key = `signingSecret`. Sign the raw bytes, not a re-serialized body.
+- Body envelope (snake_case):
 
 ```json
 {
   "id": "uuid-v7",
   "type": "alert.created | alert.acknowledged | task.completed | resource.updated | ...",
   "occurred_at": "2026-05-12T10:30:00Z",
-  "peer_id": "groundpulse-prod",
+  "peer_id": "<uuid matching the URL path>",
   "foreign_tenant_id": "tenant-abc",
+  "severity": "routine | flagged | command",
   "data": { ... },
   "approval_required": false
 }
 ```
 
-- `approval_required: true` routes the event through IONe's approval gateway; the operator must approve before any downstream IONe-side action.
-- Replay protection: IONe rejects events with `occurred_at` outside a ±5 minute window or duplicate `id`.
+- `severity` is a **top-level** field mapping to IONe's signal severity. Omitted/unknown ⇒ `routine`.
+- `approval_required: true` routes the event through IONe's approval gateway before any downstream IONe-side action. **IONe enforces its own policy floor: the flag may *escalate* but never *de-escalate*.** A `severity` of `flagged` or `command` is always gated (and bypasses auto-exec) regardless of the flag — apps cannot disable the human gate.
+- Constraints: body ≤ 256 KB (else 413); `type` matches `^[a-z0-9._/-]{1,255}$`; `foreign_tenant_id` ≤ 512 chars; `data` must be a JSON object. Events route only to **active** `workspace_peer_bindings` for `(peer_id, foreign_tenant_id)`; no matching binding ⇒ 400 (no event recorded — safe to retry once the operator adds the binding).
+- The peer must be `active`; a revoked/paused peer's events are rejected even with a valid signature.
+- Replay protection: reject `occurred_at` outside ±5 min of now; reject if header `t` and `occurred_at` differ by more than 30s; reject a duplicate `(id, peer_id)`. A duplicate returns `200 {"ok":true,"duplicate":true}` (idempotent ACK, not an error).
 
 Apps that don't produce push events skip this surface.
 
@@ -247,12 +258,12 @@ Listed to keep the contract surface bounded:
 
 The operator-facing flow, end-to-end:
 
-1. **App side** — bring up MCP server + OAuth 2.1 + webhook receiver registration endpoint + resource `whoami`. Generate a peer client registration.
+1. **App side** — bring up MCP server + OAuth 2.1 + resource `whoami`, and (if producing events) a webhook **sender** that signs per surface 3. Generate a peer client registration. *(No app-side webhook-registration endpoint is needed in v0.1 — provisioning is manual; see step 4.)*
 2. **IONe side** — operator goes to Peers tab → "Federate new peer" → enters peer name + MCP URL → IONe initiates OAuth dance → operator authorizes via the app's IdP.
 3. **Manifest fetch** — IONe pulls `tools/list` + `resources/list` + `roles://`. Operator reviews tool allowlist, approves.
-4. **Webhook registration** — IONe registers its webhook receiver URL with the app, exchanges signing secret.
+4. **Webhook provisioning (v0.1, manual)** — operator calls `POST /api/v1/peers/:id/webhook/provision`, then pastes the returned `signingSecret` + `webhookUrl` into the app's webhook config. (Automatic registration is a v0.2 enhancement.)
 5. **Workspace binding** — IONe writes `workspace_peer_bindings` row with foreign tenant from `whoami`.
-6. **Live** — app tools appear in chat / shell, push events arrive as signals, operator approvals are routed.
+6. **Live** — app tools appear in chat / shell, push events arrive as signals (gated per `approval_required` + severity), operator approvals are routed back to the peer via outbound MCP tool calls.
 
 ## Reference implementations
 
