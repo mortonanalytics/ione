@@ -1111,6 +1111,8 @@ let mapLayerItems = [];
 let mapLoadedWorkspaceId = null;
 const mapLayerIds = new Set();
 const mapSourceIds = new Set();
+const mapEventLayerIds = new Set();
+const mapEventSourceIds = new Set();
 const RESOURCE_URI_RE = /\b([a-z][a-z0-9+\-.]*:\/\/[^\s"<>]+)/gi;
 
 function initMapPanel() {
@@ -1134,49 +1136,56 @@ function initMapPanel() {
 async function updateMapLayers(workspaceId) {
   mapLoadedWorkspaceId = workspaceId;
   showMapState('loading');
-  try {
-    const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/map-layers`);
-    if (!activeWorkspace || activeWorkspace.id !== workspaceId) return;
-    mapLayerItems = data.items || [];
-    const failed = data.peersFailed || [];
-    const peersOk = data.peersOk || [];
+  const [rastersR, eventsR] = await Promise.allSettled([
+    apiFetch(`/api/v1/workspaces/${workspaceId}/map-layers`),
+    apiFetch(`/api/v1/workspaces/${workspaceId}/event-layers`),
+  ]);
+  if (!activeWorkspace || activeWorkspace.id !== workspaceId) return;
 
-    if (mapLayerItems.length === 0) {
-      destroyMap();
-      renderLayerControl([]);
-      if (failed.length > 0 && peersOk.length === 0) {
-        showMapError(`Could not reach any connected peer (${failed.length} failed). The data source may be temporarily unavailable.`);
-      } else {
-        showMapState('empty');
-      }
-      rehydrateTranscriptChips();
-      return;
-    }
+  mapLayerItems = rastersR.status === 'fulfilled' ? (rastersR.value.items || []) : [];
+  const peersFailed = rastersR.status === 'fulfilled' ? (rastersR.value.peersFailed || []) : [];
+  const rasterFail = rastersR.status === 'rejected';
+  const eventLayers = eventsR.status === 'fulfilled' ? (eventsR.value.layers || []) : [];
+  const eventFail = eventsR.status === 'rejected';
 
-    showMapState('canvas');
-    renderMapLayers(mapLayerItems);
-    renderLayerControl(mapLayerItems);
-    if (failed.length > 0) markFailedPeers(failed);
-    rehydrateTranscriptChips();
-  } catch (err) {
-    mapLoadedWorkspaceId = null;
+  if (mapLayerItems.length === 0 && eventLayers.length === 0) {
     destroyMap();
     renderLayerControl([]);
-    showMapError('Could not load map layers. ' + err.message);
+    if (rasterFail && eventFail) {
+      showMapError('Could not load map. The data sources may be temporarily unavailable.');
+    } else if (peersFailed.length > 0) {
+      showMapError(`Could not reach any connected peer (${peersFailed.length} failed). The data source may be temporarily unavailable.`);
+    } else {
+      showMapState('empty');
+    }
+    rehydrateTranscriptChips();
+    return;
   }
+
+  showMapState('canvas');
+  renderMapWithLayers({ rasters: mapLayerItems, eventLayers });
+  renderLayerControl([...mapLayerItems, ...eventLayers]);
+  if (peersFailed.length > 0) markFailedPeers(peersFailed);
+  // Phase 2 adds a visible event-layer error row; for now just surface to console.
+  if (eventFail) console.warn('event-layers fetch failed for workspace', workspaceId);
+  rehydrateTranscriptChips();
 }
 
-function renderMapLayers(items) {
+function prefersReducedMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function renderMapWithLayers({ rasters, eventLayers }) {
   if (typeof maplibregl === 'undefined') {
     showMapError('Map view requires MapLibre GL JS. Check your network connection.');
     return;
   }
 
-  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const attributions = items
-    .map((item) => item.meta.attribution)
-    .filter(Boolean)
-    .map(escapeHtml);
+  const reduceMotion = prefersReducedMotion();
+  const attributions = [
+    ...rasters.map((item) => item.meta.attribution),
+    ...eventLayers.map((layer) => layer.attribution),
+  ].filter(Boolean).map(escapeHtml);
 
   destroyMap();
   mapInstance = new maplibregl.Map({
@@ -1193,13 +1202,17 @@ function renderMapLayers(items) {
       compact: true,
     }));
   }
-  mapInstance.on('load', () => addLayersToMap(items, reduceMotion));
+  // Both raster and event layers are added inside one 'load' handler so we never
+  // call addSource before the style is ready. Event layers are added AFTER
+  // rasters so the circles draw on top.
+  mapInstance.on('load', () => {
+    addRasterLayersToMap(rasters);
+    addEventLayersToMap(eventLayers);
+    fitMapBounds(rasters, eventLayers, reduceMotion);
+  });
 }
 
-function addLayersToMap(items, reduceMotion) {
-  const bounds = new maplibregl.LngLatBounds();
-  let hasBounds = false;
-
+function addRasterLayersToMap(items) {
   items.forEach((item) => {
     const sourceId = sourceIdForItem(item);
     const layerId = layerIdForItem(item);
@@ -1213,7 +1226,59 @@ function addLayersToMap(items, reduceMotion) {
       source: sourceId,
       paint: { 'raster-opacity': item.meta.opacity ?? 1.0 },
     });
+  });
+}
 
+function addEventLayersToMap(eventLayers) {
+  eventLayers.forEach((layer) => {
+    const sourceId = `evt-src-${layer.streamId}`;
+    const layerId = `evt-lyr-${layer.streamId}`;
+    mapEventSourceIds.add(sourceId);
+    mapEventLayerIds.add(layerId);
+
+    mapInstance.addSource(sourceId, { type: 'geojson', data: layer.collection });
+    mapInstance.addLayer({
+      id: layerId,
+      type: 'circle',
+      source: sourceId,
+      paint: {
+        'circle-radius': interpolateSize(layer.style),
+        'circle-color': interpolateColor(layer.style),
+        'circle-stroke-color': '#fff',
+        'circle-stroke-width': 1,
+      },
+    });
+  });
+}
+
+function interpolateSize(style) {
+  if (style && style.sizeField && Array.isArray(style.sizeDomain) && Array.isArray(style.sizeRange)
+      && style.sizeDomain.length === 2 && style.sizeRange.length === 2) {
+    return ['interpolate', ['linear'], ['get', style.sizeField],
+      style.sizeDomain[0], style.sizeRange[0],
+      style.sizeDomain[1], style.sizeRange[1]];
+  }
+  return 6;
+}
+
+function interpolateColor(style) {
+  if (style && style.colorField && Array.isArray(style.colorDomain) && Array.isArray(style.colorRange)
+      && style.colorDomain.length === style.colorRange.length && style.colorDomain.length >= 2
+      && style.colorDomain.every((d) => typeof d === 'number')) {
+    const expr = ['interpolate', ['linear'], ['get', style.colorField]];
+    for (let i = 0; i < style.colorDomain.length; i += 1) {
+      expr.push(style.colorDomain[i], style.colorRange[i]);
+    }
+    return expr;
+  }
+  return '#e63946';
+}
+
+function fitMapBounds(rasters, eventLayers, reduceMotion) {
+  const bounds = new maplibregl.LngLatBounds();
+  let hasBounds = false;
+
+  rasters.forEach((item) => {
     if (Array.isArray(item.meta.bounds) && item.meta.bounds.length === 4) {
       const [w, s, e, n] = item.meta.bounds;
       bounds.extend([w, s]);
@@ -1222,8 +1287,19 @@ function addLayersToMap(items, reduceMotion) {
     }
   });
 
+  eventLayers.forEach((layer) => {
+    const features = (layer.collection && layer.collection.features) || [];
+    features.forEach((f) => {
+      const coords = f.geometry && f.geometry.coordinates;
+      if (Array.isArray(coords) && coords.length === 2) {
+        bounds.extend(coords);
+        hasBounds = true;
+      }
+    });
+  });
+
   if (hasBounds && !bounds.isEmpty()) {
-    mapInstance.fitBounds(bounds, { padding: 20, animate: !reduceMotion });
+    mapInstance.fitBounds(bounds, { padding: 40, maxZoom: 9, animate: !reduceMotion });
   }
 }
 
@@ -1231,6 +1307,10 @@ function renderLayerControl(items) {
   const list = document.getElementById('map-layer-list');
   list.innerHTML = '';
   items.forEach((item) => {
+    if (item.streamId !== undefined) {
+      renderEventLayerRow(list, item);
+      return;
+    }
     const layerId = layerIdForItem(item);
     const label = item.meta.layerName || item.name || item.uri;
     const li = document.createElement('li');
@@ -1264,6 +1344,27 @@ function renderLayerControl(items) {
   });
 }
 
+function renderEventLayerRow(list, layer) {
+  const layerId = `evt-lyr-${layer.streamId}`;
+  const label = layer.streamName || 'Events';
+  const li = document.createElement('li');
+  li.className = 'layer-row layer-row--event';
+  li.dataset.streamId = layer.streamId;
+  li.innerHTML = `
+    <label>
+      <input type="checkbox" checked data-layer-id="${escapeHtml(layerId)}" />
+      <span>${escapeHtml(label)}</span>
+    </label>
+    <span class="layer-type-badge">Events</span>
+  `;
+  li.querySelector('input[type=checkbox]').addEventListener('change', (e) => {
+    if (mapInstance && mapInstance.getLayer(layerId)) {
+      mapInstance.setLayoutProperty(layerId, 'visibility', e.target.checked ? 'visible' : 'none');
+    }
+  });
+  list.appendChild(li);
+}
+
 function setupMapKeyboard() {
   const canvas = document.getElementById('map-canvas');
   canvas.addEventListener('keydown', (e) => {
@@ -1295,13 +1396,15 @@ function showMapError(msg) {
 
 function clearMapLayers() {
   if (!mapInstance) return;
-  Array.from(mapLayerIds).reverse().forEach((id) => {
+  [...Array.from(mapEventLayerIds), ...Array.from(mapLayerIds)].reverse().forEach((id) => {
     if (mapInstance.getLayer(id)) mapInstance.removeLayer(id);
     mapLayerIds.delete(id);
+    mapEventLayerIds.delete(id);
   });
-  Array.from(mapSourceIds).reverse().forEach((id) => {
+  [...Array.from(mapEventSourceIds), ...Array.from(mapSourceIds)].reverse().forEach((id) => {
     if (mapInstance.getSource(id)) mapInstance.removeSource(id);
     mapSourceIds.delete(id);
+    mapEventSourceIds.delete(id);
   });
 }
 

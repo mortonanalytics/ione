@@ -2,6 +2,7 @@ pub mod auto_exec;
 pub mod claim_mapper;
 pub mod critic;
 pub mod delivery;
+pub mod event_layers;
 pub mod funnel;
 pub mod generator;
 pub mod identity_audit_writer;

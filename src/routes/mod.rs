@@ -25,6 +25,7 @@ pub mod broker;
 pub mod chat;
 pub mod connectors;
 pub mod conversations;
+pub mod event_layers;
 pub mod feed;
 pub mod health;
 pub mod map_layers;
@@ -107,6 +108,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/map-layers",
             get(map_layers::list_map_layers),
+        )
+        .route(
+            "/api/v1/workspaces/:id/event-layers",
+            get(event_layers::list_event_layers),
         )
         .route(
             "/api/v1/workspaces/:id/close",
