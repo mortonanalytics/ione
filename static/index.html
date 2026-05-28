@@ -118,10 +118,26 @@
         </div>
         <div id="map-canvas-container" hidden>
           <div id="map-canvas" role="application" tabindex="0" aria-label="Interactive map"></div>
+          <section id="event-layer-legend" aria-label="Event layer legend" hidden></section>
           <div id="map-layer-control" role="region" aria-label="Map layers">
             <button id="map-layer-toggle" type="button" aria-expanded="true" aria-controls="map-layer-list">Layers</button>
+            <div id="event-layer-status" aria-live="polite"></div>
             <ul id="map-layer-list" role="list"></ul>
           </div>
+          <details id="event-list-disclosure" hidden>
+            <summary>Events</summary>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Event</th>
+                  <th scope="col">Observed</th>
+                  <th scope="col">Layer</th>
+                  <th scope="col">Map</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </details>
         </div>
       </div>
 

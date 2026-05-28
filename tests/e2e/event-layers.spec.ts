@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 
 // Event-layer e2e gate (AC-8 from md/design/event-point-layer.md). Stubs both
 // /map-layers and /event-layers at the network layer, so no DB seeding is needed
@@ -144,4 +145,101 @@ test("event-only workspace renders circles when there are no raster layers", asy
   });
 
   await expect(page.locator("#map-layer-list .layer-row--event")).toContainText("Earthquakes");
+});
+
+test("raster stays alive when event layers fail and error row has retry", async ({ page }) => {
+  await page.unroute("**/api/v1/workspaces/*/event-layers*");
+  await page.route("**/api/v1/workspaces/*/event-layers*", (route) =>
+    route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) })
+  );
+
+  await page.goto("/");
+  await page.locator("#tab-map").click();
+
+  await expect(page.locator("#map-canvas-container")).toBeVisible();
+  await page.waitForFunction(() => {
+    const m = (window as any).mapInstance;
+    return !!m && m.getStyle().layers.some((l: any) => l.type === "raster");
+  });
+  const errorRow = page.locator("#map-layer-list .layer-row--error").filter({ hasText: "Event layers unavailable" });
+  await expect(errorRow).toBeVisible();
+  await expect(errorRow).not.toHaveAttribute("role", /.+/);
+  await expect(errorRow.locator("button")).toHaveText("Retry");
+  await expect(page.locator("#event-layer-status")).toHaveText("Event layers could not be loaded.");
+});
+
+test("event list supports keyboard popup flow and map panel has no axe violations", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("#tab-map").click();
+
+  await page.waitForFunction(() => {
+    const m = (window as any).mapInstance;
+    return !!m && m.getStyle().layers.some((l: any) => l.type === "circle");
+  });
+
+  await expect(page.locator("#event-layer-legend")).toBeVisible();
+  await expect(page.locator("#event-list-disclosure")).toBeVisible();
+  await page.locator("#event-list-disclosure summary").click();
+  const showButton = page.locator("#event-list-disclosure button", { hasText: "Show on map" }).first();
+  await showButton.focus();
+  await page.keyboard.press("Enter");
+
+  const closeButton = page.locator(".event-popup-close");
+  await expect(closeButton).toBeVisible();
+  await expect(closeButton).toBeFocused();
+
+  const accessibilityScanResults = await new AxeBuilder({ page })
+    .include("#panel-map")
+    .analyze();
+  expect(accessibilityScanResults.violations).toEqual([]);
+});
+
+test("empty states distinguish no geo streams, quiet geo streams, and event-only data", async ({ page }) => {
+  await page.route("**/api/v1/workspaces/*/map-layers*", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], peersOk: [], peersFailed: [] }),
+    })
+  );
+  await page.unroute("**/api/v1/workspaces/*/event-layers*");
+  await page.route("**/api/v1/workspaces/*/event-layers*", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ layers: [], streamsOk: [], streamsFailed: [], truncated: false, queriedAt: "2026-05-28T00:00:00Z" }),
+    })
+  );
+
+  await page.goto("/");
+  await page.locator("#tab-map").click();
+  await expect(page.locator("#map-empty")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("No events in last 24 h.");
+
+  await page.unroute("**/api/v1/workspaces/*/event-layers*");
+  await page.route("**/api/v1/workspaces/*/event-layers*", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...eventBody(),
+        layers: [{ ...eventBody().layers[0], collection: { type: "FeatureCollection", features: [] } }],
+      }),
+    })
+  );
+  await page.reload();
+  await page.locator("#tab-map").click();
+  await expect(page.locator("#map-canvas-container")).toBeVisible();
+  await expect(page.locator("#event-layer-status")).toHaveText("No events in last 24 h.");
+
+  await page.unroute("**/api/v1/workspaces/*/event-layers*");
+  await page.route("**/api/v1/workspaces/*/event-layers*", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify(eventBody()) })
+  );
+  await page.reload();
+  await page.locator("#tab-map").click();
+  await expect(page.locator("#map-canvas-container")).toBeVisible();
+  await page.waitForFunction(() => {
+    const m = (window as any).mapInstance;
+    if (!m) return false;
+    const layers = m.getStyle().layers;
+    return layers.some((l: any) => l.type === "circle") && !layers.some((l: any) => l.type === "raster");
+  });
 });

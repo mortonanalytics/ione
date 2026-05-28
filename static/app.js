@@ -1108,7 +1108,9 @@ tabApprovals.addEventListener('keydown', (e) => {
 
 let mapInstance = null;
 let mapLayerItems = [];
+let mapEventLayers = [];
 let mapLoadedWorkspaceId = null;
+let mapPopup = null;
 const mapLayerIds = new Set();
 const mapSourceIds = new Set();
 const mapEventLayerIds = new Set();
@@ -1138,19 +1140,24 @@ async function updateMapLayers(workspaceId) {
   showMapState('loading');
   const [rastersR, eventsR] = await Promise.allSettled([
     apiFetch(`/api/v1/workspaces/${workspaceId}/map-layers`),
-    apiFetch(`/api/v1/workspaces/${workspaceId}/event-layers`),
+    apiFetch(`/api/v1/workspaces/${workspaceId}/event-layers`, { skipErrorToast: true }),
   ]);
   if (!activeWorkspace || activeWorkspace.id !== workspaceId) return;
 
   mapLayerItems = rastersR.status === 'fulfilled' ? (rastersR.value.items || []) : [];
   const peersFailed = rastersR.status === 'fulfilled' ? (rastersR.value.peersFailed || []) : [];
   const rasterFail = rastersR.status === 'rejected';
-  const eventLayers = eventsR.status === 'fulfilled' ? (eventsR.value.layers || []) : [];
+  mapEventLayers = eventsR.status === 'fulfilled' ? (eventsR.value.layers || []) : [];
+  const streamsFailed = eventsR.status === 'fulfilled' ? (eventsR.value.streamsFailed || []) : [];
+  const eventsTruncated = eventsR.status === 'fulfilled' ? !!eventsR.value.truncated : false;
+  const eventsQueriedAt = eventsR.status === 'fulfilled' ? eventsR.value.queriedAt : null;
   const eventFail = eventsR.status === 'rejected';
 
-  if (mapLayerItems.length === 0 && eventLayers.length === 0) {
+  if (mapLayerItems.length === 0 && mapEventLayers.length === 0) {
     destroyMap();
-    renderLayerControl([]);
+    renderLayerControl([], { eventFail, streamsFailed, eventsTruncated });
+    renderLegend([], null);
+    renderEventList([]);
     if (rasterFail && eventFail) {
       showMapError('Could not load map. The data sources may be temporarily unavailable.');
     } else if (peersFailed.length > 0) {
@@ -1163,11 +1170,11 @@ async function updateMapLayers(workspaceId) {
   }
 
   showMapState('canvas');
-  renderMapWithLayers({ rasters: mapLayerItems, eventLayers });
-  renderLayerControl([...mapLayerItems, ...eventLayers]);
+  renderMapWithLayers({ rasters: mapLayerItems, eventLayers: mapEventLayers });
+  renderLayerControl([...mapLayerItems, ...mapEventLayers], { eventFail, streamsFailed, eventsTruncated });
+  renderLegend(mapEventLayers, eventsQueriedAt);
+  renderEventList(mapEventLayers, { truncated: eventsTruncated });
   if (peersFailed.length > 0) markFailedPeers(peersFailed);
-  // Phase 2 adds a visible event-layer error row; for now just surface to console.
-  if (eventFail) console.warn('event-layers fetch failed for workspace', workspaceId);
   rehydrateTranscriptChips();
 }
 
@@ -1248,6 +1255,14 @@ function addEventLayersToMap(eventLayers) {
         'circle-stroke-width': 1,
       },
     });
+    mapInstance.on('click', layerId, (e) => {
+      const r = 22;
+      const bbox = [[e.point.x - r, e.point.y - r], [e.point.x + r, e.point.y + r]];
+      const features = mapInstance.queryRenderedFeatures(bbox, { layers: [layerId] });
+      if (features[0]) openEventPopup(features[0], false);
+    });
+    mapInstance.on('mouseenter', layerId, () => { mapInstance.getCanvas().style.cursor = 'pointer'; });
+    mapInstance.on('mouseleave', layerId, () => { mapInstance.getCanvas().style.cursor = ''; });
   });
 }
 
@@ -1303,9 +1318,13 @@ function fitMapBounds(rasters, eventLayers, reduceMotion) {
   }
 }
 
-function renderLayerControl(items) {
+function renderLayerControl(items, eventState = {}) {
   const list = document.getElementById('map-layer-list');
+  const status = document.getElementById('event-layer-status');
   list.innerHTML = '';
+  if (status) {
+    status.textContent = eventStatusText(eventState);
+  }
   items.forEach((item) => {
     if (item.streamId !== undefined) {
       renderEventLayerRow(list, item);
@@ -1342,6 +1361,8 @@ function renderLayerControl(items) {
     }
     list.appendChild(li);
   });
+  if (eventState.eventFail) renderEventLayerError(list);
+  (eventState.streamsFailed || []).forEach((stream) => renderStreamErrorRow(list, stream));
 }
 
 function renderEventLayerRow(list, layer) {
@@ -1361,8 +1382,197 @@ function renderEventLayerRow(list, layer) {
     if (mapInstance && mapInstance.getLayer(layerId)) {
       mapInstance.setLayoutProperty(layerId, 'visibility', e.target.checked ? 'visible' : 'none');
     }
+    const visible = visibleEventLayers();
+    renderLegend(visible, null);
+    renderEventList(visible);
   });
   list.appendChild(li);
+}
+
+function eventStatusText(eventState) {
+  if (eventState.eventFail) return 'Event layers could not be loaded.';
+  if ((eventState.streamsFailed || []).length > 0) return `${eventState.streamsFailed.length} event stream could not be rendered.`;
+  const featureCount = countEventFeatures(mapEventLayers);
+  if (mapEventLayers.length > 0 && featureCount === 0) return 'No events in last 24 h.';
+  if (eventState.eventsTruncated) return `Showing ${featureCount} of more than ${featureCount} events - narrow your window.`;
+  return '';
+}
+
+function renderEventLayerError(list) {
+  const li = document.createElement('li');
+  li.className = 'layer-row layer-row--error';
+  li.innerHTML = `
+    <span class="layer-error-icon" aria-hidden="true"></span>
+    <span>Event layers unavailable</span>
+    <button type="button" class="layer-row-retry">Retry</button>
+  `;
+  li.querySelector('button').addEventListener('click', () => {
+    if (activeWorkspace) updateMapLayers(activeWorkspace.id);
+  });
+  list.appendChild(li);
+}
+
+function renderStreamErrorRow(list, stream) {
+  const li = document.createElement('li');
+  li.className = 'layer-row layer-row--error';
+  li.dataset.streamId = stream.streamId;
+  li.innerHTML = `
+    <span class="layer-error-icon" aria-hidden="true"></span>
+    <span>${escapeHtml(stream.streamName || 'Event stream')} config error</span>
+  `;
+  li.title = stream.error || 'Event stream config error';
+  list.appendChild(li);
+}
+
+function visibleEventLayers() {
+  return mapEventLayers.filter((layer) => {
+    const checkbox = document.querySelector(`#map-layer-list .layer-row--event[data-stream-id="${CSS.escape(layer.streamId)}"] input[type=checkbox]`);
+    return !checkbox || checkbox.checked;
+  });
+}
+
+function countEventFeatures(layers) {
+  return layers.reduce((sum, layer) => sum + (((layer.collection || {}).features || []).length), 0);
+}
+
+function renderLegend(layers, queriedAt) {
+  const legend = document.getElementById('event-layer-legend');
+  if (!legend) return;
+  const visible = layers.filter((layer) => ((layer.collection || {}).features || []).length > 0);
+  if (visible.length === 0) {
+    legend.hidden = true;
+    legend.innerHTML = '';
+    return;
+  }
+  legend.hidden = false;
+  const footer = queriedAt ? `Last 24 h · Updated ${escapeHtml(formatRelativeTime(queriedAt))}` : 'Last 24 h';
+  legend.innerHTML = visible.map((layer) => {
+    const style = layer.style || {};
+    warnLowContrastColor(style.colorRange);
+    const colorStops = Array.isArray(style.colorRange) && style.colorRange.length >= 2 ? style.colorRange : ['#f5d76e', '#d9534f'];
+    const gradient = `linear-gradient(90deg, ${colorStops.map(escapeHtml).join(', ')})`;
+    const minSize = Array.isArray(style.sizeRange) ? Number(style.sizeRange[0]) : 6;
+    const maxSize = Array.isArray(style.sizeRange) ? Number(style.sizeRange[1]) : 12;
+    return `
+      <div class="event-legend-layer">
+        <div class="event-legend-title">${escapeHtml(layer.streamName || 'Events')}</div>
+        <div class="event-legend-ramp" aria-hidden="true">
+          <span style="width:${Math.max(6, minSize)}px;height:${Math.max(6, minSize)}px"></span>
+          <span style="width:${Math.max(8, maxSize)}px;height:${Math.max(8, maxSize)}px"></span>
+        </div>
+        <div class="event-legend-gradient" style="background:${gradient}" aria-hidden="true"></div>
+        ${layer.attribution ? `<div class="event-legend-attribution">${escapeHtml(layer.attribution)}</div>` : ''}
+      </div>
+    `;
+  }).join('') + `<div class="event-legend-footer">${footer}</div>`;
+}
+
+function renderEventList(layers, opts = {}) {
+  const details = document.getElementById('event-list-disclosure');
+  if (!details) return;
+  const tbody = details.querySelector('tbody');
+  const summary = details.querySelector('summary');
+  const rows = [];
+  layers.forEach((layer) => {
+    ((layer.collection || {}).features || []).forEach((feature) => rows.push({ layer, feature }));
+  });
+  if (rows.length === 0) {
+    details.hidden = true;
+    tbody.innerHTML = '';
+    return;
+  }
+  const capped = rows.slice(0, 100);
+  details.hidden = false;
+  summary.textContent = opts.truncated || rows.length > 100
+    ? `Events (${capped.length}+ shown)`
+    : `Events (${capped.length})`;
+  tbody.innerHTML = '';
+  capped.forEach(({ layer, feature }, index) => {
+    const props = feature.properties || {};
+    const label = eventFeatureLabel(feature, layer);
+    const observed = props._observed_at || '';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(label)}</td>
+      <td>${escapeHtml(observed ? formatDateTime(observed) : '')}</td>
+      <td>${escapeHtml(layer.streamName || 'Events')}</td>
+      <td><button type="button" data-event-index="${index}">Show on map</button></td>
+    `;
+    tr.querySelector('button').addEventListener('click', () => showEventOnMap(feature, layer));
+    tbody.appendChild(tr);
+  });
+}
+
+function eventFeatureLabel(feature, layer) {
+  const props = feature.properties || {};
+  const labelField = layer.style && layer.style.labelField;
+  if (labelField && props[labelField] != null) return String(props[labelField]);
+  const firstKey = Object.keys(props).find((k) => !k.startsWith('_'));
+  if (firstKey) return `${firstKey}: ${props[firstKey]}`;
+  return props._event_id || layer.streamName || 'Event';
+}
+
+function showEventOnMap(feature, layer) {
+  const coords = feature.geometry && feature.geometry.coordinates;
+  if (!mapInstance || !Array.isArray(coords) || coords.length !== 2) return;
+  mapInstance.flyTo({ center: coords, zoom: Math.max(mapInstance.getZoom(), 8), essential: !prefersReducedMotion() });
+  openEventPopup({ ...feature, layer: { id: `evt-lyr-${layer.streamId}` } }, true);
+}
+
+function openEventPopup(feature, triggeredByKeyboard) {
+  const coords = feature.geometry && feature.geometry.coordinates;
+  if (!mapInstance || !Array.isArray(coords) || coords.length !== 2) return;
+  const props = feature.properties || {};
+  const content = document.createElement('div');
+  content.className = 'event-popup';
+  const rows = Object.entries(props)
+    .filter(([key]) => !key.startsWith('_'))
+    .slice(0, 6)
+    .map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`)
+    .join('');
+  content.innerHTML = `
+    <button type="button" class="event-popup-close" aria-label="Close popup">×</button>
+    <dl>${rows || '<dt>Event</dt><dd>Point event</dd>'}</dl>
+  `;
+  if (mapPopup) mapPopup.remove();
+  mapPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: true, offset: 16 })
+    .setLngLat(coords)
+    .setDOMContent(content)
+    .addTo(mapInstance);
+  content.querySelector('button').addEventListener('click', () => mapPopup?.remove());
+  if (triggeredByKeyboard) {
+    setTimeout(() => content.querySelector('button').focus(), 0);
+  }
+}
+
+function warnLowContrastColor(colorRange) {
+  if (!Array.isArray(colorRange) || colorRange.length === 0) return;
+  const contrast = contrastAgainstWhite(colorRange[0]);
+  if (contrast != null && contrast < 3) {
+    console.warn('event layer legend color has low contrast against white', colorRange[0]);
+  }
+}
+
+function contrastAgainstWhite(color) {
+  const rgb = parseHexColor(color);
+  if (!rgb) return null;
+  const lum = relativeLuminance(rgb);
+  return (1.05) / (lum + 0.05);
+}
+
+function parseHexColor(color) {
+  const m = String(color).trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!m) return null;
+  const hex = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
+  return [0, 2, 4].map((idx) => parseInt(hex.slice(idx, idx + 2), 16));
+}
+
+function relativeLuminance([r, g, b]) {
+  const vals = [r, g, b].map((v) => {
+    const n = v / 255;
+    return n <= 0.03928 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4;
+  });
+  return (0.2126 * vals[0]) + (0.7152 * vals[1]) + (0.0722 * vals[2]);
 }
 
 function setupMapKeyboard() {

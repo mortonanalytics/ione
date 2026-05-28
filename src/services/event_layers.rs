@@ -2,15 +2,18 @@
 //!
 //! Input comes from two repo queries (catalog of geo-mapped streams + their
 //! events); the projection here is I/O-free so it is unit-testable without a DB.
-//! Phase 1 ships the happy path plus minimal `view_config` parsing (required
-//! pointers). The full 6-step validator lands in Phase 2.
+//! `view_config` is validated before projection so bad stream config is reported
+//! through `streamsFailed` without failing the whole endpoint.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
+
+use crate::util::json_pointer::validate_json_pointer;
 
 /// Catalog row (repo Q1): every geo-mapped stream in the workspace, whether or
 /// not it has events in the window. Drives which layers appear in the response.
@@ -77,8 +80,6 @@ struct PropertyField {
     name: String,
 }
 
-/// Parsed, ready-to-project `view_config`. Phase 1 validates only the required
-/// pointers; Phase 2 introduces the full validator.
 struct CompiledConfig {
     lon_pointer: String,
     lat_pointer: String,
@@ -89,40 +90,61 @@ struct CompiledConfig {
 
 impl CompiledConfig {
     fn parse(vc: &Value) -> Result<CompiledConfig, String> {
-        let lon_pointer = require_pointer(vc, "lon_pointer")?;
-        let lat_pointer = require_pointer(vc, "lat_pointer")?;
+        let lon_pointer = optional_string(vc, "lon_pointer")
+            .ok_or(ViewConfigError::MissingLonPointer)
+            .map_err(|e| e.to_string())?;
+        validate_pointer_field("lon_pointer", lon_pointer).map_err(|e| e.to_string())?;
+        if lon_pointer.is_empty() {
+            return Err(ViewConfigError::MissingLonPointer.to_string());
+        }
+
+        let lat_pointer = optional_string(vc, "lat_pointer")
+            .ok_or(ViewConfigError::MissingLatPointer)
+            .map_err(|e| e.to_string())?;
+        validate_pointer_field("lat_pointer", lat_pointer).map_err(|e| e.to_string())?;
+        if lat_pointer.is_empty() {
+            return Err(ViewConfigError::MissingLatPointer.to_string());
+        }
 
         let property_fields = match vc.get("property_fields") {
             None | Some(Value::Null) => Vec::new(),
             Some(Value::Array(items)) => items
                 .iter()
-                .map(|item| {
-                    let pointer = item
-                        .get("pointer")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| "view_config.property_fields[].pointer missing".to_string())?
-                        .to_string();
+                .enumerate()
+                .map(|(idx, item)| {
+                    let pointer = item.get("pointer").and_then(Value::as_str).ok_or_else(|| {
+                        ViewConfigError::PropertyPointerMissing { index: idx }.to_string()
+                    })?;
+                    validate_pointer_field("property_fields.pointer", pointer)
+                        .map_err(|e| e.to_string())?;
                     let name = item
                         .get("name")
                         .and_then(Value::as_str)
                         .ok_or_else(|| "view_config.property_fields[].name missing".to_string())?
                         .to_string();
-                    Ok(PropertyField { pointer, name })
+                    Ok(PropertyField {
+                        pointer: pointer.to_string(),
+                        name,
+                    })
                 })
                 .collect::<Result<Vec<_>, String>>()?,
             Some(_) => return Err("view_config.property_fields must be an array".to_string()),
         };
+        validate_property_names(&property_fields).map_err(|e| e.to_string())?;
 
         let attribution = vc
             .get("attribution")
             .and_then(Value::as_str)
             .map(str::to_string);
 
-        let style = vc.get("style").and_then(parse_style);
+        let style = match vc.get("style") {
+            None | Some(Value::Null) => None,
+            Some(style) => Some(parse_style(style, &property_fields).map_err(|e| e.to_string())?),
+        };
 
         Ok(CompiledConfig {
-            lon_pointer,
-            lat_pointer,
+            lon_pointer: lon_pointer.to_string(),
+            lat_pointer: lat_pointer.to_string(),
             property_fields,
             attribution,
             style,
@@ -130,29 +152,231 @@ impl CompiledConfig {
     }
 }
 
-fn require_pointer(vc: &Value, key: &str) -> Result<String, String> {
-    match vc.get(key).and_then(Value::as_str) {
-        Some(s) if !s.is_empty() => Ok(s.to_string()),
-        _ => Err(format!("view_config.{key} missing")),
+#[derive(Debug)]
+enum ViewConfigError {
+    InvalidPointer { field: String, reason: String },
+    MissingLonPointer,
+    MissingLatPointer,
+    PropertyPointerMissing { index: usize },
+    InvalidPropertyName { name: String },
+    DuplicatePropertyName { name: String },
+    ReservedPropertyName { name: String },
+    PartialStyleTriple { which: &'static str },
+    InvalidStyleShape { field: &'static str },
+    UnknownStyleFieldReference { field: &'static str, name: String },
+}
+
+impl fmt::Display for ViewConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ViewConfigError::InvalidPointer { field, reason } => {
+                write!(f, "view_config.{field} invalid JSON Pointer: {reason}")
+            }
+            ViewConfigError::MissingLonPointer => write!(f, "view_config.lon_pointer missing"),
+            ViewConfigError::MissingLatPointer => write!(f, "view_config.lat_pointer missing"),
+            ViewConfigError::PropertyPointerMissing { index } => write!(
+                f,
+                "view_config.property_fields[{index}].pointer missing"
+            ),
+            ViewConfigError::InvalidPropertyName { name } => write!(
+                f,
+                "view_config.property_fields[].name invalid: {name}"
+            ),
+            ViewConfigError::DuplicatePropertyName { name } => write!(
+                f,
+                "view_config.property_fields[].name duplicate: {name}"
+            ),
+            ViewConfigError::ReservedPropertyName { name } => write!(
+                f,
+                "view_config.property_fields[].name collides with reserved key: {name}"
+            ),
+            ViewConfigError::PartialStyleTriple { which } => write!(
+                f,
+                "view_config.style {which} style triple must include field, domain, and range together"
+            ),
+            ViewConfigError::InvalidStyleShape { field } => {
+                write!(f, "view_config.style.{field} has invalid shape")
+            }
+            ViewConfigError::UnknownStyleFieldReference { field, name } => write!(
+                f,
+                "view_config.style.{field} references unknown property field: {name}"
+            ),
+        }
     }
 }
 
-fn parse_style(style: &Value) -> Option<LayerStyle> {
-    let obj = style.as_object()?;
-    let str_field = |k: &str| obj.get(k).and_then(Value::as_str).map(str::to_string);
-    let val_field = |k: &str| match obj.get(k) {
+fn optional_string<'a>(vc: &'a Value, key: &str) -> Option<&'a str> {
+    vc.get(key).and_then(Value::as_str)
+}
+
+fn validate_pointer_field(field: &str, ptr: &str) -> Result<(), ViewConfigError> {
+    validate_json_pointer(ptr).map_err(|err| ViewConfigError::InvalidPointer {
+        field: field.to_string(),
+        reason: err.to_string(),
+    })
+}
+
+fn validate_property_names(fields: &[PropertyField]) -> Result<(), ViewConfigError> {
+    let mut seen = HashSet::new();
+    for field in fields {
+        if field.name == "_event_id" || field.name == "_observed_at" {
+            return Err(ViewConfigError::ReservedPropertyName {
+                name: field.name.clone(),
+            });
+        }
+        if !is_valid_property_name(&field.name) {
+            return Err(ViewConfigError::InvalidPropertyName {
+                name: field.name.clone(),
+            });
+        }
+        if !seen.insert(field.name.clone()) {
+            return Err(ViewConfigError::DuplicatePropertyName {
+                name: field.name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_property_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn parse_style(
+    style: &Value,
+    property_fields: &[PropertyField],
+) -> Result<LayerStyle, ViewConfigError> {
+    let obj = style
+        .as_object()
+        .ok_or(ViewConfigError::InvalidStyleShape { field: "style" })?;
+    validate_style_triple(obj, "size", "size_field", "size_domain", "size_range")?;
+    validate_style_triple(obj, "color", "color_field", "color_domain", "color_range")?;
+
+    let size_field = style_string(obj, "size_field")?;
+    let color_field = style_string(obj, "color_field")?;
+    let label_field = style_string(obj, "label_field")?;
+    let size_domain = style_value(obj, "size_domain");
+    let size_range = style_value(obj, "size_range");
+    let color_domain = style_value(obj, "color_domain");
+    let color_range = style_value(obj, "color_range");
+
+    if size_domain.is_some() && !is_number_pair(size_domain.as_ref().unwrap()) {
+        return Err(ViewConfigError::InvalidStyleShape {
+            field: "size_domain",
+        });
+    }
+    if size_range.is_some() && !is_number_pair(size_range.as_ref().unwrap()) {
+        return Err(ViewConfigError::InvalidStyleShape {
+            field: "size_range",
+        });
+    }
+    if let (Some(domain), Some(range)) = (&color_domain, &color_range) {
+        let Some(domain) = domain.as_array() else {
+            return Err(ViewConfigError::InvalidStyleShape {
+                field: "color_domain",
+            });
+        };
+        let Some(range) = range.as_array() else {
+            return Err(ViewConfigError::InvalidStyleShape {
+                field: "color_range",
+            });
+        };
+        if domain.len() < 2 || domain.len() != range.len() || !domain.iter().all(Value::is_number) {
+            return Err(ViewConfigError::InvalidStyleShape {
+                field: "color_domain",
+            });
+        }
+        if !range.iter().all(Value::is_string) {
+            return Err(ViewConfigError::InvalidStyleShape {
+                field: "color_range",
+            });
+        }
+    }
+
+    validate_style_field_reference("size_field", size_field.as_deref(), property_fields)?;
+    validate_style_field_reference("color_field", color_field.as_deref(), property_fields)?;
+    validate_style_field_reference("label_field", label_field.as_deref(), property_fields)?;
+
+    Ok(LayerStyle {
+        size_field,
+        size_domain,
+        size_range,
+        color_field,
+        color_domain,
+        color_range,
+        label_field,
+    })
+}
+
+fn validate_style_triple(
+    obj: &Map<String, Value>,
+    which: &'static str,
+    field_key: &'static str,
+    domain_key: &'static str,
+    range_key: &'static str,
+) -> Result<(), ViewConfigError> {
+    let present = [
+        obj.get(field_key).is_some_and(|v| !v.is_null()),
+        obj.get(domain_key).is_some_and(|v| !v.is_null()),
+        obj.get(range_key).is_some_and(|v| !v.is_null()),
+    ]
+    .into_iter()
+    .filter(|v| *v)
+    .count();
+    if present == 0 || present == 3 {
+        Ok(())
+    } else {
+        Err(ViewConfigError::PartialStyleTriple { which })
+    }
+}
+
+fn style_string(
+    obj: &Map<String, Value>,
+    key: &'static str,
+) -> Result<Option<String>, ViewConfigError> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(ViewConfigError::InvalidStyleShape { field: key }),
+    }
+}
+
+fn style_value(obj: &Map<String, Value>, key: &str) -> Option<Value> {
+    match obj.get(key) {
         None | Some(Value::Null) => None,
         Some(v) => Some(v.clone()),
-    };
-    Some(LayerStyle {
-        size_field: str_field("size_field"),
-        size_domain: val_field("size_domain"),
-        size_range: val_field("size_range"),
-        color_field: str_field("color_field"),
-        color_domain: val_field("color_domain"),
-        color_range: val_field("color_range"),
-        label_field: str_field("label_field"),
-    })
+    }
+}
+
+fn is_number_pair(value: &Value) -> bool {
+    matches!(value.as_array(), Some(items) if items.len() == 2 && items.iter().all(Value::is_number))
+}
+
+fn validate_style_field_reference(
+    field: &'static str,
+    name: Option<&str>,
+    property_fields: &[PropertyField],
+) -> Result<(), ViewConfigError> {
+    if let Some(name) = name {
+        if !property_fields
+            .iter()
+            .any(|candidate| candidate.name == name)
+        {
+            return Err(ViewConfigError::UnknownStyleFieldReference {
+                field,
+                name: name.to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Project catalog + events into the wire response. Pure (no I/O).

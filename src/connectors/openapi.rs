@@ -10,7 +10,7 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::models::ConnectorKind;
+use crate::{models::ConnectorKind, util::json_pointer::validate_json_pointer};
 
 use super::{ConnectorImpl, PollResult, StreamDescriptor, StreamEventInput};
 
@@ -529,25 +529,6 @@ impl StreamConfig {
 
         Ok(())
     }
-}
-
-fn validate_json_pointer(ptr: &str) -> anyhow::Result<()> {
-    if ptr.is_empty() {
-        return Ok(());
-    }
-    if !ptr.starts_with('/') {
-        bail!("JSON Pointer must be empty or start with '/'");
-    }
-    let mut chars = ptr.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '~' {
-            match chars.next() {
-                Some('0') | Some('1') => {}
-                _ => bail!("JSON Pointer contains invalid '~' escape"),
-            }
-        }
-    }
-    Ok(())
 }
 
 fn parse_method(method: &str) -> anyhow::Result<Method> {
