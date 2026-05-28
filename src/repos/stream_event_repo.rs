@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::StreamEvent;
+use crate::services::event_layers::{GeoEventRow, GeoStreamRow};
 
 pub struct StreamEventRepo {
     pub(crate) pool: PgPool,
@@ -55,6 +56,63 @@ impl StreamEventRepo {
         .fetch_all(&self.pool)
         .await
         .context("failed to list recent stream events")
+    }
+
+    /// Fetch the catalog of geo-mapped streams in a workspace (Q1) and the
+    /// events for those streams within the window (Q2, `LIMIT + 1` for
+    /// unambiguous truncation detection). Both queries are org-scoped via the
+    /// same workspace∈org fence used by `/map-layers`.
+    pub async fn fetch_geo_events(
+        &self,
+        workspace_id: Uuid,
+        org_id: Uuid,
+        stream_id: Option<Uuid>,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+        limit: i64,
+    ) -> anyhow::Result<(Vec<GeoStreamRow>, Vec<GeoEventRow>)> {
+        let catalog = sqlx::query_as::<_, GeoStreamRow>(
+            "SELECT s.id AS stream_id, s.name AS stream_name, s.view_config
+             FROM streams s
+             JOIN connectors c ON c.id = s.connector_id
+             WHERE c.workspace_id = $1
+               AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = $1 AND w.org_id = $2)
+               AND s.view_config IS NOT NULL
+               AND ($3::uuid IS NULL OR s.id = $3)
+             ORDER BY s.name",
+        )
+        .bind(workspace_id)
+        .bind(org_id)
+        .bind(stream_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to fetch geo-mapped stream catalog")?;
+
+        let events = sqlx::query_as::<_, GeoEventRow>(
+            "SELECT se.id AS event_id, se.stream_id, se.payload, se.observed_at
+             FROM stream_events se
+             JOIN streams s    ON s.id = se.stream_id
+             JOIN connectors c ON c.id = s.connector_id
+             WHERE c.workspace_id = $1
+               AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = $1 AND w.org_id = $2)
+               AND s.view_config IS NOT NULL
+               AND ($3::uuid IS NULL OR s.id = $3)
+               AND se.observed_at >= $4
+               AND se.observed_at <= $5
+             ORDER BY se.observed_at DESC
+             LIMIT $6 + 1",
+        )
+        .bind(workspace_id)
+        .bind(org_id)
+        .bind(stream_id)
+        .bind(since)
+        .bind(until)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to fetch geo events")?;
+
+        Ok((catalog, events))
     }
 
     pub async fn latest_observed_at(

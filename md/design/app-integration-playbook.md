@@ -133,6 +133,14 @@ Map field requirements:
 
 Apps may include resources with no `ione_view`; IONe surfaces them as opaque references with name + description only.
 
+### 4b. IONe-ingested event layers (no peer-side contract)
+
+Beyond peer-published map resources, IONe's map shell also renders **events it ingested directly** via its own connectors (FIRMS, IRWIN, NWS, the planned generic `geojson_poll`) into the `stream_events` table. These public feeds have no peer app to publish them as MCP resources, so they are rendered by an IONe-side projection — declarative per-stream config in `streams.view_config` (RFC 6901 JSON Pointers) maps payload fields to geometry and style, served as GeoJSON Point FeatureCollections from `GET /api/v1/workspaces/:id/event-layers`.
+
+This surface adds **no contract obligation on peer apps**. Peer apps remain free to publish vector resources via `resources/list` (`vector_url` is reserved for that future v2 capability); the event-layer surface and the peer-published-vector surface are complementary, not competing.
+
+Full design: [`event-point-layer.md`](event-point-layer.md).
+
 ### 5. Context slice resource (`slice://`)
 
 To keep token usage bounded as IONe federates to many peers, every app publishes a single compact **context slice** instead of forcing IONe to ship full `tools/list` output into the chat model's system prompt. The slice describes the peer's capabilities in ~100–500 tokens; IONe expands tool schemas on demand only after the model selects a tool.

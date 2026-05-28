@@ -178,6 +178,24 @@ impl ConnectorImpl for FirmsConnector {
                 "type": "object",
                 "description": "NASA FIRMS VIIRS_SNPP_NRT hotspot detections"
             }),
+            // FIRMS CSV columns are lowercase (latitude/longitude/bright_ti4/frp).
+            view_config: Some(json!({
+                "lon_pointer": "/longitude",
+                "lat_pointer": "/latitude",
+                "property_fields": [
+                    { "pointer": "/bright_ti4", "name": "bright_ti4" },
+                    { "pointer": "/frp", "name": "frp" }
+                ],
+                "attribution": "NASA FIRMS (VIIRS_SNPP_NRT)",
+                "style": {
+                    "size_field": "frp",
+                    "size_domain": [0.0, 100.0],
+                    "size_range": [4.0, 20.0],
+                    "color_field": "bright_ti4",
+                    "color_domain": [300.0, 350.0, 400.0],
+                    "color_range": ["#f5d76e", "#d9534f", "#3a0ca3"]
+                }
+            })),
         }])
     }
 
@@ -198,5 +216,32 @@ impl ConnectorImpl for FirmsConnector {
             events,
             next_cursor: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn view_config_pointers_resolve_against_fixture() {
+        let conn = FirmsConnector::from_config(&json!({})).expect("demo connector");
+        let descriptors = conn.default_streams().await.expect("default_streams");
+        let vc = descriptors[0]
+            .view_config
+            .as_ref()
+            .expect("FIRMS stream must declare view_config");
+
+        let events = conn.poll("hotspots", None).await.expect("poll fixture");
+        let payload = &events.events[0].payload;
+
+        for key in ["lon_pointer", "lat_pointer"] {
+            let pointer = vc[key].as_str().expect("pointer is a string");
+            let resolved = payload.pointer(pointer).and_then(serde_json::Value::as_f64);
+            assert!(
+                resolved.is_some(),
+                "{key} ({pointer}) must resolve to a number in a real FIRMS payload"
+            );
+        }
     }
 }

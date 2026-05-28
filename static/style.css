@@ -824,6 +824,17 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   background: var(--color-error-bg, #fff1f1);
 }
 
+.layer-type-badge {
+  flex: 0 0 auto;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: var(--font-size-xs, 0.7rem);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted, #555);
+}
+
 .layer-row--highlight {
   background: var(--color-primary-light, #e8f0fa);
   transition: background 0.2s;

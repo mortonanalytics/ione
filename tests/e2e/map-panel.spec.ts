@@ -42,9 +42,16 @@ async function stubMapLayers(
   );
 }
 
-// Keep the suite hermetic: never hit a real tile server.
+// Keep the suite hermetic: never hit a real tile server, and stub the parallel
+// /event-layers fetch (these specs assert raster behavior only).
 test.beforeEach(async ({ page }) => {
   await page.route("**tile.openstreetmap.org/**", (route) => route.abort());
+  await page.route("**/api/v1/workspaces/*/event-layers*", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ layers: [], streamsOk: [], streamsFailed: [], truncated: false, queriedAt: "2026-05-28T00:00:00Z" }),
+    })
+  );
 });
 
 async function openMap(page: Page) {

@@ -110,6 +110,7 @@ impl ConnectorImpl for McpClientConnector {
             .map(|name| StreamDescriptor {
                 name: name.to_string(),
                 schema: json!({ "type": "object", "description": format!("Results from peer tool {}", name) }),
+                view_config: None,
             })
             .collect();
 

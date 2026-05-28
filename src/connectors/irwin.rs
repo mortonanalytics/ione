@@ -151,6 +151,25 @@ impl ConnectorImpl for IrwinConnector {
                 "type": "object",
                 "description": "IRWIN wildland fire incident records"
             }),
+            // IRWIN fields are Pascal-case (Latitude/Longitude/IncidentSize/...).
+            view_config: Some(json!({
+                "lon_pointer": "/Longitude",
+                "lat_pointer": "/Latitude",
+                "property_fields": [
+                    { "pointer": "/IncidentName", "name": "IncidentName" },
+                    { "pointer": "/IncidentSize", "name": "IncidentSize" },
+                    { "pointer": "/PercentContained", "name": "PercentContained" }
+                ],
+                "attribution": "IRWIN (Integrated Reporting of Wildland-fire Information)",
+                "style": {
+                    "size_field": "IncidentSize",
+                    "size_domain": [0.0, 5000.0],
+                    "size_range": [4.0, 22.0],
+                    "color_field": "PercentContained",
+                    "color_domain": [0.0, 50.0, 100.0],
+                    "color_range": ["#d9534f", "#f5d76e", "#5cb85c"]
+                }
+            })),
         }])
     }
 
@@ -189,5 +208,33 @@ impl ConnectorImpl for IrwinConnector {
             events,
             next_cursor: max_ts,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn view_config_pointers_resolve_against_fixture() {
+        let conn =
+            IrwinConnector::from_config(&json!({ "base_url": "mock://irwin" })).expect("mock conn");
+        let descriptors = conn.default_streams().await.expect("default_streams");
+        let vc = descriptors[0]
+            .view_config
+            .as_ref()
+            .expect("IRWIN stream must declare view_config");
+
+        let events = conn.poll("incidents", None).await.expect("poll fixture");
+        let payload = &events.events[0].payload;
+
+        for key in ["lon_pointer", "lat_pointer"] {
+            let pointer = vc[key].as_str().expect("pointer is a string");
+            let resolved = payload.pointer(pointer).and_then(serde_json::Value::as_f64);
+            assert!(
+                resolved.is_some(),
+                "{key} ({pointer}) must resolve to a number in a real IRWIN payload"
+            );
+        }
     }
 }

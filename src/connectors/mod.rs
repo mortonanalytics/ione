@@ -16,6 +16,9 @@ use crate::models::{Connector, ConnectorKind};
 pub struct StreamDescriptor {
     pub name: String,
     pub schema: serde_json::Value,
+    /// Optional geometry + style mapping persisted to `streams.view_config`.
+    /// `None` means the stream is not rendered as a point layer.
+    pub view_config: Option<serde_json::Value>,
 }
 
 /// Input for inserting a new stream event.

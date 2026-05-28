@@ -111,6 +111,8 @@ struct StreamConfig {
     schema: Option<Value>,
     #[serde(default)]
     max_items: Option<usize>,
+    #[serde(default)]
+    view_config: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -391,6 +393,7 @@ impl ConnectorImpl for OpenApiConnector {
                 Ok(StreamDescriptor {
                     name: stream.name.clone(),
                     schema,
+                    view_config: stream.view_config.clone(),
                 })
             })
             .collect()
@@ -947,6 +950,7 @@ mod tests {
             cursor: CursorConfig::default(),
             schema: None,
             max_items: None,
+            view_config: None,
         };
         let body = json!({
             "items": [

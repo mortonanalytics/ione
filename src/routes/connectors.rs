@@ -180,7 +180,7 @@ async fn do_create_connector(
     let mut streams = Vec::new();
     for sd in default_streams {
         let stream = stream_repo
-            .upsert_named(connector.id, &sd.name, sd.schema)
+            .upsert_named(connector.id, &sd.name, sd.schema, sd.view_config)
             .await
             .map_err(AppError::Internal)?;
         streams.push(stream);
