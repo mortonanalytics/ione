@@ -101,3 +101,47 @@ test("raster and event circles coexist with correct z-order and Events badge", a
   await expect(eventRow).toContainText("Earthquakes");
   await expect(eventRow.locator(".layer-type-badge")).toHaveText("Events");
 });
+
+test("unchecking the event row hides the circle layer", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("#tab-map").click();
+
+  await page.waitForFunction(() => {
+    const m = (window as any).mapInstance;
+    return !!m && m.getStyle().layers.some((l: any) => l.type === "circle");
+  });
+
+  await page.locator("#map-layer-list .layer-row--event input[type=checkbox]").uncheck();
+  const vis = await page.evaluate(() => {
+    const m = (window as any).mapInstance;
+    const lyr = m.getStyle().layers.find((l: any) => l.type === "circle");
+    return m.getLayoutProperty(lyr.id, "visibility");
+  });
+  expect(vis).toBe("none");
+});
+
+test("event-only workspace renders circles when there are no raster layers", async ({ page }) => {
+  // Override the raster stub with an empty body — this is the Phase 1 goal:
+  // the map must render even when /map-layers returns nothing.
+  await page.route("**/api/v1/workspaces/*/map-layers*", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], peersOk: [], peersFailed: [] }),
+    })
+  );
+
+  await page.goto("/");
+  await page.locator("#tab-map").click();
+
+  await expect(page.locator("#map-canvas-container")).toBeVisible();
+  await expect(page.locator("#map-empty")).toBeHidden();
+
+  await page.waitForFunction(() => {
+    const m = (window as any).mapInstance;
+    if (!m) return false;
+    const layers = m.getStyle().layers;
+    return layers.some((l: any) => l.type === "circle") && !layers.some((l: any) => l.type === "raster");
+  });
+
+  await expect(page.locator("#map-layer-list .layer-row--event")).toContainText("Earthquakes");
+});
