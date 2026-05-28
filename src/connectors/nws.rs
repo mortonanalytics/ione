@@ -45,6 +45,7 @@ impl ConnectorImpl for NwsConnector {
                 "type": "object",
                 "description": "NWS latest observations"
             }),
+            view_config: None,
         }])
     }
 

@@ -98,6 +98,7 @@ impl ConnectorImpl for FsS3Connector {
                 "type": "object",
                 "description": "Files or S3 objects"
             }),
+            view_config: None,
         }])
     }
 

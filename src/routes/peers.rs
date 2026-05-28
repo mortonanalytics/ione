@@ -339,7 +339,7 @@ async fn first_poll_connector(pool: &sqlx::PgPool, connector_id: Uuid) -> anyhow
 
     for desc in descriptors {
         let stream = stream_repo
-            .upsert_named(connector_id, &desc.name, desc.schema)
+            .upsert_named(connector_id, &desc.name, desc.schema, desc.view_config)
             .await?;
 
         let poll_result = impl_.poll(&desc.name, None).await?;

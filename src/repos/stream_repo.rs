@@ -18,17 +18,19 @@ impl StreamRepo {
         connector_id: Uuid,
         name: &str,
         schema: serde_json::Value,
+        view_config: Option<serde_json::Value>,
     ) -> anyhow::Result<Stream> {
         sqlx::query_as::<_, Stream>(
-            "INSERT INTO streams (connector_id, name, schema)
-             VALUES ($1, $2, $3)
+            "INSERT INTO streams (connector_id, name, schema, view_config)
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT (connector_id, name)
-             DO UPDATE SET schema = EXCLUDED.schema
+             DO UPDATE SET schema = EXCLUDED.schema, view_config = EXCLUDED.view_config
              RETURNING id, connector_id, name, schema, created_at",
         )
         .bind(connector_id)
         .bind(name)
         .bind(schema)
+        .bind(view_config)
         .fetch_one(&self.pool)
         .await
         .context("failed to upsert stream")
