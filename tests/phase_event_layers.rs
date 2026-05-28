@@ -133,10 +133,18 @@ async fn event_layers_projects_features_without_leakage() {
     let body: Value = resp.json().await.expect("json");
 
     assert_eq!(body["layers"].as_array().unwrap().len(), 1);
-    let features = body["layers"][0]["collection"]["features"].as_array().unwrap();
+    let features = body["layers"][0]["collection"]["features"]
+        .as_array()
+        .unwrap();
     assert_eq!(features.len(), 3);
     assert_eq!(features[0]["geometry"]["type"], "Point");
-    assert_eq!(features[0]["geometry"]["coordinates"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        features[0]["geometry"]["coordinates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 
     let props = features[0]["properties"].as_object().unwrap();
     let mut keys: Vec<&String> = props.keys().collect();

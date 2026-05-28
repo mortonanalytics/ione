@@ -100,9 +100,7 @@ impl CompiledConfig {
                     let pointer = item
                         .get("pointer")
                         .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            "view_config.property_fields[].pointer missing".to_string()
-                        })?
+                        .ok_or_else(|| "view_config.property_fields[].pointer missing".to_string())?
                         .to_string();
                     let name = item
                         .get("name")
@@ -204,7 +202,11 @@ pub fn project_event_layers(
 
                     let mut properties = Map::new();
                     for field in &cfg.property_fields {
-                        let resolved = ev.payload.pointer(&field.pointer).cloned().unwrap_or(Value::Null);
+                        let resolved = ev
+                            .payload
+                            .pointer(&field.pointer)
+                            .cloned()
+                            .unwrap_or(Value::Null);
                         properties.insert(field.name.clone(), resolved);
                     }
                     // Always-injected keys, written last (field-leakage guard: only
@@ -306,7 +308,10 @@ mod tests {
         assert_eq!(resp.layers.len(), 1);
         assert_eq!(resp.streams_ok, vec![stream_id]);
         assert_eq!(
-            resp.layers[0].collection["features"].as_array().unwrap().len(),
+            resp.layers[0].collection["features"]
+                .as_array()
+                .unwrap()
+                .len(),
             0
         );
     }
@@ -348,7 +353,10 @@ mod tests {
 
         assert!(resp.truncated);
         assert_eq!(
-            resp.layers[0].collection["features"].as_array().unwrap().len(),
+            resp.layers[0].collection["features"]
+                .as_array()
+                .unwrap()
+                .len(),
             2
         );
     }
@@ -375,7 +383,10 @@ mod tests {
 
         assert_eq!(resp.layers[0].features_skipped, 1);
         assert_eq!(
-            resp.layers[0].collection["features"].as_array().unwrap().len(),
+            resp.layers[0].collection["features"]
+                .as_array()
+                .unwrap()
+                .len(),
             1
         );
     }

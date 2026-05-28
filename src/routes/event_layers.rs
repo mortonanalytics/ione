@@ -48,9 +48,7 @@ pub async fn list_event_layers(
         .unwrap_or_else(|| queried_at - Duration::hours(DEFAULT_WINDOW_HOURS));
 
     if since > until {
-        return Err(AppError::BadRequest(
-            "since must be <= until".to_string(),
-        ));
+        return Err(AppError::BadRequest("since must be <= until".to_string()));
     }
     if until - since > Duration::days(MAX_WINDOW_DAYS) {
         return Err(AppError::BadRequest(format!(
@@ -66,7 +64,14 @@ pub async fn list_event_layers(
     }
 
     let (catalog, events) = StreamEventRepo::new(state.pool.clone())
-        .fetch_geo_events(workspace_id, ctx.org_id, query.stream_id, since, until, limit)
+        .fetch_geo_events(
+            workspace_id,
+            ctx.org_id,
+            query.stream_id,
+            since,
+            until,
+            limit,
+        )
         .await
         .map_err(AppError::Internal)?;
 
