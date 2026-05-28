@@ -6,6 +6,10 @@
       "env": {
         "PLAYWRIGHT_MCP_CAPS": "vision"
       }
+    },
+    "myio": {
+      "command": "node",
+      "args": ["/Users/ryanemorton/Documents/GitHub/myIO/mcp/server.mjs"]
     }
   }
 }

@@ -574,6 +574,11 @@ function setActiveWorkspace(ws) {
     updateMapLayers(ws.id);
   }
 
+  resetChartPanel();
+  if (activeTab === 'chart') {
+    updateChartPanel(ws.id);
+  }
+
   // If the signals tab is active, reload signals for the new workspace.
   if (activeTab === 'signals') {
     loadSignals();
@@ -997,18 +1002,20 @@ newWorkspaceForm.addEventListener('submit', async (e) => {
 
 const tabChat          = document.getElementById('tab-chat');
 const tabMap           = document.getElementById('tab-map');
+const tabChart         = document.getElementById('tab-chart');
 const tabConnectors    = document.getElementById('tab-connectors');
 const tabSignals       = document.getElementById('tab-signals');
 const tabSurvivors     = document.getElementById('tab-survivors');
 const tabApprovals     = document.getElementById('tab-approvals');
 const panelChat        = document.getElementById('panel-chat');
 const panelMap         = document.getElementById('panel-map');
+const panelChart       = document.getElementById('panel-chart');
 const panelConnectors  = document.getElementById('panel-connectors');
 const panelSignals     = document.getElementById('panel-signals');
 const panelSurvivors   = document.getElementById('panel-survivors');
 const panelApprovals   = document.getElementById('panel-approvals');
 
-let activeTab = 'chat'; // 'chat' | 'map' | 'connectors' | 'signals' | 'survivors' | 'approvals'
+let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'connectors' | 'signals' | 'survivors' | 'approvals'
 
 function switchTab(name) {
   // Stop auto-refresh when leaving a polling tab.
@@ -1031,6 +1038,10 @@ function switchTab(name) {
   tabMap.setAttribute('aria-selected', String(name === 'map'));
   tabMap.classList.toggle('tab--active', name === 'map');
   panelMap.hidden = name !== 'map';
+
+  tabChart.setAttribute('aria-selected', String(name === 'chart'));
+  tabChart.classList.toggle('tab--active', name === 'chart');
+  panelChart.hidden = name !== 'chart';
 
   tabConnectors.setAttribute('aria-selected', String(name === 'connectors'));
   tabConnectors.classList.toggle('tab--active', name === 'connectors');
@@ -1058,6 +1069,10 @@ function switchTab(name) {
     window.mapInstance.resize();
   }
 
+  if (name === 'chart' && activeWorkspace && chartLoadedWorkspaceId !== activeWorkspace.id) {
+    updateChartPanel(activeWorkspace.id);
+  }
+
   if (name === 'signals' && activeWorkspace) {
     loadSignals();
     startSignalsPolling();
@@ -1076,6 +1091,7 @@ function switchTab(name) {
 
 tabChat.addEventListener('click', () => switchTab('chat'));
 tabMap.addEventListener('click', () => switchTab('map'));
+tabChart.addEventListener('click', () => switchTab('chart'));
 tabConnectors.addEventListener('click', () => switchTab('connectors'));
 tabSignals.addEventListener('click', () => switchTab('signals'));
 tabSurvivors.addEventListener('click', () => switchTab('survivors'));
@@ -1086,10 +1102,14 @@ tabChat.addEventListener('keydown', (e) => {
 });
 tabMap.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); tabChat.focus(); tabChat.click(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabChart.focus(); tabChart.click(); }
+});
+tabChart.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabMap.focus(); tabMap.click(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
 });
 tabConnectors.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabMap.focus(); tabMap.click(); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabChart.focus(); tabChart.click(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); tabSignals.focus(); tabSignals.click(); }
 });
 tabSignals.addEventListener('keydown', (e) => {
@@ -1714,6 +1734,258 @@ function highlightMapLayer(uri) {
 }
 
 initMapPanel();
+
+/* ── Chart panel ── */
+
+let chartLoadedWorkspaceId = null;
+let chartItems = [];
+let chartInstance = null;
+
+function initChartPanel() {
+  document.getElementById('chart-connect-peer')?.addEventListener('click', () => switchTab('connectors'));
+  document.getElementById('chart-error-retry')?.addEventListener('click', () => {
+    if (activeWorkspace) updateChartPanel(activeWorkspace.id);
+  });
+  document.getElementById('chart-refresh-btn')?.addEventListener('click', () => {
+    if (activeWorkspace) updateChartPanel(activeWorkspace.id);
+  });
+}
+
+function resetChartPanel() {
+  chartLoadedWorkspaceId = null;
+  chartItems = [];
+  destroyChart();
+  const list = document.getElementById('chart-list');
+  if (list) list.innerHTML = '';
+  const status = document.getElementById('chart-status');
+  if (status) status.textContent = '';
+  const title = document.getElementById('chart-title');
+  if (title) title.textContent = 'Select a chart';
+  const source = document.getElementById('chart-source-label');
+  if (source) source.textContent = '';
+  renderChartTable([]);
+  hideChartRenderError();
+}
+
+async function updateChartPanel(workspaceId) {
+  chartLoadedWorkspaceId = workspaceId;
+  showChartState('loading');
+  hideChartRenderError();
+  let data;
+  try {
+    data = await apiFetch(`/api/v1/workspaces/${workspaceId}/chart-panels`, { skipErrorToast: true });
+  } catch (_err) {
+    if (!activeWorkspace || activeWorkspace.id !== workspaceId || chartLoadedWorkspaceId !== workspaceId) return;
+    showChartError('Could not load charts. The data sources may be temporarily unavailable.');
+    return;
+  }
+  if (!activeWorkspace || activeWorkspace.id !== workspaceId || chartLoadedWorkspaceId !== workspaceId) return;
+
+  const ioneCharts = data.ioneCharts || data.ione_charts || [];
+  const peerCharts = data.peerCharts || data.peer_charts || [];
+  const peerErrors = data.peerErrors || data.peer_errors || [];
+  chartItems = [...ioneCharts, ...peerCharts];
+  renderChartList(chartItems, peerErrors);
+
+  if (chartItems.length === 0) {
+    showChartState(peerErrors.length > 0 ? 'error' : 'empty');
+    if (peerErrors.length > 0) {
+      document.getElementById('chart-error-msg').textContent = `Could not reach any connected peer (${peerErrors.length} failed).`;
+    }
+    return;
+  }
+
+  showChartState('workspace');
+}
+
+function renderChartList(items, peerErrors) {
+  const list = document.getElementById('chart-list');
+  const status = document.getElementById('chart-status');
+  list.innerHTML = '';
+  status.textContent = peerErrors.length > 0
+    ? `${peerErrors.length} peer could not be reached.`
+    : '';
+
+  items.forEach((item) => {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chart-row';
+    button.dataset.chartId = item.id;
+    button.innerHTML = `
+      <span class="chart-row-title">${escapeHtml(item.name || 'Chart')}</span>
+      <span class="chart-row-meta">${escapeHtml(chartMeta(item))}</span>
+    `;
+    button.addEventListener('click', () => selectChart(item));
+    li.appendChild(button);
+    list.appendChild(li);
+  });
+
+  peerErrors.forEach((peer) => {
+    const li = document.createElement('li');
+    li.className = 'chart-row--error';
+    li.title = peer.error || 'Peer unavailable';
+    li.innerHTML = `<span class="layer-error-icon" aria-hidden="true"></span><span>${escapeHtml(peer.peerName || 'Peer')} unavailable</span>`;
+    list.appendChild(li);
+  });
+}
+
+function chartMeta(item) {
+  const source = item.source === 'peer' ? (item.peerName || 'Peer') : 'IONe';
+  const type = (item.spec && (item.spec.chartType || item.spec.chart_type)) || 'line';
+  return `${source} · ${type}`;
+}
+
+async function selectChart(item) {
+  document.querySelectorAll('.chart-row--active').forEach((row) => row.classList.remove('chart-row--active'));
+  document.querySelector(`.chart-row[data-chart-id="${CSS.escape(item.id)}"]`)?.classList.add('chart-row--active');
+  document.getElementById('chart-title').textContent = item.name || 'Chart';
+  document.getElementById('chart-source-label').textContent = chartMeta(item);
+  hideChartRenderError();
+  destroyChart();
+
+  const workspaceId = activeWorkspace?.id;
+  if (!workspaceId) return;
+  let payload;
+  try {
+    if (item.source === 'peer') {
+      payload = await fetchPeerChart(workspaceId, item);
+    } else {
+      payload = await fetchIoneChart(workspaceId, item);
+    }
+  } catch (err) {
+    showChartRenderError(err.message || 'Could not load chart data.');
+    return;
+  }
+  if (!activeWorkspace || activeWorkspace.id !== workspaceId) return;
+  renderChartPayload(payload.spec, payload.rows || []);
+}
+
+async function fetchIoneChart(workspaceId, item) {
+  const descriptor = item.descriptor || {};
+  const until = new Date();
+  const since = new Date(until.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const params = new URLSearchParams({
+    stream_id: descriptor.streamId || descriptor.stream_id,
+    op: descriptor.op || 'count',
+    bucket: descriptor.bucket || 'day',
+    since: since.toISOString(),
+    until: until.toISOString()
+  });
+  const valuePointer = descriptor.valuePointer || descriptor.value_pointer;
+  const groupByPointer = descriptor.groupByPointer || descriptor.group_by_pointer;
+  if (valuePointer) params.set('value_pointer', valuePointer);
+  if (groupByPointer) params.set('group_by_pointer', groupByPointer);
+  if (descriptor.percentile != null) params.set('percentile', String(descriptor.percentile));
+  const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/event-aggregates?${params.toString()}`, { skipErrorToast: true });
+  return { spec: item.spec, rows: data.rows || [] };
+}
+
+async function fetchPeerChart(workspaceId, item) {
+  const peerId = item.peerId || item.peer_id;
+  const params = new URLSearchParams({ peer_id: peerId, uri: item.uri });
+  return apiFetch(`/api/v1/workspaces/${workspaceId}/chart-data?${params.toString()}`, { skipErrorToast: true });
+}
+
+function renderChartPayload(spec, rows) {
+  const target = document.getElementById('chart-myio-target');
+  target.innerHTML = '';
+  if (!window.IoneChartAdapter || typeof window.IoneChartAdapter.ioneToMyio !== 'function') {
+    showChartRenderError('Chart adapter did not load.');
+    return;
+  }
+  if (typeof window.myIOchart !== 'function') {
+    showChartRenderError('Chart engine did not load.');
+    return;
+  }
+
+  try {
+    const config = window.IoneChartAdapter.ioneToMyio(spec, rows);
+    const rect = target.getBoundingClientRect();
+    chartInstance = new window.myIOchart({
+      element: target,
+      config,
+      width: rect.width || 720,
+      height: Math.max(320, rect.height || 360)
+    });
+    chartInstance.on?.('error', (event) => {
+      showChartRenderError(event?.message || 'Chart render failed.');
+    });
+    renderChartTable(rows);
+  } catch (err) {
+    showChartRenderError(err.message || 'Chart render failed.');
+  }
+}
+
+function renderChartTable(rows) {
+  const details = document.getElementById('chart-data-disclosure');
+  const thead = details?.querySelector('thead');
+  const tbody = details?.querySelector('tbody');
+  if (!details || !thead || !tbody) return;
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (safeRows.length === 0) {
+    details.hidden = true;
+    thead.innerHTML = '';
+    tbody.innerHTML = '';
+    return;
+  }
+  const keys = Array.from(new Set(safeRows.flatMap((row) => Object.keys(row || {}))));
+  details.hidden = false;
+  details.querySelector('summary').textContent = `Data (${safeRows.length})`;
+  thead.innerHTML = `<tr>${keys.map((key) => `<th scope="col">${escapeHtml(labelizeKey(key))}</th>`).join('')}</tr>`;
+  tbody.innerHTML = '';
+  safeRows.forEach((row) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = keys.map((key) => `<td>${escapeHtml(formatChartCell(row[key]))}</td>`).join('');
+    tbody.appendChild(tr);
+  });
+}
+
+function labelizeKey(key) {
+  return String(key).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
+}
+
+function formatChartCell(value) {
+  if (value == null) return '';
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(3);
+  return String(value);
+}
+
+function destroyChart() {
+  if (chartInstance) {
+    try { chartInstance.destroy(); } catch (_) {}
+    chartInstance = null;
+  }
+  const target = document.getElementById('chart-myio-target');
+  if (target) target.innerHTML = '';
+}
+
+function showChartState(state) {
+  document.getElementById('chart-loading').hidden = state !== 'loading';
+  document.getElementById('chart-empty').hidden = state !== 'empty';
+  document.getElementById('chart-error').hidden = state !== 'error';
+  document.getElementById('chart-workspace').hidden = state !== 'workspace';
+}
+
+function showChartError(message) {
+  document.getElementById('chart-error-msg').textContent = message;
+  showChartState('error');
+}
+
+function showChartRenderError(message) {
+  const el = document.getElementById('chart-render-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function hideChartRenderError() {
+  const el = document.getElementById('chart-render-error');
+  if (!el) return;
+  el.textContent = '';
+  el.hidden = true;
+}
+
+initChartPanel();
 
 /* ── Connector + Stream API helpers ── */
 

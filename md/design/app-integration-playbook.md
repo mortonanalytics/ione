@@ -100,7 +100,7 @@ Each resource returned by `resources/list` carries view-hint metadata so IONe's 
 
 Supported `ione_view` values (v0.1):
 - `map` — `metadata.tile_url` (XYZ template), `metadata.bounds`, `metadata.attribution`. Optional fields: `metadata.layer_name`, `metadata.opacity`, `metadata.vector_url`.
-- `chart` (deferred to v0.2) — `chart_type`, axis hints, series list
+- `chart` — `chart_type` (line\|bar\|area\|scatter\|histogram\|gauge\|qq), `x_axis`, `y_axis`, `series[]`. The resource body returned by `resources/read` must have shape `{ spec: { chart_type, x_axis, y_axis, series }, rows: [{ <x_axis>: value, <series[0]>: number, ... }] }`. (Promoted to v0.1 scope per [md/design/chart-panel.md](chart-panel.md).)
 - `table` (deferred to v0.2) — column schema
 - `document` (deferred to v0.2) — `metadata.download_url`, MIME type
 

@@ -22,9 +22,12 @@ pub mod audit_events;
 pub mod auth_routes;
 pub mod bindings;
 pub mod broker;
+pub mod chart_data;
+pub mod chart_panels;
 pub mod chat;
 pub mod connectors;
 pub mod conversations;
+pub mod event_aggregates;
 pub mod event_layers;
 pub mod feed;
 pub mod health;
@@ -108,6 +111,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/map-layers",
             get(map_layers::list_map_layers),
+        )
+        .route(
+            "/api/v1/workspaces/:id/chart-panels",
+            get(chart_panels::list_chart_panels),
+        )
+        .route(
+            "/api/v1/workspaces/:id/chart-data",
+            get(chart_data::get_chart_data),
+        )
+        .route(
+            "/api/v1/workspaces/:id/event-aggregates",
+            get(event_aggregates::get_event_aggregates),
         )
         .route(
             "/api/v1/workspaces/:id/event-layers",

@@ -7,6 +7,11 @@
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" />
   <link rel="stylesheet" href="/style.css" />
   <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+  <script src="/vendor/myio/lib/d3.min.js"></script>
+  <script src="/vendor/myio/lib/d3-hexbin.js"></script>
+  <script src="/vendor/myio/lib/d3-sankey.min.js"></script>
+  <script src="/vendor/myio/myIOapi.js"></script>
+  <script src="/js/chart_adapter.js"></script>
 </head>
 <body>
   <!-- Top bar: user identity + auth actions -->
@@ -71,6 +76,7 @@
       <div id="tab-bar" role="tablist" aria-label="Main view">
         <button id="tab-chat" role="tab" aria-selected="true" aria-controls="panel-chat" class="tab tab--active">Chat</button>
         <button id="tab-map" role="tab" aria-selected="false" aria-controls="panel-map" class="tab">Map</button>
+        <button id="tab-chart" role="tab" aria-selected="false" aria-controls="panel-chart" class="tab">Charts</button>
         <button id="tab-connectors" role="tab" aria-selected="false" aria-controls="panel-connectors" class="tab">Connectors</button>
         <button id="tab-signals" role="tab" aria-selected="false" aria-controls="panel-signals" class="tab">Signals</button>
         <button id="tab-survivors" role="tab" aria-selected="false" aria-controls="panel-survivors" class="tab">Survivors</button>
@@ -138,6 +144,47 @@
               <tbody></tbody>
             </table>
           </details>
+        </div>
+      </div>
+
+      <!-- Chart panel -->
+      <div id="panel-chart" role="tabpanel" aria-labelledby="tab-chart" aria-label="Charts" hidden>
+        <div id="chart-loading" class="chart-state-overlay" aria-live="polite" hidden>
+          <div class="chart-skeleton"></div>
+          <span>Loading charts...</span>
+        </div>
+        <div id="chart-empty" class="chart-state-overlay" hidden>
+          <p>No charts available in this workspace.</p>
+          <button id="chart-connect-peer" type="button">Connect a peer</button>
+        </div>
+        <div id="chart-error" class="chart-state-overlay" role="status" aria-live="polite" hidden>
+          <p id="chart-error-msg"></p>
+          <button id="chart-error-retry" type="button">Retry</button>
+        </div>
+        <div id="chart-workspace" class="chart-workspace" hidden>
+          <aside class="chart-sidebar" aria-label="Available charts">
+            <div class="chart-sidebar-header">
+              <button id="chart-refresh-btn" type="button">Refresh</button>
+            </div>
+            <div id="chart-status" aria-live="polite"></div>
+            <ul id="chart-list" role="list"></ul>
+          </aside>
+          <section id="chart-render" class="chart-render" aria-label="Selected chart">
+            <header class="chart-render-header">
+              <h2 id="chart-title">Select a chart</h2>
+              <span id="chart-source-label"></span>
+            </header>
+            <div id="chart-render-error" class="chart-render-error" role="alert" hidden></div>
+            <div id="chart-myio-target" class="chart-myio-target" role="group" aria-label="Chart visualization" aria-describedby="chart-description"></div>
+            <p id="chart-description" class="sr-only">Chart visualization with table data below.</p>
+            <details id="chart-data-disclosure" hidden>
+              <summary>Data</summary>
+              <table>
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </details>
+          </section>
         </div>
       </div>
 

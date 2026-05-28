@@ -1,4 +1,6 @@
 pub mod auto_exec;
+pub mod chart_data;
+pub mod chart_panels;
 pub mod claim_mapper;
 pub mod critic;
 pub mod delivery;
