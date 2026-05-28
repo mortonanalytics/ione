@@ -562,6 +562,6 @@ async fn do_poll_stream(
 }
 
 fn stable_json_hash(value: &Value) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    let bytes = serde_json::to_vec(value).expect("serde_json::Value always serializes");
     hex::encode(Sha256::digest(bytes))
 }

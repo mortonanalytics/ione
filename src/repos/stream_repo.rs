@@ -95,22 +95,4 @@ impl StreamRepo {
         .await
         .context("failed to list streams in org")
     }
-
-    pub async fn update_view_config(
-        &self,
-        id: Uuid,
-        view_config: Option<serde_json::Value>,
-    ) -> anyhow::Result<Stream> {
-        sqlx::query_as::<_, Stream>(
-            "UPDATE streams
-             SET view_config = $2
-             WHERE id = $1
-             RETURNING id, connector_id, name, schema, view_config, created_at",
-        )
-        .bind(id)
-        .bind(view_config)
-        .fetch_one(&self.pool)
-        .await
-        .context("failed to update stream view_config")
-    }
 }

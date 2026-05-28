@@ -340,6 +340,20 @@ async fn cross_org_stream_routes_are_scoped() {
         .expect("poll response");
     assert_eq!(poll.status(), StatusCode::NOT_FOUND);
 
+    // AC-9: cross-org PUT view-config returns 404 and leaves the config untouched.
+    let put = bearer(client().put(format!("{base}/api/v1/streams/{stream_id}/view-config")))
+        .json(&view_config("hacked"))
+        .send()
+        .await
+        .expect("cross-org put response");
+    assert_eq!(put.status(), StatusCode::NOT_FOUND);
+    let persisted: Value = sqlx::query_scalar("SELECT view_config FROM streams WHERE id = $1")
+        .bind(stream_id)
+        .fetch_one(&pool)
+        .await
+        .expect("persisted view_config");
+    assert_eq!(persisted, view_config("magnitude"));
+
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM stream_events")
         .fetch_one(&pool)
         .await
@@ -400,6 +414,7 @@ async fn create_rejects_link_local_feed_urls_without_insert() {
         "https://169.254.169.254/",
         "http://169.254.10.10/",
         "http://[fe80::1]/",
+        "https://[fe80::1]/",
     ] {
         let resp = bearer(client().post(format!(
             "{base}/api/v1/workspaces/{workspace_id}/connectors"
@@ -420,4 +435,144 @@ async fn create_rejects_link_local_feed_urls_without_insert() {
         .await
         .expect("connector count");
     assert_eq!(count, 0);
+}
+
+async fn create_geojson_connector(base: &str, workspace_id: Uuid, config: Value) -> StatusCode {
+    let resp = bearer(client().post(format!(
+        "{base}/api/v1/workspaces/{workspace_id}/connectors"
+    )))
+    .json(&json!({ "kind": "rust_native", "name": "geojson-usgs", "config": config }))
+    .send()
+    .await
+    .expect("create connector response");
+    resp.status()
+}
+
+/// AC-4: a feature whose type is outside `type_filter.allow` is excluded.
+#[tokio::test]
+#[ignore]
+async fn type_filter_excludes_non_matching_features() {
+    let (base, pool) = spawn_app().await;
+    let workspace_id = default_workspace_id(&pool).await;
+    let feed = MockServer::start().await;
+    mount_feed(
+        &feed,
+        json!({
+            "type": "FeatureCollection",
+            "features": [
+                { "type": "Feature", "id": "eq1",
+                  "geometry": { "type": "Point", "coordinates": [-122.1, 38.2, 7.0] },
+                  "properties": { "mag": 4.6, "type": "earthquake", "time": 1779991039445_i64 } },
+                { "type": "Feature", "id": "qb1",
+                  "geometry": { "type": "Point", "coordinates": [-121.0, 37.0, 2.0] },
+                  "properties": { "mag": 1.2, "type": "quarry blast", "time": 1779991039446_i64 } }
+            ]
+        }),
+    )
+    .await;
+
+    let status =
+        create_geojson_connector(&base, workspace_id, geojson_config(&format!("{}/feed", feed.uri())))
+            .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM stream_events")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(total, 1);
+    let dedup: String = sqlx::query_scalar("SELECT dedup_key FROM stream_events LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("dedup key");
+    assert_eq!(dedup, "eq1");
+}
+
+/// AC-13: features with missing or empty dedup keys are skipped, not written.
+#[tokio::test]
+#[ignore]
+async fn dedup_key_edge_cases_skip_invalid_features() {
+    let (base, pool) = spawn_app().await;
+    let workspace_id = default_workspace_id(&pool).await;
+    let feed = MockServer::start().await;
+    mount_feed(
+        &feed,
+        json!({
+            "type": "FeatureCollection",
+            "features": [
+                { "type": "Feature", "id": "good1",
+                  "geometry": { "type": "Point", "coordinates": [-122.1, 38.2, 7.0] },
+                  "properties": { "mag": 4.6, "type": "earthquake", "time": 1779991039445_i64 } },
+                { "type": "Feature",
+                  "geometry": { "type": "Point", "coordinates": [-122.2, 38.3, 7.0] },
+                  "properties": { "mag": 4.7, "type": "earthquake", "time": 1779991039446_i64 } },
+                { "type": "Feature", "id": "",
+                  "geometry": { "type": "Point", "coordinates": [-122.3, 38.4, 7.0] },
+                  "properties": { "mag": 4.8, "type": "earthquake", "time": 1779991039447_i64 } }
+            ]
+        }),
+    )
+    .await;
+
+    let status =
+        create_geojson_connector(&base, workspace_id, geojson_config(&format!("{}/feed", feed.uri())))
+            .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM stream_events")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(total, 1);
+    let dedup: String = sqlx::query_scalar("SELECT dedup_key FROM stream_events LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("dedup key");
+    assert_eq!(dedup, "good1");
+}
+
+/// AC-5: a structurally distinct feed (different items_pointer, rfc3339 timestamps,
+/// different field mappings) ingests via config alone — no new connector code.
+#[tokio::test]
+#[ignore]
+async fn second_distinct_feed_ingests_by_config_only() {
+    let (base, pool) = spawn_app().await;
+    let workspace_id = default_workspace_id(&pool).await;
+    let feed = MockServer::start().await;
+    mount_feed(
+        &feed,
+        json!({
+            "items": [
+                { "eventId": "a1", "lon": -120.0, "lat": 36.0, "severity": "high",
+                  "issued": "2026-05-28T17:00:00Z" }
+            ]
+        }),
+    )
+    .await;
+
+    let config = json!({
+        "kind": "geojson_poll",
+        "feed_url": format!("{}/feed", feed.uri()),
+        "stream_name": "alerts",
+        "items_pointer": "/items",
+        "observed_at_pointer": "/issued",
+        "observed_at_format": "rfc3339",
+        "dedup_pointer": "/eventId",
+        "view_config": {
+            "lon_pointer": "/lon",
+            "lat_pointer": "/lat",
+            "property_fields": [{ "pointer": "/severity", "name": "severity" }]
+        }
+    });
+
+    let status = create_geojson_connector(&base, workspace_id, config).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let row: (String, Value) =
+        sqlx::query_as("SELECT dedup_key, payload FROM stream_events LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("stream event row");
+    assert_eq!(row.0, "a1");
+    assert_eq!(row.1["severity"], json!("high"));
 }
