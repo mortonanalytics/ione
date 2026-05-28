@@ -6,6 +6,13 @@ use uuid::Uuid;
 use crate::models::StreamEvent;
 use crate::services::event_layers::{GeoEventRow, GeoStreamRow};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertOutcome {
+    Inserted,
+    Updated,
+    Duplicate,
+}
+
 pub struct StreamEventRepo {
     pub(crate) pool: PgPool,
 }
@@ -37,6 +44,46 @@ impl StreamEventRepo {
         .rows_affected();
 
         Ok(rows_affected > 0)
+    }
+
+    pub async fn insert_event(
+        &self,
+        stream_id: Uuid,
+        payload: serde_json::Value,
+        observed_at: DateTime<Utc>,
+        dedup_key: Option<&str>,
+    ) -> anyhow::Result<InsertOutcome> {
+        if let Some(dedup_key) = dedup_key {
+            let inserted: bool = sqlx::query_scalar(
+                "INSERT INTO stream_events (stream_id, payload, observed_at, dedup_key)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (stream_id, dedup_key) WHERE dedup_key IS NOT NULL
+                 DO UPDATE SET payload = EXCLUDED.payload, observed_at = EXCLUDED.observed_at
+                 RETURNING (xmax = 0) AS inserted",
+            )
+            .bind(stream_id)
+            .bind(payload)
+            .bind(observed_at)
+            .bind(dedup_key)
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to upsert stream event by dedup key")?;
+
+            return Ok(if inserted {
+                InsertOutcome::Inserted
+            } else {
+                InsertOutcome::Updated
+            });
+        }
+
+        if self
+            .insert_if_absent(stream_id, payload, observed_at)
+            .await?
+        {
+            Ok(InsertOutcome::Inserted)
+        } else {
+            Ok(InsertOutcome::Duplicate)
+        }
     }
 
     pub async fn list_recent(

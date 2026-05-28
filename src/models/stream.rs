@@ -9,5 +9,6 @@ pub struct Stream {
     pub connector_id: Uuid,
     pub name: String,
     pub schema: serde_json::Value,
+    pub view_config: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
 }

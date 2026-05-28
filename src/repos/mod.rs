@@ -43,7 +43,7 @@ pub use pipeline_event_repo::{EventFilter, PipelineEventRepo};
 pub use role_repo::RoleRepo;
 pub use routing_decision_repo::RoutingDecisionRepo;
 pub use signal_repo::SignalRepo;
-pub use stream_event_repo::StreamEventRepo;
+pub use stream_event_repo::{InsertOutcome, StreamEventRepo};
 pub use stream_repo::StreamRepo;
 pub use survivor_repo::SurvivorRepo;
 pub use trust_issuer_repo::TrustIssuerRepo;

@@ -180,6 +180,7 @@ fn walk_dir(dir: &str, events: &mut Vec<StreamEventInput>) -> anyhow::Result<()>
                 "last_modified": observed_at.to_rfc3339(),
             }),
             observed_at,
+            dedup_key: None,
         });
     }
     Ok(())
@@ -234,6 +235,7 @@ async fn poll_s3(
                     "blob_ref": blob_ref,
                 }),
                 observed_at,
+                dedup_key: None,
             });
         }
 

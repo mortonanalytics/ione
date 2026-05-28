@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 pub mod firms;
+pub mod geojson_poll;
 pub mod irwin;
 pub mod nws;
 pub mod s3;
@@ -63,13 +64,14 @@ pub async fn dispatch(kind: &str, name: &str, config: &Value) -> ValidateResult 
         "rust_native" => match rust_native_provider(name, config).as_deref() {
             Some("nws") => nws::validate(config).await,
             Some("firms") => firms::validate(config).await,
+            Some("geojson_poll") => geojson_poll::validate(config).await,
             Some("s3" | "fs_s3" | "s3_fs") => s3::validate(config).await,
             Some("slack") => slack::validate(config).await,
             Some("irwin") => irwin::validate(config).await,
             other => Err(ValidateErr::new(
                 "unknown_rust_native_provider",
                 &format!(
-                    "No rust_native provider named '{}'. Known: nws, firms, s3, slack, irwin.",
+                    "No rust_native provider named '{}'. Known: nws, firms, geojson_poll, s3, slack, irwin.",
                     other.unwrap_or(name)
                 ),
             )
@@ -104,6 +106,8 @@ fn rust_native_provider(name: &str, config: &Value) -> Option<String> {
         Some("nws".to_string())
     } else if candidate == "firms" || name.starts_with("firms") {
         Some("firms".to_string())
+    } else if candidate == "geojson_poll" || name.starts_with("geojson") {
+        Some("geojson_poll".to_string())
     } else if matches!(candidate, "s3" | "fs_s3" | "s3_fs" | "fs") || name.starts_with("s3") {
         Some("s3".to_string())
     } else if candidate == "slack" || name.starts_with("slack") {

@@ -152,6 +152,10 @@ impl CompiledConfig {
     }
 }
 
+pub fn validate_view_config(vc: &Value) -> Result<(), String> {
+    CompiledConfig::parse(vc).map(|_| ())
+}
+
 #[derive(Debug)]
 enum ViewConfigError {
     InvalidPointer { field: String, reason: String },

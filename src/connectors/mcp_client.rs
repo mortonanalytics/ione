@@ -151,6 +151,7 @@ impl ConnectorImpl for McpClientConnector {
                 all_events.push(StreamEventInput {
                     payload: item,
                     observed_at: now,
+                    dedup_key: None,
                 });
             }
         }

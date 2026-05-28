@@ -2,7 +2,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{header, HeaderValue, Method},
     middleware::{from_fn, from_fn_with_state},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
@@ -130,6 +130,10 @@ pub fn router(state: AppState) -> Router {
             get(connectors::list_streams),
         )
         .route("/api/v1/streams/:id/poll", post(connectors::poll_stream))
+        .route(
+            "/api/v1/streams/:id/view-config",
+            put(connectors::put_stream_view_config),
+        )
         .route("/api/v1/workspaces/:id/signals", get(signals::list_signals))
         .route(
             "/api/v1/workspaces/:id/survivors",

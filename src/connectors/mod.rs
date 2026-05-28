@@ -1,5 +1,6 @@
 pub mod firms;
 pub mod fs_s3;
+pub mod geojson_poll;
 pub mod irwin;
 pub mod mcp_client;
 pub mod nws;
@@ -25,6 +26,7 @@ pub struct StreamDescriptor {
 pub struct StreamEventInput {
     pub payload: serde_json::Value,
     pub observed_at: chrono::DateTime<chrono::Utc>,
+    pub dedup_key: Option<String>,
 }
 
 /// Result of a poll operation.
@@ -128,8 +130,13 @@ pub fn build_with_pool(
                 return Ok(Box::new(c));
             }
 
+            if kind_hint == "geojson_poll" || name_lower.starts_with("geojson") {
+                let c = geojson_poll::GeoJsonPollConnector::from_config(config)?;
+                return Ok(Box::new(c));
+            }
+
             anyhow::bail!(
-                "unknown rust_native connector name '{}'; set config.kind to 'slack', 'smtp', 'nws', 'firms', 'fs_s3', or 'irwin'",
+                "unknown rust_native connector name '{}'; set config.kind to 'slack', 'smtp', 'nws', 'firms', 'fs_s3', 'irwin', or 'geojson_poll'",
                 name
             )
         }

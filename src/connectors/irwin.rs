@@ -135,6 +135,7 @@ fn incident_to_event(incident: serde_json::Value) -> anyhow::Result<StreamEventI
     Ok(StreamEventInput {
         payload: incident,
         observed_at,
+        dedup_key: None,
     })
 }
 
