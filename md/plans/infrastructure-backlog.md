@@ -6,44 +6,50 @@ Effort estimates are rough (solo-dev days). File refs point at where the work li
 
 ---
 
+## Shipped this cycle — branch `feature/event-layer-phases-2-3` (code-complete + tested; pending founder walkthrough + merge)
+
+These travel together as one unit. Per the "shipped = founder walked through it" rule they are **Partial — pending walkthrough**, not closed.
+
+| Item | Tier | Commits | Design |
+|------|------|---------|--------|
+| Live point/feature map layer from `stream_events` | P0 | `e0aa8bc` (+ event-layer phases 0–3) | `md/design/event-point-layer.md` |
+| Chart panel — `ione_view:"chart"` (myIO) | P0 | `b22f0fa`, `2a40f42` | `md/design/chart-panel.md` |
+| Table view — `ione_view:"table"` | P0 | `bcf01b3`, `7a235b7` | `md/design/table-view.md` |
+| Generic `geojson_poll` / JSON-URL connector | P1 | `f0ff3e9`, `e239edb` | `md/design/geojson-poll-connector.md` |
+| Windowed / grouped aggregates (`event-aggregates`) | P2 | `b22f0fa` | (folded into chart-panel design) |
+| Rules-engine nested-field reach | P1 | verified-only (works as-is) | — see note below |
+
+**Remaining P0:** Document view is the only unshipped visualization item.
+
+---
+
 ## P0 — Visualization (the biggest gap; unlocks every data app)
 
 IONe renders MapLibre tiles and nothing else today. No chart, table, or live-feature rendering. This is the wall every data app hits.
 
-- **[Epicenter] Chart panel — `ione_view:"chart"` rendering myIO.** _The load-bearing item._
-  - Wire myIO's framework-agnostic D3 engine (the same `myIOapi.js` that backs the R/Python widgets) into the static UI — no SPA framework required.
-  - Consume the published chart contract `application/vnd.ione.chart+json` (`chart_type / x_axis / y_axis / series`, see `md/design/app-integration-playbook.md`) and map it to a myIO spec `{ type, mapping, transform }`.
-  - Validate specs via the myIO MCP `validate_spec` tool before render.
-  - **Known dependency bug:** `validate_spec` rejects valid single-mapping charts (histogram/gauge/qq) — it iterates a scalar `required_mappings` string as characters. Fix is in myIO (`mcp/lib/validate.mjs` + schema generator); the panel must tolerate/route around it until fixed. (Found 2026-05-27 while validating Epicenter specs.)
-  - Effort: ~1 wk.
+- ✅ **[Epicenter] Chart panel — `ione_view:"chart"` rendering myIO.** Shipped (`b22f0fa`, `2a40f42`). Dual data path (peer `vnd.ione.chart+json` resources + IONe `event-aggregates`); renders via `new window.myIOchart({config:{layers:[…]}})`. **The single-mapping `validate_spec` bug was confirmed absent in current myIO source** (`required_mappings` is an array for all 36 types) — no bypass needed; validation is a build-time node test against `../myIO/mcp/lib/validate.mjs`, not a runtime call. See `md/design/chart-panel.md`.
 
-- **[Epicenter] Live point/feature map layer from `stream_events`.**
-  - Today the map (`src/routes/map_layers.rs`, `src/services/map_layers.rs`) only passes through peer-published tile/vector URLs; it cannot render ingested point events.
-  - Add a "workspace events → GeoJSON source" endpoint + a MapLibre point layer (markers sized/colored by an event field, e.g. magnitude/depth).
-  - Effort: ~1–2 d.
+- ✅ **[Epicenter] Live point/feature map layer from `stream_events`.** Shipped (`e0aa8bc` + event-layer phases 0–3). `GET /workspaces/:id/event-layers` projects `stream_events` to GeoJSON via `view_config`; MapLibre circle layer. See `md/design/event-point-layer.md`.
 
-- **Table view — `ione_view:"table"`.** Schema negotiation, pagination, column filter/sort. Effort: ~3–4 d.
+- ✅ **Table view — `ione_view:"table"`.** Shipped (`bcf01b3`, `7a235b7`). Schema negotiation, server-side pagination/sort/filter (IONe), client-side (peer); semantic accessible `<table>`. See `md/design/table-view.md`.
 
-- **Document/report view — `ione_view:"document"`.** Render linked PDFs/reports in-app instead of just linking out. Effort: ~2–3 d.
+- ⬜ **Document/report view — `ione_view:"document"`.** Render linked PDFs/reports in-app instead of just linking out (`metadata.download_url`). The last unshipped P0 visualization item; mostly a peer-resource render path, no aggregate side. Effort: ~2–3 d. **← next.**
 
 ---
 
 ## P1 — Ingestion
 
-- **[Epicenter] Generic `geojson_poll` / JSON-URL connector.**
-  - Connectors today are hand-wired (NWS / FIRMS / IRWIN) or the OpenAPI auto-adapter. Static GeoJSON/JSON feeds (e.g. USGS summary feeds) are neither — they need per-source hand-wiring.
-  - Add a config-driven connector: poll a URL, map fields (JSON-pointer), dedup key, type filter → `stream_events`. Removes most per-source code.
-  - Effort: ~1–2 d.
+- ✅ **[Epicenter] Generic `geojson_poll` / JSON-URL connector.** Shipped (`f0ff3e9`, `e239edb`). Config-driven poll → JSON-pointer field map → dedup key (natural-key upsert) → type filter → `stream_events`; epoch-ms timestamp support; hardened SSRF guard (link-local blocked all schemes). See `md/design/geojson-poll-connector.md`.
 
-- **MCP `notifications/*` reception.** Webhook push is the only v0.1 ingest path for peers; accept MCP notifications too. Deferred from v0.1. Effort: ~3 d.
+- ⬜ **MCP `notifications/*` reception.** Webhook push is the only v0.1 ingest path for peers; accept MCP notifications too. Deferred from v0.1. Effort: ~3 d. **← next P1.**
 
-- **[Epicenter] Confirm/extend rules-engine nested-field reach.** Verify `src/services/rules.rs` expressions can resolve arbitrary-depth JSON pointers into connector payloads (e.g. `[/properties/mag]`), not just the documented `[/events/0/severity]` shape. Epicenter's M≥6.0 rule depends on it. Effort: verify + ~1 d if extension needed.
+- ✅ **[Epicenter] Rules-engine nested-field reach — verified, no code change.** `populate_context` (`src/services/rules.rs`) already recurses objects at arbitrary depth, so a rule `payload.properties.mag >= 6.0` resolves today. Note: rules use **dotted evalexpr** keys (`payload.properties.mag`), NOT the `[/json/pointer]` syntax this item's premise assumed — array indices are not reachable (arrays unmapped), which the M≥6.0 rule doesn't need. _Small open follow-up:_ author the M≥6.0 integration test + correct the playbook's pointer-syntax wording (trivial; not yet done).
 
 ---
 
 ## P2 — Analytics primitives
 
-- **[Epicenter] Windowed / grouped aggregates.** Count-per-interval, group-by-region, percentile, and rolling baselines — so charts can show trends and "is this unusual" without each app pre-aggregating. Epicenter's frequency timeline, region breakdown, and 30-day baseline all need this. Effort: ~3–5 d.
+- ✅ **[Epicenter] Windowed / grouped aggregates.** Shipped as `GET /workspaces/:id/event-aggregates` (`b22f0fa`): count-per-bucket, avg/min/max/sum, percentile, group-by, 30-day rolling baseline; numeric-aware JSONB extraction, bucket allow-list (injection guard), org-scoped. Backs the chart panel's IONe data path.
 
 ---
 
