@@ -29,6 +29,7 @@ pub mod connectors;
 pub mod conversations;
 pub mod event_aggregates;
 pub mod event_layers;
+pub mod event_table;
 pub mod feed;
 pub mod health;
 pub mod map_layers;
@@ -41,6 +42,8 @@ pub mod pipeline_events;
 pub mod public_issuers;
 pub mod signals;
 pub mod survivors;
+pub mod table_data;
+pub mod table_panels;
 pub mod telemetry;
 pub mod webhooks;
 pub mod well_known;
@@ -121,8 +124,20 @@ pub fn router(state: AppState) -> Router {
             get(chart_data::get_chart_data),
         )
         .route(
+            "/api/v1/workspaces/:id/table-panels",
+            get(table_panels::list_table_panels),
+        )
+        .route(
+            "/api/v1/workspaces/:id/table-data",
+            get(table_data::get_table_data),
+        )
+        .route(
             "/api/v1/workspaces/:id/event-aggregates",
             get(event_aggregates::get_event_aggregates),
+        )
+        .route(
+            "/api/v1/workspaces/:id/event-table",
+            get(event_table::get_event_table),
         )
         .route(
             "/api/v1/workspaces/:id/event-layers",

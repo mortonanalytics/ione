@@ -579,6 +579,11 @@ function setActiveWorkspace(ws) {
     updateChartPanel(ws.id);
   }
 
+  resetTablePanel();
+  if (activeTab === 'table') {
+    updateTablePanel(ws.id);
+  }
+
   // If the signals tab is active, reload signals for the new workspace.
   if (activeTab === 'signals') {
     loadSignals();
@@ -1003,6 +1008,7 @@ newWorkspaceForm.addEventListener('submit', async (e) => {
 const tabChat          = document.getElementById('tab-chat');
 const tabMap           = document.getElementById('tab-map');
 const tabChart         = document.getElementById('tab-chart');
+const tabTable         = document.getElementById('tab-table');
 const tabConnectors    = document.getElementById('tab-connectors');
 const tabSignals       = document.getElementById('tab-signals');
 const tabSurvivors     = document.getElementById('tab-survivors');
@@ -1010,12 +1016,13 @@ const tabApprovals     = document.getElementById('tab-approvals');
 const panelChat        = document.getElementById('panel-chat');
 const panelMap         = document.getElementById('panel-map');
 const panelChart       = document.getElementById('panel-chart');
+const panelTable       = document.getElementById('panel-table');
 const panelConnectors  = document.getElementById('panel-connectors');
 const panelSignals     = document.getElementById('panel-signals');
 const panelSurvivors   = document.getElementById('panel-survivors');
 const panelApprovals   = document.getElementById('panel-approvals');
 
-let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'connectors' | 'signals' | 'survivors' | 'approvals'
+let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'table' | 'connectors' | 'signals' | 'survivors' | 'approvals'
 
 function switchTab(name) {
   // Stop auto-refresh when leaving a polling tab.
@@ -1042,6 +1049,10 @@ function switchTab(name) {
   tabChart.setAttribute('aria-selected', String(name === 'chart'));
   tabChart.classList.toggle('tab--active', name === 'chart');
   panelChart.hidden = name !== 'chart';
+
+  tabTable.setAttribute('aria-selected', String(name === 'table'));
+  tabTable.classList.toggle('tab--active', name === 'table');
+  panelTable.hidden = name !== 'table';
 
   tabConnectors.setAttribute('aria-selected', String(name === 'connectors'));
   tabConnectors.classList.toggle('tab--active', name === 'connectors');
@@ -1073,6 +1084,10 @@ function switchTab(name) {
     updateChartPanel(activeWorkspace.id);
   }
 
+  if (name === 'table' && activeWorkspace && tableLoadedWorkspaceId !== activeWorkspace.id) {
+    updateTablePanel(activeWorkspace.id);
+  }
+
   if (name === 'signals' && activeWorkspace) {
     loadSignals();
     startSignalsPolling();
@@ -1092,6 +1107,7 @@ function switchTab(name) {
 tabChat.addEventListener('click', () => switchTab('chat'));
 tabMap.addEventListener('click', () => switchTab('map'));
 tabChart.addEventListener('click', () => switchTab('chart'));
+tabTable.addEventListener('click', () => switchTab('table'));
 tabConnectors.addEventListener('click', () => switchTab('connectors'));
 tabSignals.addEventListener('click', () => switchTab('signals'));
 tabSurvivors.addEventListener('click', () => switchTab('survivors'));
@@ -1106,10 +1122,14 @@ tabMap.addEventListener('keydown', (e) => {
 });
 tabChart.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); tabMap.focus(); tabMap.click(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabTable.focus(); tabTable.click(); }
+});
+tabTable.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabChart.focus(); tabChart.click(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
 });
 tabConnectors.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabChart.focus(); tabChart.click(); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabTable.focus(); tabTable.click(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); tabSignals.focus(); tabSignals.click(); }
 });
 tabSignals.addEventListener('keydown', (e) => {
@@ -1986,6 +2006,470 @@ function hideChartRenderError() {
 }
 
 initChartPanel();
+
+/* ── Table panel ── */
+
+let tableLoadedWorkspaceId = null;
+let tableItems = [];
+let tableActiveItem = null;
+let tableRequestController = null;
+let tablePeerCache = null;
+const tableState = {
+  page: 1,
+  perPage: 25,
+  sortBy: '_observed_at',
+  sortDir: 'desc',
+  filters: {},
+  totalCount: 0,
+  truncated: false,
+};
+
+function initTablePanel() {
+  document.getElementById('table-connect-peer')?.addEventListener('click', () => switchTab('connectors'));
+  document.getElementById('table-error-retry')?.addEventListener('click', () => {
+    if (activeWorkspace) updateTablePanel(activeWorkspace.id);
+  });
+  document.getElementById('table-refresh-btn')?.addEventListener('click', () => {
+    if (activeWorkspace) updateTablePanel(activeWorkspace.id);
+  });
+  document.getElementById('table-prev-page')?.addEventListener('click', () => {
+    if (tableState.page <= 1) return;
+    tableState.page -= 1;
+    refreshActiveTable();
+  });
+  document.getElementById('table-next-page')?.addEventListener('click', () => {
+    tableState.page += 1;
+    refreshActiveTable();
+  });
+  document.getElementById('table-per-page')?.addEventListener('change', (event) => {
+    tableState.perPage = Number(event.target.value) || 25;
+    tableState.page = 1;
+    refreshActiveTable();
+  });
+  document.getElementById('table-clear-filters')?.addEventListener('click', () => {
+    tableState.filters = {};
+    tableState.page = 1;
+    refreshActiveTable();
+  });
+}
+
+function resetTablePanel() {
+  tableLoadedWorkspaceId = null;
+  tableItems = [];
+  tableActiveItem = null;
+  tablePeerCache = null;
+  tableState.page = 1;
+  tableState.perPage = 25;
+  tableState.sortBy = '_observed_at';
+  tableState.sortDir = 'desc';
+  tableState.filters = {};
+  tableState.totalCount = 0;
+  tableState.truncated = false;
+  if (tableRequestController) {
+    tableRequestController.abort();
+    tableRequestController = null;
+  }
+  const list = document.getElementById('table-list');
+  if (list) list.innerHTML = '';
+  const status = document.getElementById('table-status');
+  if (status) status.textContent = '';
+  const title = document.getElementById('table-title');
+  if (title) title.textContent = 'Select a table';
+  const source = document.getElementById('table-source-label');
+  if (source) source.textContent = '';
+  const region = document.getElementById('table-render-region');
+  if (region) region.innerHTML = '';
+  updateTablePager();
+  hideTableRenderError();
+}
+
+async function updateTablePanel(workspaceId) {
+  tableLoadedWorkspaceId = workspaceId;
+  tableActiveItem = null;
+  tablePeerCache = null;
+  showTableState('loading');
+  hideTableRenderError();
+  const controller = replaceTableController();
+  let data;
+  try {
+    data = await apiFetch(`/api/v1/workspaces/${workspaceId}/table-panels`, {
+      skipErrorToast: true,
+      signal: controller.signal
+    });
+  } catch (_err) {
+    if (controller.signal.aborted || !activeWorkspace || activeWorkspace.id !== workspaceId || tableLoadedWorkspaceId !== workspaceId) return;
+    showTableError('Could not load tables. The data sources may be temporarily unavailable.');
+    return;
+  }
+  if (!activeWorkspace || activeWorkspace.id !== workspaceId || tableLoadedWorkspaceId !== workspaceId) return;
+
+  const ioneTables = data.ioneTables || data.ione_tables || [];
+  const peerTables = data.peerTables || data.peer_tables || [];
+  const peerErrors = data.peerErrors || data.peer_errors || [];
+  tableItems = [...ioneTables, ...peerTables];
+  renderTableList(tableItems, peerErrors);
+
+  if (tableItems.length === 0) {
+    showTableState(peerErrors.length > 0 ? 'error' : 'empty');
+    if (peerErrors.length > 0) {
+      document.getElementById('table-error-msg').textContent = `Could not reach any connected peer (${peerErrors.length} failed).`;
+    }
+    return;
+  }
+
+  showTableState('workspace');
+}
+
+function renderTableList(items, peerErrors) {
+  const list = document.getElementById('table-list');
+  const status = document.getElementById('table-status');
+  list.innerHTML = '';
+  status.textContent = peerErrors.length > 0
+    ? `${peerErrors.length} peer could not be reached.`
+    : '';
+
+  items.forEach((item) => {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'table-row';
+    button.dataset.tableId = item.id;
+    button.innerHTML = `
+      <span class="table-row-title">${escapeHtml(item.name || 'Table')}</span>
+      <span class="table-row-meta">${escapeHtml(tableMeta(item))}</span>
+    `;
+    button.addEventListener('click', () => selectTable(item));
+    li.appendChild(button);
+    list.appendChild(li);
+  });
+
+  peerErrors.forEach((peer) => {
+    const li = document.createElement('li');
+    li.className = 'table-row--error';
+    li.title = peer.error || 'Peer unavailable';
+    li.innerHTML = `<span class="layer-error-icon" aria-hidden="true"></span><span>${escapeHtml(peer.peerName || 'Peer')} unavailable</span>`;
+    list.appendChild(li);
+  });
+}
+
+function tableMeta(item) {
+  return item.source === 'peer' ? (item.peerName || item.peer_name || 'Peer') : 'IONe';
+}
+
+async function selectTable(item) {
+  tableActiveItem = item;
+  tablePeerCache = null;
+  tableState.page = 1;
+  tableState.perPage = Number(document.getElementById('table-per-page')?.value) || 25;
+  tableState.sortBy = item.source === 'peer' ? firstPeerSortColumn(item) : '_observed_at';
+  tableState.sortDir = item.source === 'peer' ? 'asc' : 'desc';
+  tableState.filters = {};
+  document.querySelectorAll('.table-row--active').forEach((row) => row.classList.remove('table-row--active'));
+  document.querySelector(`.table-row[data-table-id="${CSS.escape(item.id)}"]`)?.classList.add('table-row--active');
+  document.getElementById('table-title').textContent = item.name || 'Table';
+  document.getElementById('table-source-label').textContent = tableMeta(item);
+  hideTableRenderError();
+  await refreshActiveTable();
+}
+
+function firstPeerSortColumn(_item) {
+  return '';
+}
+
+async function refreshActiveTable() {
+  if (!tableActiveItem || !activeWorkspace) return;
+  if (tableActiveItem.source === 'peer') {
+    await refreshPeerTable(activeWorkspace.id, tableActiveItem);
+  } else {
+    await refreshIoneTable(activeWorkspace.id, tableActiveItem);
+  }
+}
+
+async function refreshIoneTable(workspaceId, item) {
+  const controller = replaceTableController();
+  showTableRenderLoading();
+  const streamId = item.streamId || item.stream_id;
+  const params = new URLSearchParams({
+    stream_id: streamId,
+    page: String(tableState.page),
+    per_page: String(tableState.perPage),
+    sort_by: tableState.sortBy || '_observed_at',
+    sort_dir: tableState.sortDir || 'desc',
+  });
+  const activeFilter = firstActiveFilter();
+  if (activeFilter) {
+    params.set('filter_col', activeFilter.name);
+    params.set('filter_val', activeFilter.value);
+  }
+  try {
+    const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/event-table?${params.toString()}`, {
+      skipErrorToast: true,
+      signal: controller.signal
+    });
+    if (controller.signal.aborted || !activeWorkspace || activeWorkspace.id !== workspaceId || tableActiveItem?.id !== item.id) return;
+    const columns = normalizeColumns(data.columns || []);
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    tableState.totalCount = Number(data.totalCount || data.total_count || rows.length);
+    tableState.truncated = !!data.truncated;
+    renderTable(columns, rows, { totalCount: tableState.totalCount });
+    hideTableRenderError();
+  } catch (err) {
+    if (controller.signal.aborted) return;
+    showTableRenderError(err.message || 'Could not load table data.');
+  }
+}
+
+async function refreshPeerTable(workspaceId, item) {
+  try {
+    if (!tablePeerCache) {
+      const controller = replaceTableController();
+      showTableRenderLoading();
+      const peerId = item.peerId || item.peer_id;
+      const params = new URLSearchParams({ peer_id: peerId, uri: item.uri });
+      const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/table-data?${params.toString()}`, {
+        skipErrorToast: true,
+        signal: controller.signal
+      });
+      if (controller.signal.aborted || !activeWorkspace || activeWorkspace.id !== workspaceId || tableActiveItem?.id !== item.id) return;
+      tablePeerCache = {
+        columns: normalizeColumns(data.schema || []),
+        rows: Array.isArray(data.rows) ? data.rows : []
+      };
+      if (!tableState.sortBy && tablePeerCache.columns[0]) {
+        tableState.sortBy = tablePeerCache.columns[0].name;
+      }
+    }
+    const sliced = slicePeerRows(tablePeerCache.columns, tablePeerCache.rows);
+    renderTable(tablePeerCache.columns, sliced.rows, { totalCount: sliced.totalCount });
+    hideTableRenderError();
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    showTableRenderError(err.message || 'Could not load table data.');
+  }
+}
+
+function replaceTableController() {
+  if (tableRequestController) tableRequestController.abort();
+  tableRequestController = new AbortController();
+  return tableRequestController;
+}
+
+function showTableRenderLoading() {
+  const live = document.getElementById('table-render-live');
+  if (live) live.textContent = 'Loading table rows';
+}
+
+function normalizeColumns(columns) {
+  return (Array.isArray(columns) ? columns : [])
+    .map((col) => {
+      const name = col.name || col.key || col.id;
+      if (!name) return null;
+      return {
+        name: String(name),
+        label: col.label || labelizeKey(name),
+        type: col.type || col.columnType || col.column_type || 'string',
+        pointer: col.pointer ?? null
+      };
+    })
+    .filter(Boolean);
+}
+
+function renderTable(columns, rows, { totalCount }) {
+  const region = document.getElementById('table-render-region');
+  const live = document.getElementById('table-render-live');
+  if (!region) return;
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const safeColumns = Array.isArray(columns) ? columns : [];
+  if (safeColumns.length === 0) {
+    region.innerHTML = '<p class="table-empty-copy">No columns available.</p>';
+    updateTablePager();
+    return;
+  }
+
+  const table = document.createElement('table');
+  table.className = 'data-table';
+  const caption = document.createElement('caption');
+  caption.textContent = `${Number(totalCount || safeRows.length).toLocaleString()} rows`;
+  table.appendChild(caption);
+
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  safeColumns.forEach((column) => {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.setAttribute('aria-sort', tableAriaSort(column.name));
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'table-sort-btn';
+    button.textContent = column.label || column.name;
+    button.addEventListener('click', () => sortTableBy(column.name));
+    th.appendChild(button);
+    headerRow.appendChild(th);
+  });
+  thead.appendChild(headerRow);
+
+  const filterRow = document.createElement('tr');
+  filterRow.className = 'table-filter-row';
+  safeColumns.forEach((column) => {
+    const td = document.createElement('td');
+    const input = document.createElement('input');
+    input.type = 'search';
+    input.value = tableState.filters[column.name] || '';
+    input.placeholder = 'Filter';
+    input.setAttribute('aria-label', `Filter ${column.label || column.name}`);
+    input.addEventListener('input', () => updateTableFilter(column.name, input.value));
+    td.appendChild(input);
+    filterRow.appendChild(td);
+  });
+  thead.appendChild(filterRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  safeRows.forEach((row) => {
+    const tr = document.createElement('tr');
+    safeColumns.forEach((column) => {
+      const td = document.createElement('td');
+      const value = row ? row[column.name] : null;
+      td.textContent = formatTableCell(value, column.type);
+      if (column.type === 'datetime' && value) {
+        td.title = String(value);
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  region.innerHTML = '';
+  region.appendChild(table);
+  if (live) live.textContent = `${safeRows.length} rows visible`;
+  updateTablePager();
+}
+
+function tableAriaSort(columnName) {
+  if (tableState.sortBy !== columnName) return 'none';
+  return tableState.sortDir === 'desc' ? 'descending' : 'ascending';
+}
+
+function sortTableBy(columnName) {
+  if (tableState.sortBy === columnName) {
+    tableState.sortDir = tableState.sortDir === 'desc' ? 'asc' : 'desc';
+  } else {
+    tableState.sortBy = columnName;
+    tableState.sortDir = 'asc';
+  }
+  tableState.page = 1;
+  refreshActiveTable();
+}
+
+let tableFilterTimer = null;
+function updateTableFilter(columnName, value) {
+  if (value) {
+    if (tableActiveItem?.source !== 'peer') {
+      tableState.filters = {};
+    }
+    tableState.filters[columnName] = value;
+  } else {
+    delete tableState.filters[columnName];
+  }
+  tableState.page = 1;
+  clearTimeout(tableFilterTimer);
+  tableFilterTimer = setTimeout(() => refreshActiveTable(), 200);
+}
+
+function firstActiveFilter() {
+  const entry = Object.entries(tableState.filters).find(([, value]) => String(value).length > 0);
+  return entry ? { name: entry[0], value: String(entry[1]) } : null;
+}
+
+function slicePeerRows(columns, rows) {
+  const filtered = rows.filter((row) => {
+    return Object.entries(tableState.filters).every(([key, filter]) => {
+      if (!filter) return true;
+      return String(row?.[key] ?? '').toLocaleLowerCase().includes(String(filter).toLocaleLowerCase());
+    });
+  });
+  const sortColumn = columns.find((column) => column.name === tableState.sortBy) || columns[0];
+  if (sortColumn) {
+    filtered.sort((a, b) => compareTableValues(a?.[sortColumn.name], b?.[sortColumn.name], sortColumn.type));
+    if (tableState.sortDir === 'desc') filtered.reverse();
+  }
+  const start = (tableState.page - 1) * tableState.perPage;
+  const end = start + tableState.perPage;
+  const pageRows = filtered.slice(start, end);
+  tableState.totalCount = filtered.length;
+  tableState.truncated = end < filtered.length;
+  return { rows: pageRows, totalCount: filtered.length };
+}
+
+function compareTableValues(a, b, type) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  if (type === 'number') {
+    const an = Number(a);
+    const bn = Number(b);
+    if (!Number.isNaN(an) && !Number.isNaN(bn)) return an - bn;
+  }
+  if (type === 'datetime') {
+    const at = Date.parse(a);
+    const bt = Date.parse(b);
+    if (!Number.isNaN(at) && !Number.isNaN(bt)) return at - bt;
+  }
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function formatTableCell(value, type) {
+  if (value == null) return '';
+  if (type === 'datetime') {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+  }
+  if (type === 'number' && typeof value === 'number') {
+    return Number.isInteger(value) ? String(value) : value.toFixed(3);
+  }
+  return String(value);
+}
+
+function updateTablePager() {
+  const pageStatus = document.getElementById('table-page-status');
+  const prev = document.getElementById('table-prev-page');
+  const next = document.getElementById('table-next-page');
+  const perPage = document.getElementById('table-per-page');
+  if (pageStatus) {
+    const total = Number(tableState.totalCount || 0).toLocaleString();
+    pageStatus.textContent = `Page ${tableState.page} · ${total} rows`;
+  }
+  if (prev) prev.disabled = tableState.page <= 1;
+  if (next) next.disabled = !tableState.truncated;
+  if (perPage) perPage.value = String(tableState.perPage);
+}
+
+function showTableState(state) {
+  document.getElementById('table-loading').hidden = state !== 'loading';
+  document.getElementById('table-empty').hidden = state !== 'empty';
+  document.getElementById('table-error').hidden = state !== 'error';
+  document.getElementById('table-workspace').hidden = state !== 'workspace';
+}
+
+function showTableError(message) {
+  document.getElementById('table-error-msg').textContent = message;
+  showTableState('error');
+}
+
+function showTableRenderError(message) {
+  const el = document.getElementById('table-render-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function hideTableRenderError() {
+  const el = document.getElementById('table-render-error');
+  if (!el) return;
+  el.textContent = '';
+  el.hidden = true;
+}
+
+initTablePanel();
 
 /* ── Connector + Stream API helpers ── */
 

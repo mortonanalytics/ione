@@ -47,6 +47,9 @@ pub enum AppError {
     #[error("connector error: {0}")]
     ConnectorError(String),
 
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+
     #[error("workspace binding conflict: foreign_tenant_id changed from {old} to {new}")]
     WorkspaceBindingConflict { old: String, new: String },
 
@@ -176,6 +179,14 @@ impl IntoResponse for AppError {
                 })),
             )
                 .into_response(),
+            AppError::PayloadTooLarge(msg) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({
+                    "error": "payload_too_large",
+                    "message": msg,
+                })),
+            )
+                .into_response(),
             AppError::WorkspaceBindingConflict { old, new } => (
                 StatusCode::CONFLICT,
                 Json(json!({
@@ -237,6 +248,7 @@ mod tests {
                 pull_command: "ollama pull llama3.2".into(),
             },
             AppError::ConnectorError("connector failed".into()),
+            AppError::PayloadTooLarge("too much".into()),
             AppError::WorkspaceBindingConflict {
                 old: "old".into(),
                 new: "new".into(),

@@ -471,9 +471,12 @@ async fn type_filter_excludes_non_matching_features() {
     )
     .await;
 
-    let status =
-        create_geojson_connector(&base, workspace_id, geojson_config(&format!("{}/feed", feed.uri())))
-            .await;
+    let status = create_geojson_connector(
+        &base,
+        workspace_id,
+        geojson_config(&format!("{}/feed", feed.uri())),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let total: i64 = sqlx::query_scalar("SELECT count(*) FROM stream_events")
@@ -514,9 +517,12 @@ async fn dedup_key_edge_cases_skip_invalid_features() {
     )
     .await;
 
-    let status =
-        create_geojson_connector(&base, workspace_id, geojson_config(&format!("{}/feed", feed.uri())))
-            .await;
+    let status = create_geojson_connector(
+        &base,
+        workspace_id,
+        geojson_config(&format!("{}/feed", feed.uri())),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let total: i64 = sqlx::query_scalar("SELECT count(*) FROM stream_events")

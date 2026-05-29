@@ -156,6 +156,47 @@ pub fn validate_view_config(vc: &Value) -> Result<(), String> {
     CompiledConfig::parse(vc).map(|_| ())
 }
 
+/// Return ordered table columns from `view_config.property_fields` only.
+///
+/// This intentionally ignores geo-only keys like `lon_pointer`, `lat_pointer`,
+/// and `style`, so a stream can remain table-readable even when map projection
+/// metadata is absent or invalid.
+pub fn table_property_columns(vc: &Value) -> Result<Vec<(String, Vec<String>)>, String> {
+    let property_fields = match vc.get("property_fields") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                let pointer = item.get("pointer").and_then(Value::as_str).ok_or_else(|| {
+                    ViewConfigError::PropertyPointerMissing { index: idx }.to_string()
+                })?;
+                validate_pointer_field("property_fields.pointer", pointer)
+                    .map_err(|e| e.to_string())?;
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "view_config.property_fields[].name missing".to_string())?
+                    .to_string();
+                Ok(PropertyField {
+                    pointer: pointer.to_string(),
+                    name,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+        Some(_) => return Err("view_config.property_fields must be an array".to_string()),
+    };
+    validate_property_names(&property_fields).map_err(|e| e.to_string())?;
+
+    property_fields
+        .into_iter()
+        .map(|field| {
+            let path = parse_json_pointer_path(&field.pointer)?;
+            Ok((field.name, path))
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 enum ViewConfigError {
     InvalidPointer { field: String, reason: String },
@@ -252,6 +293,34 @@ fn is_valid_property_name(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn parse_json_pointer_path(raw: &str) -> Result<Vec<String>, String> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !raw.starts_with('/') {
+        return Err("must be a JSON Pointer".to_string());
+    }
+    raw.split('/')
+        .skip(1)
+        .map(|part| {
+            let mut out = String::new();
+            let mut chars = part.chars();
+            while let Some(ch) = chars.next() {
+                if ch == '~' {
+                    match chars.next() {
+                        Some('0') => out.push('~'),
+                        Some('1') => out.push('/'),
+                        _ => return Err("invalid JSON Pointer escape".to_string()),
+                    }
+                } else {
+                    out.push(ch);
+                }
+            }
+            Ok(out)
+        })
+        .collect()
 }
 
 fn parse_style(

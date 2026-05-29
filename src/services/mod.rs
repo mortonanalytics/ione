@@ -18,6 +18,8 @@ pub mod router;
 pub mod rules;
 pub mod scheduler;
 pub mod session_service;
+pub mod table_data;
+pub mod table_panels;
 pub mod webhook_ingress;
 pub mod workspace_peer_binding;
 

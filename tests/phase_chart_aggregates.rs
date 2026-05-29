@@ -249,7 +249,10 @@ async fn chart_aggregates_baseline_guardrail_and_cross_org_scope() {
     assert_eq!(body["rows"].as_array().unwrap().len(), 35);
     // one event per day → trailing 30-day average is exactly 1.0 at every output bucket
     let avg = body["rows"][30]["trailing30dAvg"].as_f64().unwrap();
-    assert!((avg - 1.0).abs() < 1e-9, "expected trailing avg 1.0, got {avg}");
+    assert!(
+        (avg - 1.0).abs() < 1e-9,
+        "expected trailing avg 1.0, got {avg}"
+    );
     assert!(body["rows"][0]["bucketStart"].as_str().unwrap() >= "2026-05-01");
 
     let resp = get_aggregates(

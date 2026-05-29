@@ -77,6 +77,7 @@
         <button id="tab-chat" role="tab" aria-selected="true" aria-controls="panel-chat" class="tab tab--active">Chat</button>
         <button id="tab-map" role="tab" aria-selected="false" aria-controls="panel-map" class="tab">Map</button>
         <button id="tab-chart" role="tab" aria-selected="false" aria-controls="panel-chart" class="tab">Charts</button>
+        <button id="tab-table" role="tab" aria-selected="false" aria-controls="panel-table" class="tab">Tables</button>
         <button id="tab-connectors" role="tab" aria-selected="false" aria-controls="panel-connectors" class="tab">Connectors</button>
         <button id="tab-signals" role="tab" aria-selected="false" aria-controls="panel-signals" class="tab">Signals</button>
         <button id="tab-survivors" role="tab" aria-selected="false" aria-controls="panel-survivors" class="tab">Survivors</button>
@@ -184,6 +185,55 @@
                 <tbody></tbody>
               </table>
             </details>
+          </section>
+        </div>
+      </div>
+
+      <!-- Table panel -->
+      <div id="panel-table" role="tabpanel" aria-labelledby="tab-table" aria-label="Tables" hidden>
+        <div id="table-loading" class="table-state-overlay" aria-live="polite" hidden>
+          <div class="table-skeleton"></div>
+          <span>Loading tables...</span>
+        </div>
+        <div id="table-empty" class="table-state-overlay" hidden>
+          <p>No tables available in this workspace.</p>
+          <button id="table-connect-peer" type="button">Connect a peer</button>
+        </div>
+        <div id="table-error" class="table-state-overlay" role="status" aria-live="polite" hidden>
+          <p id="table-error-msg"></p>
+          <button id="table-error-retry" type="button">Retry</button>
+        </div>
+        <div id="table-workspace" class="table-workspace" hidden>
+          <aside class="table-sidebar" aria-label="Available tables">
+            <div class="table-sidebar-header">
+              <button id="table-refresh-btn" type="button">Refresh</button>
+            </div>
+            <div id="table-status" aria-live="polite"></div>
+            <ul id="table-list" role="list"></ul>
+          </aside>
+          <section id="table-render" class="table-render" aria-label="Selected table">
+            <header class="table-render-header">
+              <div>
+                <h2 id="table-title">Select a table</h2>
+                <span id="table-source-label"></span>
+              </div>
+              <div class="table-toolbar" aria-label="Table pagination">
+                <button id="table-prev-page" type="button" aria-label="Previous page" disabled>Previous</button>
+                <span id="table-page-status" aria-live="polite">Page 1</span>
+                <button id="table-next-page" type="button" aria-label="Next page" disabled>Next</button>
+                <label for="table-per-page">Rows</label>
+                <select id="table-per-page">
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                  <option value="200">200</option>
+                </select>
+                <button id="table-clear-filters" type="button">Clear filters</button>
+              </div>
+            </header>
+            <div id="table-render-error" class="table-render-error" role="alert" hidden></div>
+            <div id="table-render-live" class="sr-only" aria-live="polite"></div>
+            <div id="table-render-region" class="table-render-region"></div>
           </section>
         </div>
       </div>
