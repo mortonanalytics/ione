@@ -247,6 +247,17 @@ async fn table_data_reads_peer_resource_contents_text_and_requires_peer_id() {
         .await
         .expect("table-data response");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // AC-9: omitting uri (peer_id present) is also a 400.
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{base}/api/v1/workspaces/{workspace_id}/table-data?peer_id={peer_id}"
+        ))
+        .bearer_auth(TEST_STATIC_BEARER)
+        .send()
+        .await
+        .expect("table-data response");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -296,13 +307,32 @@ async fn table_data_caps_and_error_mapping() {
         .expect("table-data response");
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
+    // AC-10b: row-count cap (>5000 rows, well under the 2 MiB body cap) → 413.
+    let many_rows = MockServer::start().await;
+    let rows: Vec<Value> = (0..5001).map(|i| json!({ "x": i })).collect();
+    mock_resources_read(
+        &many_rows,
+        json!({ "schema": [{ "name": "x" }], "rows": rows }),
+    )
+    .await;
+    let many_rows_peer = seed_active_peer(&pool, workspace_id, "rows-peer", &many_rows.uri()).await;
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{base}/api/v1/workspaces/{workspace_id}/table-data?peer_id={many_rows_peer}&uri=stub%3A%2F%2Ftable%2F1"
+        ))
+        .bearer_auth(TEST_STATIC_BEARER)
+        .send()
+        .await
+        .expect("table-data response");
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
     let not_found = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "error": { "code": -32004, "message": "resource not found" }
+            "error": { "code": -32002, "message": "resource not found" }
         })))
         .mount(&not_found)
         .await;
@@ -328,7 +358,7 @@ async fn table_data_caps_and_error_mapping() {
         .expect("table-data response");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    let bad_peer = seed_active_peer(&pool, workspace_id, "bad-peer", "http://127.0.0.1:9").await;
+    let bad_peer = seed_active_peer(&pool, workspace_id, "bad-peer", "http://127.0.0.1:1").await;
     let resp = reqwest::Client::new()
         .get(format!(
             "{base}/api/v1/workspaces/{workspace_id}/table-data?peer_id={bad_peer}&uri=stub%3A%2F%2Ftable%2F1"

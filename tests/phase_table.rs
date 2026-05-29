@@ -183,8 +183,8 @@ async fn event_table_projects_paginates_sorts_filters_and_avoids_timestamp_colli
 
     let window = format!(
         "stream_id={stream_id}&since={}&until={}",
-        (start - Duration::minutes(1)).to_rfc3339(),
-        (start + Duration::days(1)).to_rfc3339()
+        (start - Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        (start + Duration::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     );
     let resp = get_table(&base, workspace_id, &format!("{window}&page=1&per_page=25")).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -215,6 +215,7 @@ async fn event_table_projects_paginates_sorts_filters_and_avoids_timestamp_colli
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.expect("json");
     assert_eq!(body["rows"].as_array().unwrap().len(), 11);
+    assert_eq!(body["totalCount"], 61);
     assert_eq!(body["truncated"], false);
 
     let resp = get_table(
@@ -286,13 +287,13 @@ async fn event_table_guardrails_default_window_and_cross_org_scope() {
         format!("stream_id={stream_id}&filter_val=quake"),
         format!(
             "stream_id={stream_id}&since={}&until={}",
-            recent.to_rfc3339(),
-            old.to_rfc3339()
+            recent.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            old.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         ),
         format!(
             "stream_id={stream_id}&since={}&until={}",
-            (recent - Duration::days(100)).to_rfc3339(),
-            recent.to_rfc3339()
+            (recent - Duration::days(100)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            recent.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         ),
     ] {
         let resp = get_table(&base, workspace_id, &query).await;

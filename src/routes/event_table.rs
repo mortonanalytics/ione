@@ -82,9 +82,12 @@ pub async fn get_event_table(
     .fetch_optional(&state.pool)
     .await
     .map_err(|err| AppError::Internal(anyhow::Error::new(err)))?
-    .map(|row| row.get("view_config"));
+    // view_config is a nullable JSONB column — decode as Option so a stream that
+    // exists with a NULL config doesn't panic (Value has no Decode for SQL NULL).
+    .and_then(|row| row.get::<Option<Value>, _>("view_config"));
 
-    let view_config = view_config.ok_or_else(|| AppError::NotFound("stream not found".into()))?;
+    let view_config =
+        view_config.ok_or_else(|| AppError::NotFound("stream not found in workspace".into()))?;
     let property_columns = table_property_columns(&view_config)
         .map_err(|err| AppError::BadRequest(format!("invalid table view_config: {err}")))?;
     if property_columns.is_empty() {

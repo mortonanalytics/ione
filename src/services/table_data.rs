@@ -86,7 +86,11 @@ async fn call_resources_read(
     })?;
     if let Some(err) = resp.get("error").filter(|v| !v.is_null()) {
         let message = rpc_error_message(err);
-        if looks_not_found(&message) {
+        // Map on the JSON-RPC error CODE, not the message: MCP "Resource not found"
+        // is -32002 → 404. Everything else (incl. -32601 "Method not found" = the peer
+        // doesn't implement resources/read) is a peer failure → 502. Matching the word
+        // "not found" in the message would mis-map -32601 to 404 and hide the real fault.
+        if err.get("code").and_then(Value::as_i64) == Some(-32002) {
             return Err(TableDataError::NotFound(message));
         }
         return Err(TableDataError::Unavailable(format!(
@@ -191,10 +195,3 @@ fn rpc_error_message(value: &Value) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
-fn looks_not_found(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("not found")
-        || lower.contains("unknown")
-        || lower.contains("no such")
-        || lower.contains("missing resource")
-}
