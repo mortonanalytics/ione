@@ -71,12 +71,16 @@ pub async fn get_event_aggregates(
     if query.op == "baseline" && bucket != "day" {
         return Err(AppError::BadRequest("baseline bucket must be day".into()));
     }
-    let bucket_count =
-        ((until - since).num_seconds() as f64 / bucket_duration.num_seconds() as f64).ceil() as i64;
-    if bucket_count > 1000 {
-        return Err(AppError::BadRequest(
-            "reduce window or increase bucket".into(),
-        ));
+    // group_by is a flat breakdown (no time buckets), so the bucket-count cap does not apply.
+    if query.op != "group_by" {
+        let bucket_count = ((until - since).num_seconds() as f64
+            / bucket_duration.num_seconds() as f64)
+            .ceil() as i64;
+        if bucket_count > 1000 {
+            return Err(AppError::BadRequest(
+                "reduce window or increase bucket".into(),
+            ));
+        }
     }
 
     let mut truncated = false;

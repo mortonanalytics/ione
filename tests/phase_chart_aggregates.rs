@@ -176,7 +176,8 @@ async fn chart_aggregates_cover_count_numeric_percentile_group_and_nonnumeric() 
     assert_eq!(body["rows"].as_array().unwrap().len(), 2);
     assert_eq!(body["rows"][0]["value"], 2);
     assert_eq!(body["rows"][1]["value"], 3);
-    assert!(body["rows"][0]["bucketStartMs"].as_i64().unwrap() > 0);
+    // epoch *milliseconds* (a regression to seconds would be ~1.78e9, not ~1.78e12)
+    assert!(body["rows"][0]["bucketStartMs"].as_i64().unwrap() > 1_700_000_000_000);
 
     let resp = get_aggregates(
         &base,
@@ -246,7 +247,9 @@ async fn chart_aggregates_baseline_guardrail_and_cross_org_scope() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.expect("json");
     assert_eq!(body["rows"].as_array().unwrap().len(), 35);
-    assert!(body["rows"][0]["trailing30dAvg"].as_f64().is_some());
+    // one event per day → trailing 30-day average is exactly 1.0 at every output bucket
+    let avg = body["rows"][30]["trailing30dAvg"].as_f64().unwrap();
+    assert!((avg - 1.0).abs() < 1e-9, "expected trailing avg 1.0, got {avg}");
     assert!(body["rows"][0]["bucketStart"].as_str().unwrap() >= "2026-05-01");
 
     let resp = get_aggregates(

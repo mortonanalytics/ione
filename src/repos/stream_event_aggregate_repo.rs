@@ -320,7 +320,10 @@ impl StreamEventAggregateRepo {
 fn bucket_expr(bucket: &str) -> &'static str {
     match bucket {
         "hour" => "date_trunc('hour', se.observed_at)",
+        "day" => "date_trunc('day', se.observed_at)",
         "week" => "date_trunc('week', se.observed_at)",
-        _ => "date_trunc('day', se.observed_at)",
+        // `bucket` is interpolated into SQL; callers must validate it against the
+        // allow-list (route layer) first. Fail loudly rather than silently default.
+        other => panic!("bucket '{other}' must be validated before bucket_expr"),
     }
 }
