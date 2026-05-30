@@ -166,12 +166,23 @@ fn extract_document_panel(peer: &Peer, resource: Value) -> Option<DocumentPanelI
         return None;
     }
 
-    let mime_type = meta
+    let mime_type = match meta
         .get("mime_type")
         .or_else(|| meta.get("mimeType"))
         .or_else(|| resource.get("mimeType"))
-        .and_then(Value::as_str)?
-        .to_string();
+        .and_then(Value::as_str)
+    {
+        Some(v) => v.to_string(),
+        None => {
+            tracing::warn!(
+                peer_id = %peer.id,
+                peer_name = %peer.name,
+                uri = %uri,
+                "dropping document panel resource: missing mime_type"
+            );
+            return None;
+        }
+    };
     let name = resource
         .get("name")
         .and_then(Value::as_str)
@@ -226,6 +237,7 @@ mod tests {
         }
         for raw in [
             "http://example.com/doc.pdf",
+            "http://localhost/doc.pdf",
             "http://127.0.0.1/doc.pdf",
             "http://10.0.0.5/doc.pdf",
             "file:///tmp/doc.pdf",

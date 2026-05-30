@@ -204,6 +204,7 @@ async fn document_panels_lists_peer_documents_with_camel_case_fields_and_nosniff
         "https://docs.example.com/incident.pdf"
     );
     assert_eq!(body["peerDocuments"][0]["mimeType"], "application/pdf");
+    assert_eq!(body["peerDocuments"][0]["source"], "peer");
     assert_eq!(body["peerDocuments"][0]["fileSizeBytes"], 2048);
     assert_eq!(
         body["peerDocuments"][0]["lastModified"],
@@ -254,6 +255,12 @@ async fn document_panels_omits_unsafe_urls_and_allows_on_prem_https() {
                 "stub://document/http-loopback",
                 "Bad loopback http",
                 "http://127.0.0.1/report.pdf",
+                "application/pdf",
+            ),
+            document_resource(
+                "stub://document/http-localhost",
+                "Bad localhost http",
+                "http://localhost/report.pdf",
                 "application/pdf",
             ),
             document_resource(

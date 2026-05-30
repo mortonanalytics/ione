@@ -130,7 +130,12 @@ test("sandbox-spike: Chromium loads the planned PDF sandbox rung", async ({ page
   }, PDF_URL);
 
   await pdfRequested;
-  expect(rung).toBe("allow-downloads allow-same-origin");
+  // Discovery test: records the rung Chromium needs for the fixture PDF. Assert the
+  // security invariant, not exact equality — a future Chromium that renders at
+  // "allow-downloads" alone must not fail this; the panel's DOCUMENT_IFRAME_SANDBOX
+  // constant is the canonical value (proven by AC-5).
+  expect(rung).toContain("allow-downloads");
+  expect(rung).not.toContain("allow-scripts");
 });
 
 test("AC-5 and AC-8: PDF renders inline with sandbox and link security", async ({ page }) => {
@@ -153,7 +158,12 @@ test("AC-5 and AC-8: PDF renders inline with sandbox and link security", async (
   await expect(iframe).toHaveAttribute("referrerpolicy", "no-referrer");
   await expect(iframe).toHaveAttribute("title", /Incident report - PDF document/);
   await expect(page.locator("#document-toolbar a[target='_blank']")).toHaveCount(2);
-  await expect(page.locator("#document-frame-container iframe a.document-fallback-link")).toHaveCount(1);
+  const fallback = page.locator("#document-frame-container iframe a.document-fallback-link");
+  await expect(fallback).toHaveCount(1);
+  await expect(fallback).toHaveAttribute("target", "_blank");
+  const fallbackRel = (await fallback.getAttribute("rel")) || "";
+  expect(fallbackRel).toContain("noopener");
+  expect(fallbackRel).toContain("noreferrer");
 
   const rels = await page.locator("#document-toolbar a").evaluateAll((links) =>
     links.map((link) => link.getAttribute("rel") || "")
@@ -195,4 +205,7 @@ test("AC-7: blocked PDF request falls back to link card", async ({ page }) => {
   const link = page.locator("#document-link-card a.document-primary-link");
   await expect(link).toHaveAttribute("href", DENIED_PDF_URL);
   await expect(link).toHaveAttribute("target", "_blank");
+  const rel = (await link.getAttribute("rel")) || "";
+  expect(rel).toContain("noopener");
+  expect(rel).toContain("noreferrer");
 });
