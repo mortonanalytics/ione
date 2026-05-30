@@ -1,7 +1,9 @@
 use axum::{
+    body::Body,
     extract::DefaultBodyLimit,
-    http::{header, HeaderValue, Method},
-    middleware::{from_fn, from_fn_with_state},
+    http::{header, HeaderValue, Method, Request},
+    middleware::{from_fn, from_fn_with_state, Next},
+    response::Response,
     routing::{delete, get, post, put},
     Router,
 };
@@ -27,6 +29,7 @@ pub mod chart_panels;
 pub mod chat;
 pub mod connectors;
 pub mod conversations;
+pub mod document_panels;
 pub mod event_aggregates;
 pub mod event_layers;
 pub mod event_table;
@@ -130,6 +133,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/table-data",
             get(table_data::get_table_data),
+        )
+        .route(
+            "/api/v1/workspaces/:id/document-panels",
+            get(document_panels::list_document_panels),
         )
         .route(
             "/api/v1/workspaces/:id/event-aggregates",
@@ -273,9 +280,19 @@ pub fn router(state: AppState) -> Router {
         .nest_service("/", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        .layer(from_fn(nosniff))
         .layer(axum::middleware::from_fn(
             crate::middleware::session_cookie::session_cookie,
         ))
+}
+
+async fn nosniff(req: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 fn cors_layer_from_env() -> CorsLayer {

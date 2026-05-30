@@ -78,6 +78,7 @@
         <button id="tab-map" role="tab" aria-selected="false" aria-controls="panel-map" class="tab">Map</button>
         <button id="tab-chart" role="tab" aria-selected="false" aria-controls="panel-chart" class="tab">Charts</button>
         <button id="tab-table" role="tab" aria-selected="false" aria-controls="panel-table" class="tab">Tables</button>
+        <button id="tab-document" role="tab" aria-selected="false" aria-controls="panel-document" class="tab">Documents</button>
         <button id="tab-connectors" role="tab" aria-selected="false" aria-controls="panel-connectors" class="tab">Connectors</button>
         <button id="tab-signals" role="tab" aria-selected="false" aria-controls="panel-signals" class="tab">Signals</button>
         <button id="tab-survivors" role="tab" aria-selected="false" aria-controls="panel-survivors" class="tab">Survivors</button>
@@ -234,6 +235,44 @@
             <div id="table-render-error" class="table-render-error" role="alert" hidden></div>
             <div id="table-render-live" class="sr-only" aria-live="polite"></div>
             <div id="table-render-region" class="table-render-region"></div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Document panel -->
+      <div id="panel-document" role="tabpanel" aria-labelledby="tab-document" aria-label="Documents" hidden>
+        <div id="document-loading" class="document-state-overlay" aria-live="polite" hidden>
+          <div class="document-skeleton"></div>
+          <span>Loading documents...</span>
+        </div>
+        <div id="document-empty" class="document-state-overlay" hidden>
+          <p>No documents available in this workspace.</p>
+          <button id="document-connect-peer" type="button">Connect a peer</button>
+        </div>
+        <div id="document-error" class="document-state-overlay" role="status" aria-live="polite" hidden>
+          <p id="document-error-msg"></p>
+          <button id="document-error-retry" type="button">Retry</button>
+        </div>
+        <div id="document-workspace" class="document-workspace" hidden>
+          <aside class="document-sidebar" aria-label="Available documents">
+            <div class="document-sidebar-header">
+              <button id="document-refresh-btn" type="button">Refresh</button>
+            </div>
+            <div id="document-status" aria-live="polite"></div>
+            <ul id="document-list" role="list"></ul>
+          </aside>
+          <section id="document-render" class="document-render" aria-label="Selected document">
+            <header class="document-render-header">
+              <div>
+                <h2 id="document-title">Select a document</h2>
+                <span id="document-source-label"></span>
+              </div>
+              <div id="document-toolbar" class="document-toolbar" aria-label="Document actions" hidden></div>
+            </header>
+            <div id="document-render-live" class="sr-only" aria-live="polite"></div>
+            <div id="document-notice" class="document-notice" role="status" hidden></div>
+            <div id="document-frame-container" class="document-frame-container"></div>
+            <div id="document-link-card" class="document-link-card" hidden></div>
           </section>
         </div>
       </div>

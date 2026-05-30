@@ -584,6 +584,11 @@ function setActiveWorkspace(ws) {
     updateTablePanel(ws.id);
   }
 
+  resetDocumentPanel();
+  if (activeTab === 'document') {
+    updateDocumentPanel(ws.id);
+  }
+
   // If the signals tab is active, reload signals for the new workspace.
   if (activeTab === 'signals') {
     loadSignals();
@@ -1009,6 +1014,7 @@ const tabChat          = document.getElementById('tab-chat');
 const tabMap           = document.getElementById('tab-map');
 const tabChart         = document.getElementById('tab-chart');
 const tabTable         = document.getElementById('tab-table');
+const tabDocument      = document.getElementById('tab-document');
 const tabConnectors    = document.getElementById('tab-connectors');
 const tabSignals       = document.getElementById('tab-signals');
 const tabSurvivors     = document.getElementById('tab-survivors');
@@ -1017,12 +1023,13 @@ const panelChat        = document.getElementById('panel-chat');
 const panelMap         = document.getElementById('panel-map');
 const panelChart       = document.getElementById('panel-chart');
 const panelTable       = document.getElementById('panel-table');
+const panelDocument    = document.getElementById('panel-document');
 const panelConnectors  = document.getElementById('panel-connectors');
 const panelSignals     = document.getElementById('panel-signals');
 const panelSurvivors   = document.getElementById('panel-survivors');
 const panelApprovals   = document.getElementById('panel-approvals');
 
-let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'table' | 'connectors' | 'signals' | 'survivors' | 'approvals'
+let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'table' | 'document' | 'connectors' | 'signals' | 'survivors' | 'approvals'
 
 function switchTab(name) {
   // Stop auto-refresh when leaving a polling tab.
@@ -1053,6 +1060,10 @@ function switchTab(name) {
   tabTable.setAttribute('aria-selected', String(name === 'table'));
   tabTable.classList.toggle('tab--active', name === 'table');
   panelTable.hidden = name !== 'table';
+
+  tabDocument.setAttribute('aria-selected', String(name === 'document'));
+  tabDocument.classList.toggle('tab--active', name === 'document');
+  panelDocument.hidden = name !== 'document';
 
   tabConnectors.setAttribute('aria-selected', String(name === 'connectors'));
   tabConnectors.classList.toggle('tab--active', name === 'connectors');
@@ -1088,6 +1099,10 @@ function switchTab(name) {
     updateTablePanel(activeWorkspace.id);
   }
 
+  if (name === 'document' && activeWorkspace && documentLoadedWorkspaceId !== activeWorkspace.id) {
+    updateDocumentPanel(activeWorkspace.id);
+  }
+
   if (name === 'signals' && activeWorkspace) {
     loadSignals();
     startSignalsPolling();
@@ -1108,6 +1123,7 @@ tabChat.addEventListener('click', () => switchTab('chat'));
 tabMap.addEventListener('click', () => switchTab('map'));
 tabChart.addEventListener('click', () => switchTab('chart'));
 tabTable.addEventListener('click', () => switchTab('table'));
+tabDocument.addEventListener('click', () => switchTab('document'));
 tabConnectors.addEventListener('click', () => switchTab('connectors'));
 tabSignals.addEventListener('click', () => switchTab('signals'));
 tabSurvivors.addEventListener('click', () => switchTab('survivors'));
@@ -1126,10 +1142,14 @@ tabChart.addEventListener('keydown', (e) => {
 });
 tabTable.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); tabChart.focus(); tabChart.click(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabDocument.focus(); tabDocument.click(); }
+});
+tabDocument.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabTable.focus(); tabTable.click(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
 });
 tabConnectors.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabTable.focus(); tabTable.click(); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabDocument.focus(); tabDocument.click(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); tabSignals.focus(); tabSignals.click(); }
 });
 tabSignals.addEventListener('keydown', (e) => {
@@ -2470,6 +2490,346 @@ function hideTableRenderError() {
 }
 
 initTablePanel();
+
+/* ── Document panel ── */
+
+const DOCUMENT_IFRAME_SANDBOX = 'allow-downloads allow-same-origin';
+const DOCUMENT_EMBED_TIMEOUT_MS = 3000;
+
+let documentLoadedWorkspaceId = null;
+let documentItems = [];
+let documentActiveItem = null;
+let documentRequestController = null;
+let documentEmbedTimer = null;
+
+function initDocumentPanel() {
+  document.getElementById('document-connect-peer')?.addEventListener('click', () => switchTab('connectors'));
+  document.getElementById('document-error-retry')?.addEventListener('click', () => {
+    if (activeWorkspace) updateDocumentPanel(activeWorkspace.id);
+  });
+  document.getElementById('document-refresh-btn')?.addEventListener('click', () => {
+    if (activeWorkspace) updateDocumentPanel(activeWorkspace.id);
+  });
+}
+
+function resetDocumentPanel() {
+  documentLoadedWorkspaceId = null;
+  documentItems = [];
+  documentActiveItem = null;
+  if (documentRequestController) {
+    documentRequestController.abort();
+    documentRequestController = null;
+  }
+  clearDocumentEmbed();
+  const list = document.getElementById('document-list');
+  if (list) list.innerHTML = '';
+  const status = document.getElementById('document-status');
+  if (status) status.textContent = '';
+  const title = document.getElementById('document-title');
+  if (title) title.textContent = 'Select a document';
+  const source = document.getElementById('document-source-label');
+  if (source) source.textContent = '';
+  const live = document.getElementById('document-render-live');
+  if (live) live.textContent = '';
+}
+
+async function updateDocumentPanel(workspaceId) {
+  documentLoadedWorkspaceId = workspaceId;
+  documentActiveItem = null;
+  showDocumentState('loading');
+  resetDocumentRender();
+  const controller = replaceDocumentController();
+  let data;
+  try {
+    data = await apiFetch(`/api/v1/workspaces/${workspaceId}/document-panels`, {
+      skipErrorToast: true,
+      signal: controller.signal
+    });
+  } catch (_err) {
+    if (controller.signal.aborted || !activeWorkspace || activeWorkspace.id !== workspaceId || documentLoadedWorkspaceId !== workspaceId) return;
+    showDocumentError('Could not load documents. The data sources may be temporarily unavailable.');
+    return;
+  }
+  if (!activeWorkspace || activeWorkspace.id !== workspaceId || documentLoadedWorkspaceId !== workspaceId) return;
+
+  documentItems = (data.peerDocuments || data.peer_documents || []).map(normalizeDocumentItem);
+  const peerErrors = data.peerErrors || data.peer_errors || [];
+  renderDocumentList(documentItems, peerErrors);
+
+  if (documentItems.length === 0) {
+    showDocumentState(peerErrors.length > 0 ? 'error' : 'empty');
+    if (peerErrors.length > 0) {
+      document.getElementById('document-error-msg').textContent = `Could not reach any connected peer (${peerErrors.length} failed).`;
+    }
+    return;
+  }
+
+  showDocumentState('workspace');
+}
+
+function normalizeDocumentItem(item) {
+  return {
+    id: item.id,
+    name: item.name || 'Document',
+    source: item.source || 'peer',
+    peerId: item.peerId || item.peer_id,
+    peerName: item.peerName || item.peer_name || 'Peer',
+    uri: item.uri,
+    downloadUrl: item.downloadUrl || item.download_url,
+    mimeType: item.mimeType || item.mime_type || 'application/octet-stream',
+    fileSizeBytes: item.fileSizeBytes ?? item.file_size_bytes ?? null,
+    lastModified: item.lastModified || item.last_modified || null
+  };
+}
+
+function renderDocumentList(items, peerErrors) {
+  const list = document.getElementById('document-list');
+  const status = document.getElementById('document-status');
+  list.innerHTML = '';
+  status.textContent = peerErrors.length > 0
+    ? `${peerErrors.length} peer could not be reached.`
+    : '';
+
+  items.forEach((item) => {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'document-row';
+    button.dataset.documentId = item.id;
+
+    const title = document.createElement('span');
+    title.className = 'document-row-title';
+    title.textContent = item.name;
+    button.appendChild(title);
+
+    const meta = document.createElement('span');
+    meta.className = 'document-row-meta';
+    meta.textContent = documentMeta(item);
+    button.appendChild(meta);
+
+    const badge = document.createElement('span');
+    badge.className = 'document-mime-badge';
+    badge.textContent = documentMimeLabel(item.mimeType);
+    button.appendChild(badge);
+
+    button.addEventListener('click', () => selectDocument(item));
+    li.appendChild(button);
+    list.appendChild(li);
+  });
+
+  peerErrors.forEach((peer) => {
+    const li = document.createElement('li');
+    li.className = 'document-row--error';
+    li.title = peer.error || 'Peer unavailable';
+    const icon = document.createElement('span');
+    icon.className = 'layer-error-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span');
+    label.textContent = `${peer.peerName || peer.peer_name || 'Peer'} unavailable`;
+    li.appendChild(icon);
+    li.appendChild(label);
+    list.appendChild(li);
+  });
+}
+
+function documentMeta(item) {
+  const details = [item.peerName || 'Peer'];
+  if (item.fileSizeBytes != null) details.push(formatBytes(item.fileSizeBytes));
+  if (item.lastModified) details.push(formatDate(item.lastModified));
+  return details.filter(Boolean).join(' · ');
+}
+
+function documentMimeLabel(mimeType) {
+  const value = String(mimeType || 'file').toLowerCase();
+  if (value === 'application/pdf') return 'PDF';
+  const parts = value.split('/');
+  return (parts[1] || parts[0] || 'file').slice(0, 16);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function selectDocument(item) {
+  documentActiveItem = item;
+  document.querySelectorAll('.document-row--active').forEach((row) => row.classList.remove('document-row--active'));
+  document.querySelector(`.document-row[data-document-id="${CSS.escape(item.id)}"]`)?.classList.add('document-row--active');
+  document.getElementById('document-title').textContent = item.name || 'Document';
+  document.getElementById('document-source-label').textContent = documentMeta(item);
+  resetDocumentRender();
+
+  if (isPdfDocument(item)) {
+    renderPdfDocument(item);
+  } else {
+    renderDocumentLinkCard(item);
+  }
+}
+
+function isPdfDocument(item) {
+  return String(item.mimeType || '').toLowerCase().split(';')[0].trim() === 'application/pdf';
+}
+
+function resetDocumentRender() {
+  clearDocumentEmbed();
+  const toolbar = document.getElementById('document-toolbar');
+  if (toolbar) {
+    toolbar.innerHTML = '';
+    toolbar.hidden = true;
+  }
+  const notice = document.getElementById('document-notice');
+  if (notice) {
+    notice.textContent = '';
+    notice.hidden = true;
+  }
+  const linkCard = document.getElementById('document-link-card');
+  if (linkCard) {
+    linkCard.innerHTML = '';
+    linkCard.hidden = true;
+  }
+}
+
+function clearDocumentEmbed() {
+  if (documentEmbedTimer) {
+    clearTimeout(documentEmbedTimer);
+    documentEmbedTimer = null;
+  }
+  const frameContainer = document.getElementById('document-frame-container');
+  if (frameContainer) frameContainer.innerHTML = '';
+}
+
+function renderPdfDocument(item) {
+  const frameContainer = document.getElementById('document-frame-container');
+  const toolbar = document.getElementById('document-toolbar');
+  const live = document.getElementById('document-render-live');
+  if (!frameContainer || !toolbar) return;
+
+  renderDocumentToolbar(item);
+  const iframe = document.createElement('iframe');
+  iframe.className = 'document-frame';
+  iframe.src = item.downloadUrl;
+  iframe.title = `${item.name || 'Document'} - PDF document`;
+  iframe.setAttribute('sandbox', DOCUMENT_IFRAME_SANDBOX);
+  iframe.setAttribute('referrerpolicy', 'no-referrer');
+
+  const fallback = buildDocumentLink(item, 'Open in new tab', 'document-fallback-link sr-only');
+  fallback.textContent = `Open ${item.name || 'document'} in new tab`;
+  iframe.appendChild(fallback);
+
+  iframe.addEventListener('load', () => {
+    if (documentActiveItem?.id !== item.id) return;
+    if (documentEmbedTimer) {
+      clearTimeout(documentEmbedTimer);
+      documentEmbedTimer = null;
+    }
+    let hasDocument = false;
+    try {
+      hasDocument = !!iframe.contentDocument;
+    } catch (_) {
+      hasDocument = false;
+    }
+    if (!hasDocument) {
+      showDocumentEmbedFallback(item);
+      return;
+    }
+    if (live) live.textContent = `${item.name || 'Document'} loaded`;
+  });
+  iframe.addEventListener('error', () => showDocumentEmbedFallback(item));
+
+  frameContainer.appendChild(iframe);
+  if (live) live.textContent = `Loading ${item.name || 'document'}`;
+  documentEmbedTimer = setTimeout(() => {
+    documentEmbedTimer = null;
+    let hasDocument = false;
+    try {
+      hasDocument = !!iframe.contentDocument;
+    } catch (_) {
+      hasDocument = false;
+    }
+    if (!hasDocument && documentActiveItem?.id === item.id) {
+      showDocumentEmbedFallback(item);
+    }
+  }, DOCUMENT_EMBED_TIMEOUT_MS);
+}
+
+function renderDocumentToolbar(item) {
+  const toolbar = document.getElementById('document-toolbar');
+  if (!toolbar) return;
+  toolbar.innerHTML = '';
+  toolbar.hidden = false;
+  toolbar.appendChild(buildDocumentLink(item, 'Open in new tab', 'document-action-link'));
+  const download = buildDocumentLink(item, 'Download', 'document-action-link');
+  download.setAttribute('download', '');
+  toolbar.appendChild(download);
+}
+
+function showDocumentEmbedFallback(item) {
+  clearDocumentEmbed();
+  const notice = document.getElementById('document-notice');
+  if (notice) {
+    notice.textContent = 'This document could not be displayed inline.';
+    notice.hidden = false;
+  }
+  renderDocumentLinkCard(item);
+}
+
+function renderDocumentLinkCard(item) {
+  clearDocumentEmbed();
+  const toolbar = document.getElementById('document-toolbar');
+  if (toolbar) {
+    toolbar.innerHTML = '';
+    toolbar.hidden = true;
+  }
+  const card = document.getElementById('document-link-card');
+  if (!card) return;
+  card.innerHTML = '';
+  card.hidden = false;
+
+  const title = document.createElement('h3');
+  title.textContent = item.name || 'Document';
+  card.appendChild(title);
+
+  const meta = document.createElement('p');
+  meta.className = 'document-link-meta';
+  meta.textContent = `${documentMimeLabel(item.mimeType)} · ${documentMeta(item)}`;
+  card.appendChild(meta);
+
+  card.appendChild(buildDocumentLink(item, 'Open in new tab', 'document-primary-link'));
+}
+
+function buildDocumentLink(item, label, className) {
+  const link = document.createElement('a');
+  link.href = item.downloadUrl;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.className = className;
+  link.textContent = label;
+  link.setAttribute('aria-label', `${label} ${item.name || 'document'} (opens in new tab)`);
+  return link;
+}
+
+function replaceDocumentController() {
+  if (documentRequestController) documentRequestController.abort();
+  documentRequestController = new AbortController();
+  return documentRequestController;
+}
+
+function showDocumentState(state) {
+  document.getElementById('document-loading').hidden = state !== 'loading';
+  document.getElementById('document-empty').hidden = state !== 'empty';
+  document.getElementById('document-error').hidden = state !== 'error';
+  document.getElementById('document-workspace').hidden = state !== 'workspace';
+}
+
+function showDocumentError(message) {
+  document.getElementById('document-error-msg').textContent = message;
+  showDocumentState('error');
+}
+
+initDocumentPanel();
 
 /* ── Connector + Stream API helpers ── */
 

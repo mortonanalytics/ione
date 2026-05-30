@@ -4,6 +4,7 @@ pub mod chart_panels;
 pub mod claim_mapper;
 pub mod critic;
 pub mod delivery;
+pub mod document_panels;
 pub mod event_layers;
 pub mod funnel;
 pub mod generator;
