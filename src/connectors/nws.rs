@@ -166,6 +166,7 @@ impl ConnectorImpl for NwsConnector {
             events: vec![StreamEventInput {
                 payload: properties,
                 observed_at,
+                dedup_key: None,
             }],
             next_cursor: None,
         })

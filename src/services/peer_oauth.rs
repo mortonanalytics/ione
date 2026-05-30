@@ -184,6 +184,11 @@ pub async fn complete_callback(
         .context("peer token json")?;
     let access_hash = sha256_hex(&tokens.access_token);
     let access_ciphertext = crate::util::token_crypto::encrypt_token(&tokens.access_token)?;
+    let refresh_ciphertext = tokens
+        .refresh_token
+        .as_deref()
+        .map(crate::util::token_crypto::encrypt_token)
+        .transpose()?;
     let refresh_hash = tokens
         .refresh_token
         .as_ref()
@@ -198,6 +203,7 @@ pub async fn complete_callback(
             &access_hash,
             &refresh_hash,
             &access_ciphertext,
+            refresh_ciphertext.as_deref(),
             expires_at,
         )
         .await?;

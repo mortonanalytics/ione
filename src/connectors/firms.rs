@@ -128,6 +128,7 @@ fn parse_csv_events(csv: &str) -> anyhow::Result<Vec<StreamEventInput>> {
         events.push(StreamEventInput {
             payload: row,
             observed_at,
+            dedup_key: None,
         });
     }
     Ok(events)

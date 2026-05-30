@@ -2,12 +2,12 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
     models::{Peer, WorkspacePeerBinding},
     repos::{PeerRepo, WorkspacePeerBindingRepo},
+    state::AppState,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -23,28 +23,24 @@ pub struct WhoamiResponse {
     pub foreign_roles: Vec<String>,
 }
 
-pub async fn fetch_whoami(peer: &Peer) -> anyhow::Result<WhoamiResponse> {
+pub async fn fetch_whoami(state: &AppState, peer: &Peer) -> anyhow::Result<WhoamiResponse> {
     let endpoint = peer.mcp_url.trim_end_matches('/');
-    let token = if let Some(ciphertext) = peer.access_token_ciphertext.as_deref() {
-        crate::util::token_crypto::decrypt_token(ciphertext)?
-    } else {
-        std::env::var("IONE_OAUTH_STATIC_BEARER").unwrap_or_default()
-    };
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()?;
-    let mut req = client.post(endpoint).json(&json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "resources/read",
-        "params": { "uri": "whoami://" }
-    }));
-    if !token.is_empty() {
-        req = req.bearer_auth(token);
-    }
-
-    let body: Value = req.send().await?.error_for_status()?.json().await?;
+    let body: Value = crate::services::peer_tokens::send_mcp_request(
+        &state.pool,
+        &state.http,
+        peer,
+        endpoint,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": { "uri": "whoami://" }
+        }),
+    )
+    .await?
+    .error_for_status()?
+    .json()
+    .await?;
     if let Some(err) = body.get("error").filter(|err| !err.is_null()) {
         anyhow::bail!("peer MCP error: {}", err);
     }
@@ -61,15 +57,15 @@ pub async fn fetch_whoami(peer: &Peer) -> anyhow::Result<WhoamiResponse> {
 }
 
 pub async fn bind_on_subscribe(
-    pool: &PgPool,
+    state: &AppState,
     workspace_id: Uuid,
     peer: &Peer,
 ) -> anyhow::Result<WorkspacePeerBinding> {
-    let whoami = tokio::time::timeout(Duration::from_secs(3), fetch_whoami(peer))
+    let whoami = tokio::time::timeout(Duration::from_secs(3), fetch_whoami(state, peer))
         .await
         .ok()
         .and_then(Result::ok);
-    WorkspacePeerBindingRepo::new(pool.clone())
+    WorkspacePeerBindingRepo::new(state.pool.clone())
         .upsert_from_subscribe(workspace_id, peer.id, whoami.as_ref())
         .await
 }
@@ -83,23 +79,23 @@ pub enum RefreshError {
 }
 
 pub async fn refresh_binding(
-    pool: &PgPool,
+    state: &AppState,
     binding_id: Uuid,
     org_id: Uuid,
 ) -> Result<WorkspacePeerBinding, RefreshError> {
-    let binding_repo = WorkspacePeerBindingRepo::new(pool.clone());
+    let binding_repo = WorkspacePeerBindingRepo::new(state.pool.clone());
     let binding = binding_repo
         .get_by_id_org_scoped(binding_id, org_id)
         .await
         .map_err(RefreshError::Db)?
         .ok_or(RefreshError::NotFound)?;
-    let peer = PeerRepo::new(pool.clone())
+    let peer = PeerRepo::new(state.pool.clone())
         .get(binding.peer_id)
         .await
         .map_err(RefreshError::Db)?
         .ok_or(RefreshError::PeerGone)?;
 
-    let whoami = fetch_whoami(&peer)
+    let whoami = fetch_whoami(state, &peer)
         .await
         .map_err(|e| RefreshError::Unreachable(e.to_string()))?;
     let old = binding.foreign_tenant_id.clone();

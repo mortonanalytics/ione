@@ -1,4 +1,4 @@
-use std::{net::IpAddr, str::FromStr, time::Duration};
+use std::{str::FromStr, time::Duration};
 
 use anyhow::{anyhow, bail, Context};
 use base64::Engine as _;
@@ -10,7 +10,13 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::models::ConnectorKind;
+use crate::{
+    models::ConnectorKind,
+    util::{
+        json_pointer::validate_json_pointer,
+        url_guard::{ensure_safe_url, parse_and_validate_url},
+    },
+};
 
 use super::{ConnectorImpl, PollResult, StreamDescriptor, StreamEventInput};
 
@@ -531,25 +537,6 @@ impl StreamConfig {
     }
 }
 
-fn validate_json_pointer(ptr: &str) -> anyhow::Result<()> {
-    if ptr.is_empty() {
-        return Ok(());
-    }
-    if !ptr.starts_with('/') {
-        bail!("JSON Pointer must be empty or start with '/'");
-    }
-    let mut chars = ptr.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '~' {
-            match chars.next() {
-                Some('0') | Some('1') => {}
-                _ => bail!("JSON Pointer contains invalid '~' escape"),
-            }
-        }
-    }
-    Ok(())
-}
-
 fn parse_method(method: &str) -> anyhow::Result<Method> {
     match method.to_ascii_uppercase().as_str() {
         "GET" => Ok(Method::GET),
@@ -629,51 +616,6 @@ fn default_stream_schema(stream: &StreamConfig, operation: &Value) -> Value {
         "type": "object",
         "description": format!("{} ({})", description, stream.name)
     })
-}
-
-fn parse_and_validate_url(raw: &str, label: &str) -> anyhow::Result<Url> {
-    let url = Url::parse(raw).with_context(|| format!("invalid {} URL '{}'", label, raw))?;
-    ensure_safe_url(&url, label)?;
-    Ok(url)
-}
-
-fn ensure_safe_url(url: &Url, label: &str) -> anyhow::Result<()> {
-    match url.scheme() {
-        "https" => {}
-        "http" => {
-            let host = url
-                .host_str()
-                .ok_or_else(|| anyhow!("unsafe URL in {}: missing host", label))?;
-            if !host_is_http_allowed(host) {
-                bail!(
-                    "unsafe URL in {}: http is only allowed for localhost or private IP hosts",
-                    label
-                );
-            }
-        }
-        other => bail!("unsafe URL in {}: unsupported scheme '{}'", label, other),
-    }
-
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow!("unsafe URL in {}: missing host", label))?;
-    if host.eq_ignore_ascii_case("169.254.169.254") {
-        bail!("unsafe URL in {}: blocked metadata IP", label);
-    }
-
-    Ok(())
-}
-
-fn host_is_http_allowed(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-
-    match IpAddr::from_str(host) {
-        Ok(IpAddr::V4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
-        Ok(IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unique_local(),
-        Err(_) => false,
-    }
 }
 
 fn merge_maps(base: &Map<String, Value>, overlay: &Map<String, Value>) -> Map<String, Value> {
@@ -827,6 +769,7 @@ fn extract_events_from_response(stream: &StreamConfig, body: &Value) -> anyhow::
                 "record": record,
             }),
             observed_at,
+            dedup_key: None,
         });
     }
 

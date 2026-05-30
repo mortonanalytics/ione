@@ -185,7 +185,7 @@ pub async fn refresh_binding(
     Path((workspace_id, binding_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, AppError> {
     ensure_binding_in_workspace(&state, ctx.org_id, workspace_id, binding_id).await?;
-    match workspace_peer_binding::refresh_binding(&state.pool, binding_id, ctx.org_id).await {
+    match workspace_peer_binding::refresh_binding(&state, binding_id, ctx.org_id).await {
         Ok(binding) => Ok(Json(
             serde_json::to_value(binding).map_err(|e| AppError::Internal(e.into()))?,
         )),

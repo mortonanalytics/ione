@@ -3,8 +3,10 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use sqlx::Row;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -14,9 +16,11 @@ use crate::{
     error::AppError,
     middleware::session_cookie::SessionId,
     models::{
-        ActivationStepKey, ActivationTrack, ConnectorKind, PipelineEventInput, PipelineEventStage,
+        ActivationStepKey, ActivationTrack, ActorKind, ConnectorKind, PipelineEventInput,
+        PipelineEventStage,
     },
-    repos::{ConnectorRepo, PipelineEventRepo, StreamEventRepo, StreamRepo},
+    repos::{ConnectorRepo, InsertOutcome, PipelineEventRepo, StreamEventRepo, StreamRepo},
+    services::event_layers::validate_view_config,
     state::AppState,
 };
 
@@ -35,6 +39,13 @@ pub struct ValidateBody {
     pub name: String,
     #[serde(default)]
     pub config: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutViewConfigResponse {
+    pub id: Uuid,
+    pub view_config: Value,
 }
 
 pub async fn list_connectors(
@@ -277,11 +288,16 @@ async fn run_initial_connector_poll(
         let mut inserted_count = 0usize;
         for evt in poll_result.events {
             match event_repo
-                .insert_if_absent(stream.id, evt.payload, evt.observed_at)
+                .insert_event(
+                    stream.id,
+                    evt.payload,
+                    evt.observed_at,
+                    evt.dedup_key.as_deref(),
+                )
                 .await
             {
-                Ok(true) => inserted_count += 1,
-                Ok(false) => {}
+                Ok(InsertOutcome::Inserted) => inserted_count += 1,
+                Ok(InsertOutcome::Updated | InsertOutcome::Duplicate) => {}
                 Err(err) => {
                     emit_pipeline_error(
                         state,
@@ -372,31 +388,121 @@ async fn emit_pipeline_error(
 
 pub async fn list_streams(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(connector_id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
     let repo = StreamRepo::new(state.pool.clone());
-    let items = repo.list(connector_id).await.map_err(AppError::Internal)?;
+    let items = repo
+        .list_in_org(connector_id, ctx.org_id)
+        .await
+        .map_err(AppError::Internal)?;
     Ok(Json(json!({ "items": items })))
 }
 
-pub async fn poll_stream(State(state): State<AppState>, Path(stream_id): Path<Uuid>) -> Response {
-    match do_poll_stream(state, stream_id).await {
+pub async fn poll_stream(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(stream_id): Path<Uuid>,
+) -> Response {
+    match do_poll_stream(state, ctx.org_id, stream_id).await {
         Ok(resp) => resp.into_response(),
         Err(e) => e.into_response(),
     }
 }
 
-async fn do_poll_stream(state: AppState, stream_id: Uuid) -> Result<Json<Value>, AppError> {
+pub async fn put_stream_view_config(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(stream_id): Path<Uuid>,
+    Json(body): Json<Value>,
+) -> Result<Json<PutViewConfigResponse>, AppError> {
+    validate_view_config(&body).map_err(AppError::UnprocessableEntity)?;
+
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    let stream = sqlx::query(
+        "SELECT s.view_config, c.workspace_id
+         FROM streams s
+         JOIN connectors c ON c.id = s.connector_id
+         JOIN workspaces w ON w.id = c.workspace_id
+         WHERE s.id = $1 AND w.org_id = $2",
+    )
+    .bind(stream_id)
+    .bind(ctx.org_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|err| AppError::Internal(err.into()))?
+    .ok_or_else(|| AppError::NotFound("stream not found".into()))?;
+
+    let old_view_config: Option<Value> = stream
+        .try_get("view_config")
+        .map_err(|err| AppError::Internal(err.into()))?;
+    let workspace_id: Uuid = stream
+        .try_get("workspace_id")
+        .map_err(|err| AppError::Internal(err.into()))?;
+    let old_hash = old_view_config.as_ref().map(stable_json_hash);
+
+    let updated_id: Uuid = sqlx::query_scalar(
+        "UPDATE streams
+         SET view_config = $2
+         WHERE id = $1
+         RETURNING id",
+    )
+    .bind(stream_id)
+    .bind(body.clone())
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|err| AppError::Internal(err.into()))?;
+    let new_hash = stable_json_hash(&body);
+
+    sqlx::query(
+        "INSERT INTO audit_events
+           (workspace_id, actor_kind, actor_ref, verb, object_kind, object_id, payload)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(workspace_id)
+    .bind(ActorKind::User)
+    .bind(ctx.user_id.to_string())
+    .bind("stream.view_config.updated")
+    .bind("stream")
+    .bind(stream_id)
+    .bind(json!({
+        "old_hash": old_hash,
+        "new_hash": new_hash,
+    }))
+    .execute(&mut *tx)
+    .await
+    .map_err(|err| AppError::Internal(err.into()))?;
+
+    tx.commit()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    Ok(Json(PutViewConfigResponse {
+        id: updated_id,
+        view_config: body,
+    }))
+}
+
+async fn do_poll_stream(
+    state: AppState,
+    org_id: Uuid,
+    stream_id: Uuid,
+) -> Result<Json<Value>, AppError> {
     let stream_repo = StreamRepo::new(state.pool.clone());
     let connector_repo = ConnectorRepo::new(state.pool.clone());
     let event_repo = StreamEventRepo::new(state.pool.clone());
 
     // Look up the stream
     let stream = stream_repo
-        .get(stream_id)
+        .get_in_org(stream_id, org_id)
         .await
         .map_err(AppError::Internal)?
-        .ok_or_else(|| AppError::BadRequest(format!("stream {} not found", stream_id)))?;
+        .ok_or_else(|| AppError::NotFound("stream not found".into()))?;
 
     // Look up the connector
     let connector = connector_repo
@@ -438,14 +544,24 @@ async fn do_poll_stream(state: AppState, stream_id: Uuid) -> Result<Json<Value>,
     // Insert events with dedup
     let mut ingested: i64 = 0;
     for evt in poll_result.events {
-        let inserted = event_repo
-            .insert_if_absent(stream_id, evt.payload, evt.observed_at)
+        let outcome = event_repo
+            .insert_event(
+                stream_id,
+                evt.payload,
+                evt.observed_at,
+                evt.dedup_key.as_deref(),
+            )
             .await
             .map_err(AppError::Internal)?;
-        if inserted {
+        if matches!(outcome, InsertOutcome::Inserted) {
             ingested += 1;
         }
     }
 
     Ok(Json(json!({ "ingested": ingested })))
+}
+
+fn stable_json_hash(value: &Value) -> String {
+    let bytes = serde_json::to_vec(value).expect("serde_json::Value always serializes");
+    hex::encode(Sha256::digest(bytes))
 }

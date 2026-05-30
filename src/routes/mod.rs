@@ -1,8 +1,10 @@
 use axum::{
+    body::Body,
     extract::DefaultBodyLimit,
-    http::{header, HeaderValue, Method},
-    middleware::{from_fn, from_fn_with_state},
-    routing::{delete, get, post},
+    http::{header, HeaderValue, Method, Request},
+    middleware::{from_fn, from_fn_with_state, Next},
+    response::Response,
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
@@ -22,10 +24,15 @@ pub mod audit_events;
 pub mod auth_routes;
 pub mod bindings;
 pub mod broker;
+pub mod chart_data;
+pub mod chart_panels;
 pub mod chat;
 pub mod connectors;
 pub mod conversations;
+pub mod document_panels;
+pub mod event_aggregates;
 pub mod event_layers;
+pub mod event_table;
 pub mod feed;
 pub mod health;
 pub mod map_layers;
@@ -38,6 +45,8 @@ pub mod pipeline_events;
 pub mod public_issuers;
 pub mod signals;
 pub mod survivors;
+pub mod table_data;
+pub mod table_panels;
 pub mod telemetry;
 pub mod webhooks;
 pub mod well_known;
@@ -110,6 +119,34 @@ pub fn router(state: AppState) -> Router {
             get(map_layers::list_map_layers),
         )
         .route(
+            "/api/v1/workspaces/:id/chart-panels",
+            get(chart_panels::list_chart_panels),
+        )
+        .route(
+            "/api/v1/workspaces/:id/chart-data",
+            get(chart_data::get_chart_data),
+        )
+        .route(
+            "/api/v1/workspaces/:id/table-panels",
+            get(table_panels::list_table_panels),
+        )
+        .route(
+            "/api/v1/workspaces/:id/table-data",
+            get(table_data::get_table_data),
+        )
+        .route(
+            "/api/v1/workspaces/:id/document-panels",
+            get(document_panels::list_document_panels),
+        )
+        .route(
+            "/api/v1/workspaces/:id/event-aggregates",
+            get(event_aggregates::get_event_aggregates),
+        )
+        .route(
+            "/api/v1/workspaces/:id/event-table",
+            get(event_table::get_event_table),
+        )
+        .route(
             "/api/v1/workspaces/:id/event-layers",
             get(event_layers::list_event_layers),
         )
@@ -130,6 +167,10 @@ pub fn router(state: AppState) -> Router {
             get(connectors::list_streams),
         )
         .route("/api/v1/streams/:id/poll", post(connectors::poll_stream))
+        .route(
+            "/api/v1/streams/:id/view-config",
+            put(connectors::put_stream_view_config),
+        )
         .route("/api/v1/workspaces/:id/signals", get(signals::list_signals))
         .route(
             "/api/v1/workspaces/:id/survivors",
@@ -239,9 +280,19 @@ pub fn router(state: AppState) -> Router {
         .nest_service("/", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        .layer(from_fn(nosniff))
         .layer(axum::middleware::from_fn(
             crate::middleware::session_cookie::session_cookie,
         ))
+}
+
+async fn nosniff(req: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 fn cors_layer_from_env() -> CorsLayer {

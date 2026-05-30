@@ -7,6 +7,8 @@ use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+use ione::services::event_layers::{project_event_layers, GeoEventRow, GeoStreamRow};
+
 mod support;
 use support::event_layer_seeder::seed_geo_stream;
 
@@ -94,6 +96,30 @@ fn usgs_event(lon: f64, lat: f64, mag: f64) -> Value {
     })
 }
 
+fn event_row(stream_id: Uuid, payload: Value) -> GeoEventRow {
+    GeoEventRow {
+        event_id: Uuid::new_v4(),
+        stream_id,
+        payload,
+        observed_at: Utc::now(),
+    }
+}
+
+fn project_one_config(view_config: Value) -> Value {
+    let stream_id = Uuid::new_v4();
+    let resp = project_event_layers(
+        vec![GeoStreamRow {
+            stream_id,
+            stream_name: "test-stream".to_string(),
+            view_config,
+        }],
+        vec![],
+        5000,
+        Utc::now(),
+    );
+    json!(resp)
+}
+
 async fn get_event_layers(base: &str, workspace_id: Uuid, query: &str) -> reqwest::Response {
     let url = if query.is_empty() {
         format!("{base}/api/v1/workspaces/{workspace_id}/event-layers")
@@ -106,6 +132,135 @@ async fn get_event_layers(base: &str, workspace_id: Uuid, query: &str) -> reqwes
         .send()
         .await
         .expect("event layers response")
+}
+
+#[test]
+fn phase2_validator_rejects_bad_config_fixtures_with_field_names() {
+    let cases = [
+        (
+            json!({ "lon_pointer": "x", "lat_pointer": "/lat" }),
+            "lon_pointer",
+        ),
+        (json!({ "lat_pointer": "/lat" }), "lon_pointer"),
+        (
+            json!({
+                "lon_pointer": "/lon",
+                "lat_pointer": "/lat",
+                "property_fields": [{ "pointer": "/mag", "name": "1mag" }]
+            }),
+            "property_fields",
+        ),
+        (
+            json!({
+                "lon_pointer": "/lon",
+                "lat_pointer": "/lat",
+                "property_fields": [
+                    { "pointer": "/mag", "name": "mag" },
+                    { "pointer": "/depth", "name": "mag" }
+                ]
+            }),
+            "duplicate",
+        ),
+        (
+            json!({
+                "lon_pointer": "/lon",
+                "lat_pointer": "/lat",
+                "property_fields": [{ "pointer": "/mag", "name": "mag" }],
+                "style": { "size_field": "mag", "size_domain": [1, 10] }
+            }),
+            "size",
+        ),
+        (
+            json!({
+                "lon_pointer": "/lon",
+                "lat_pointer": "/lat",
+                "property_fields": [{ "pointer": "/mag", "name": "mag" }],
+                "style": {
+                    "color_field": "depth",
+                    "color_domain": [1, 10],
+                    "color_range": ["#ffff00", "#ff0000"]
+                }
+            }),
+            "color_field",
+        ),
+    ];
+
+    for (config, expected) in cases {
+        let body = project_one_config(config);
+        let err = body["streamsFailed"][0]["error"].as_str().unwrap();
+        assert!(
+            err.contains(expected),
+            "expected error to contain {expected}, got {err}"
+        );
+    }
+}
+
+#[test]
+fn phase2_projection_skips_features_with_bad_coordinates_without_failing_stream() {
+    let stream_id = Uuid::new_v4();
+    let resp = project_event_layers(
+        vec![GeoStreamRow {
+            stream_id,
+            stream_name: "mixed".to_string(),
+            view_config: usgs_config(),
+        }],
+        vec![
+            event_row(stream_id, usgs_event(-122.0, 37.0, 5.1)),
+            event_row(
+                stream_id,
+                json!({ "geometry": { "coordinates": ["bad", null] } }),
+            ),
+        ],
+        5000,
+        Utc::now(),
+    );
+
+    assert_eq!(resp.streams_failed.len(), 0);
+    assert_eq!(resp.layers.len(), 1);
+    assert_eq!(resp.layers[0].features_skipped, 1);
+    assert_eq!(
+        resp.layers[0].collection["features"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+// AC-3 + AC-12: one bad stream lands in streamsFailed while a good stream still
+// renders; projection returns a normal response instead of bubbling an error.
+#[test]
+fn phase2_bad_stream_config_is_partial_failure_not_whole_endpoint_failure() {
+    let good_stream = Uuid::new_v4();
+    let bad_stream = Uuid::new_v4();
+    let resp = project_event_layers(
+        vec![
+            GeoStreamRow {
+                stream_id: bad_stream,
+                stream_name: "bad".to_string(),
+                view_config: json!({
+                    "lon_pointer": "/lon",
+                    "lat_pointer": "/lat",
+                    "property_fields": [{ "pointer": "/mag", "name": "mag" }],
+                    "style": { "size_field": "mag", "size_range": [4, 20] }
+                }),
+            },
+            GeoStreamRow {
+                stream_id: good_stream,
+                stream_name: "good".to_string(),
+                view_config: usgs_config(),
+            },
+        ],
+        vec![event_row(good_stream, usgs_event(-122.0, 37.0, 5.1))],
+        5000,
+        Utc::now(),
+    );
+
+    assert_eq!(resp.layers.len(), 1);
+    assert_eq!(resp.streams_ok, vec![good_stream]);
+    assert_eq!(resp.streams_failed.len(), 1);
+    assert_eq!(resp.streams_failed[0].stream_id, bad_stream);
+    assert!(resp.streams_failed[0].error.contains("size"));
 }
 
 // AC-1 + AC-4: happy-path projection, one feature per event, no payload leakage.

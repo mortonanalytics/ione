@@ -25,7 +25,7 @@ impl PeerRepo {
              SELECT org_id, $1, $2, id, $4 FROM trust_issuers WHERE id = $3
              RETURNING id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                  oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                 token_expires_at, tool_allowlist",
+                 refresh_token_ciphertext, token_expires_at, tool_allowlist",
         )
         .bind(name)
         .bind(mcp_url)
@@ -40,7 +40,7 @@ impl PeerRepo {
         sqlx::query_as::<_, Peer>(
             "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                  oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                 token_expires_at, tool_allowlist
+                 refresh_token_ciphertext, token_expires_at, tool_allowlist
              FROM peers
              ORDER BY created_at DESC",
         )
@@ -53,7 +53,7 @@ impl PeerRepo {
         sqlx::query_as::<_, Peer>(
             "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                  oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                 token_expires_at, tool_allowlist
+                 refresh_token_ciphertext, token_expires_at, tool_allowlist
              FROM peers
              WHERE org_id = $1
              ORDER BY created_at DESC",
@@ -68,7 +68,7 @@ impl PeerRepo {
         sqlx::query_as::<_, Peer>(
             "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                  oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                 token_expires_at, tool_allowlist
+                 refresh_token_ciphertext, token_expires_at, tool_allowlist
              FROM peers
              WHERE id = $1",
         )
@@ -99,7 +99,7 @@ impl PeerRepo {
         let row = sqlx::query(
             "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                     oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                    token_expires_at, tool_allowlist, webhook_secret_ciphertext
+                    refresh_token_ciphertext, token_expires_at, tool_allowlist, webhook_secret_ciphertext
              FROM peers
              WHERE id = $1",
         )
@@ -122,6 +122,7 @@ impl PeerRepo {
                 access_token_hash: row.get("access_token_hash"),
                 refresh_token_hash: row.get("refresh_token_hash"),
                 access_token_ciphertext: row.get("access_token_ciphertext"),
+                refresh_token_ciphertext: row.get("refresh_token_ciphertext"),
                 token_expires_at: row.get("token_expires_at"),
                 tool_allowlist: row.get("tool_allowlist"),
             };
@@ -137,7 +138,7 @@ impl PeerRepo {
              WHERE id = $1
              RETURNING id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                  oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                 token_expires_at, tool_allowlist",
+                 refresh_token_ciphertext, token_expires_at, tool_allowlist",
         )
         .bind(id)
         .bind(status)
@@ -167,6 +168,7 @@ impl PeerRepo {
         access_token_hash: &str,
         refresh_token_hash: &str,
         access_token_ciphertext: &[u8],
+        refresh_token_ciphertext: Option<&[u8]>,
         expires_at: chrono::DateTime<chrono::Utc>,
     ) -> anyhow::Result<()> {
         sqlx::query(
@@ -174,18 +176,50 @@ impl PeerRepo {
              SET access_token_hash = $1,
                  refresh_token_hash = $2,
                  access_token_ciphertext = $3,
-                 token_expires_at = $4,
+                 refresh_token_ciphertext = $4,
+                 token_expires_at = $5,
                  status = 'pending_allowlist'
-             WHERE id = $5",
+             WHERE id = $6",
         )
         .bind(access_token_hash)
         .bind(refresh_token_hash)
         .bind(access_token_ciphertext)
+        .bind(refresh_token_ciphertext)
         .bind(expires_at)
         .bind(peer_id)
         .execute(&self.pool)
         .await
         .context("failed to set peer oauth tokens")?;
+        Ok(())
+    }
+
+    pub async fn update_refreshed_tokens(
+        &self,
+        peer_id: Uuid,
+        access_token_hash: &str,
+        refresh_token_hash: Option<&str>,
+        access_token_ciphertext: &[u8],
+        refresh_token_ciphertext: Option<&[u8]>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE peers
+             SET access_token_hash = $1,
+                 refresh_token_hash = COALESCE($2, refresh_token_hash),
+                 access_token_ciphertext = $3,
+                 refresh_token_ciphertext = COALESCE($4, refresh_token_ciphertext),
+                 token_expires_at = $5
+             WHERE id = $6",
+        )
+        .bind(access_token_hash)
+        .bind(refresh_token_hash)
+        .bind(access_token_ciphertext)
+        .bind(refresh_token_ciphertext)
+        .bind(expires_at)
+        .bind(peer_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to update refreshed peer oauth tokens")?;
         Ok(())
     }
 

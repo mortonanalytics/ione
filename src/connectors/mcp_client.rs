@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::connectors::{ConnectorImpl, PollResult, StreamDescriptor, StreamEventInput};
 use crate::models::{BindingStatus, ConnectorKind};
-use crate::repos::WorkspacePeerBindingRepo;
+use crate::repos::{PeerRepo, WorkspacePeerBindingRepo};
 
 pub struct McpClientConnector {
     pub mcp_url: String,
@@ -61,13 +61,21 @@ impl McpClientConnector {
             "params": params,
         });
 
-        let mut req = self.http.post(&self.mcp_url).json(&body);
-        if !self.bearer_token.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", self.bearer_token));
+        let token = self.resolve_bearer_token(false).await?;
+        let mut resp = self.send_jsonrpc(&body, &token).await?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let Some(token) = self.try_refresh_bearer_token().await? else {
+                return self.handle_jsonrpc_response(resp).await;
+            };
+            resp = self.send_jsonrpc(&body, &token).await?;
         }
 
-        let resp = req.send().await?;
+        self.handle_jsonrpc_response(resp).await
+    }
 
+    async fn handle_jsonrpc_response(&self, resp: reqwest::Response) -> anyhow::Result<Value> {
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             anyhow::bail!("peer auth error: HTTP {}", status.as_u16());
@@ -85,6 +93,46 @@ impl McpClientConnector {
         }
 
         Ok(val["result"].clone())
+    }
+
+    async fn send_jsonrpc(&self, body: &Value, token: &str) -> anyhow::Result<reqwest::Response> {
+        let mut req = self.http.post(&self.mcp_url).json(body);
+        if !token.is_empty() {
+            req = req.bearer_auth(token);
+        }
+        Ok(req.send().await?)
+    }
+
+    async fn resolve_bearer_token(&self, force_refresh: bool) -> anyhow::Result<String> {
+        if let (Some(pool), Some(peer_id)) = (&self.pool, self.peer_id) {
+            if let Some(peer) = PeerRepo::new(pool.clone()).get(peer_id).await? {
+                return if force_refresh {
+                    crate::services::peer_tokens::refresh_access_token(pool, &self.http, &peer)
+                        .await
+                } else if peer.access_token_ciphertext.is_some() || self.bearer_token.is_empty() {
+                    crate::services::peer_tokens::resolve_access_token(pool, &self.http, &peer)
+                        .await
+                } else {
+                    Ok(self.bearer_token.clone())
+                };
+            }
+        }
+        Ok(self.bearer_token.clone())
+    }
+
+    async fn try_refresh_bearer_token(&self) -> anyhow::Result<Option<String>> {
+        let (Some(pool), Some(peer_id)) = (&self.pool, self.peer_id) else {
+            return Ok(None);
+        };
+        let Some(peer) = PeerRepo::new(pool.clone()).get(peer_id).await? else {
+            return Ok(None);
+        };
+        if peer.refresh_token_ciphertext.is_none() || peer.oauth_client_id.is_none() {
+            return Ok(None);
+        }
+        crate::services::peer_tokens::refresh_access_token(pool, &self.http, &peer)
+            .await
+            .map(Some)
     }
 }
 
@@ -151,6 +199,7 @@ impl ConnectorImpl for McpClientConnector {
                 all_events.push(StreamEventInput {
                     payload: item,
                     observed_at: now,
+                    dedup_key: None,
                 });
             }
         }

@@ -1,7 +1,10 @@
 pub mod auto_exec;
+pub mod chart_data;
+pub mod chart_panels;
 pub mod claim_mapper;
 pub mod critic;
 pub mod delivery;
+pub mod document_panels;
 pub mod event_layers;
 pub mod funnel;
 pub mod generator;
@@ -11,11 +14,14 @@ pub mod map_layers;
 pub mod ollama;
 pub mod peer;
 pub mod peer_oauth;
+pub mod peer_tokens;
 pub mod pipeline_bus;
 pub mod router;
 pub mod rules;
 pub mod scheduler;
 pub mod session_service;
+pub mod table_data;
+pub mod table_panels;
 pub mod webhook_ingress;
 pub mod workspace_peer_binding;
 

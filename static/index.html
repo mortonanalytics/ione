@@ -7,6 +7,11 @@
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" />
   <link rel="stylesheet" href="/style.css" />
   <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+  <script src="/vendor/myio/lib/d3.min.js"></script>
+  <script src="/vendor/myio/lib/d3-hexbin.js"></script>
+  <script src="/vendor/myio/lib/d3-sankey.min.js"></script>
+  <script src="/vendor/myio/myIOapi.js"></script>
+  <script src="/js/chart_adapter.js"></script>
 </head>
 <body>
   <!-- Top bar: user identity + auth actions -->
@@ -71,6 +76,9 @@
       <div id="tab-bar" role="tablist" aria-label="Main view">
         <button id="tab-chat" role="tab" aria-selected="true" aria-controls="panel-chat" class="tab tab--active">Chat</button>
         <button id="tab-map" role="tab" aria-selected="false" aria-controls="panel-map" class="tab">Map</button>
+        <button id="tab-chart" role="tab" aria-selected="false" aria-controls="panel-chart" class="tab">Charts</button>
+        <button id="tab-table" role="tab" aria-selected="false" aria-controls="panel-table" class="tab">Tables</button>
+        <button id="tab-document" role="tab" aria-selected="false" aria-controls="panel-document" class="tab">Documents</button>
         <button id="tab-connectors" role="tab" aria-selected="false" aria-controls="panel-connectors" class="tab">Connectors</button>
         <button id="tab-signals" role="tab" aria-selected="false" aria-controls="panel-signals" class="tab">Signals</button>
         <button id="tab-survivors" role="tab" aria-selected="false" aria-controls="panel-survivors" class="tab">Survivors</button>
@@ -118,10 +126,154 @@
         </div>
         <div id="map-canvas-container" hidden>
           <div id="map-canvas" role="application" tabindex="0" aria-label="Interactive map"></div>
+          <section id="event-layer-legend" aria-label="Event layer legend" hidden></section>
           <div id="map-layer-control" role="region" aria-label="Map layers">
             <button id="map-layer-toggle" type="button" aria-expanded="true" aria-controls="map-layer-list">Layers</button>
+            <div id="event-layer-status" aria-live="polite"></div>
             <ul id="map-layer-list" role="list"></ul>
           </div>
+          <details id="event-list-disclosure" hidden>
+            <summary>Events</summary>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Event</th>
+                  <th scope="col">Observed</th>
+                  <th scope="col">Layer</th>
+                  <th scope="col">Map</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </details>
+        </div>
+      </div>
+
+      <!-- Chart panel -->
+      <div id="panel-chart" role="tabpanel" aria-labelledby="tab-chart" aria-label="Charts" hidden>
+        <div id="chart-loading" class="chart-state-overlay" aria-live="polite" hidden>
+          <div class="chart-skeleton"></div>
+          <span>Loading charts...</span>
+        </div>
+        <div id="chart-empty" class="chart-state-overlay" hidden>
+          <p>No charts available in this workspace.</p>
+          <button id="chart-connect-peer" type="button">Connect a peer</button>
+        </div>
+        <div id="chart-error" class="chart-state-overlay" role="status" aria-live="polite" hidden>
+          <p id="chart-error-msg"></p>
+          <button id="chart-error-retry" type="button">Retry</button>
+        </div>
+        <div id="chart-workspace" class="chart-workspace" hidden>
+          <aside class="chart-sidebar" aria-label="Available charts">
+            <div class="chart-sidebar-header">
+              <button id="chart-refresh-btn" type="button">Refresh</button>
+            </div>
+            <div id="chart-status" aria-live="polite"></div>
+            <ul id="chart-list" role="list"></ul>
+          </aside>
+          <section id="chart-render" class="chart-render" aria-label="Selected chart">
+            <header class="chart-render-header">
+              <h2 id="chart-title">Select a chart</h2>
+              <span id="chart-source-label"></span>
+            </header>
+            <div id="chart-render-error" class="chart-render-error" role="alert" hidden></div>
+            <div id="chart-myio-target" class="chart-myio-target" role="group" aria-label="Chart visualization" aria-describedby="chart-description"></div>
+            <p id="chart-description" class="sr-only">Chart visualization with table data below.</p>
+            <details id="chart-data-disclosure" hidden>
+              <summary>Data</summary>
+              <table>
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </details>
+          </section>
+        </div>
+      </div>
+
+      <!-- Table panel -->
+      <div id="panel-table" role="tabpanel" aria-labelledby="tab-table" aria-label="Tables" hidden>
+        <div id="table-loading" class="table-state-overlay" aria-live="polite" hidden>
+          <div class="table-skeleton"></div>
+          <span>Loading tables...</span>
+        </div>
+        <div id="table-empty" class="table-state-overlay" hidden>
+          <p>No tables available in this workspace.</p>
+          <button id="table-connect-peer" type="button">Connect a peer</button>
+        </div>
+        <div id="table-error" class="table-state-overlay" role="status" aria-live="polite" hidden>
+          <p id="table-error-msg"></p>
+          <button id="table-error-retry" type="button">Retry</button>
+        </div>
+        <div id="table-workspace" class="table-workspace" hidden>
+          <aside class="table-sidebar" aria-label="Available tables">
+            <div class="table-sidebar-header">
+              <button id="table-refresh-btn" type="button">Refresh</button>
+            </div>
+            <div id="table-status" aria-live="polite"></div>
+            <ul id="table-list" role="list"></ul>
+          </aside>
+          <section id="table-render" class="table-render" aria-label="Selected table">
+            <header class="table-render-header">
+              <div>
+                <h2 id="table-title">Select a table</h2>
+                <span id="table-source-label"></span>
+              </div>
+              <div class="table-toolbar" aria-label="Table pagination">
+                <button id="table-prev-page" type="button" aria-label="Previous page" disabled>Previous</button>
+                <span id="table-page-status" aria-live="polite">Page 1</span>
+                <button id="table-next-page" type="button" aria-label="Next page" disabled>Next</button>
+                <label for="table-per-page">Rows</label>
+                <select id="table-per-page">
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                  <option value="200">200</option>
+                </select>
+                <button id="table-clear-filters" type="button">Clear filters</button>
+              </div>
+            </header>
+            <div id="table-render-error" class="table-render-error" role="alert" hidden></div>
+            <div id="table-render-live" class="sr-only" aria-live="polite"></div>
+            <div id="table-render-region" class="table-render-region"></div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Document panel -->
+      <div id="panel-document" role="tabpanel" aria-labelledby="tab-document" aria-label="Documents" hidden>
+        <div id="document-loading" class="document-state-overlay" aria-live="polite" hidden>
+          <div class="document-skeleton"></div>
+          <span>Loading documents...</span>
+        </div>
+        <div id="document-empty" class="document-state-overlay" hidden>
+          <p>No documents available in this workspace.</p>
+          <button id="document-connect-peer" type="button">Connect a peer</button>
+        </div>
+        <div id="document-error" class="document-state-overlay" role="status" aria-live="polite" hidden>
+          <p id="document-error-msg"></p>
+          <button id="document-error-retry" type="button">Retry</button>
+        </div>
+        <div id="document-workspace" class="document-workspace" hidden>
+          <aside class="document-sidebar" aria-label="Available documents">
+            <div class="document-sidebar-header">
+              <button id="document-refresh-btn" type="button">Refresh</button>
+            </div>
+            <div id="document-status" aria-live="polite"></div>
+            <ul id="document-list" role="list"></ul>
+          </aside>
+          <section id="document-render" class="document-render" aria-label="Selected document">
+            <header class="document-render-header">
+              <div>
+                <h2 id="document-title">Select a document</h2>
+                <span id="document-source-label"></span>
+              </div>
+              <div id="document-toolbar" class="document-toolbar" aria-label="Document actions" hidden></div>
+            </header>
+            <div id="document-render-live" class="sr-only" aria-live="polite"></div>
+            <div id="document-notice" class="document-notice" role="status" hidden></div>
+            <div id="document-frame-container" class="document-frame-container"></div>
+            <div id="document-link-card" class="document-link-card" hidden></div>
+          </section>
         </div>
       </div>
 

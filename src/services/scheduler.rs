@@ -13,7 +13,7 @@ use tracing::{info, warn};
 use crate::{
     models::{PipelineEventInput, PipelineEventStage},
     repos::PipelineEventRepo,
-    repos::{ConnectorRepo, StreamEventRepo, StreamRepo},
+    repos::{ConnectorRepo, InsertOutcome, StreamEventRepo, StreamRepo},
     services::pipeline_bus::PipelineBus,
     state::AppState,
 };
@@ -657,10 +657,15 @@ async fn poll_workspace_connectors(
                 let mut inserted_count = 0usize;
 
                 for evt in poll_result.events {
-                    if event_repo
-                        .insert_if_absent(stream.id, evt.payload, evt.observed_at)
-                        .await?
-                    {
+                    let outcome = event_repo
+                        .insert_event(
+                            stream.id,
+                            evt.payload,
+                            evt.observed_at,
+                            evt.dedup_key.as_deref(),
+                        )
+                        .await?;
+                    if matches!(outcome, InsertOutcome::Inserted) {
                         inserted_count += 1;
                         first_event_seen.store(true, Ordering::SeqCst);
                     }

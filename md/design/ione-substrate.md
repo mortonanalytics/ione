@@ -146,7 +146,7 @@ What was previously in v0.1 scope (chat-first onboarding polish, demo workspace 
 ## What v0.1 explicitly does NOT include
 
 - Federated catalog / search (layer 7)
-- Pluggable table / chart / document view types (start with map; iterate in v0.2)
+- Pluggable table / document view types (start with map + chart; table and document iterate in v0.2) — chart view promoted to v0.1 scope per [md/design/chart-panel.md](chart-panel.md)
 - Compliance posture profiles (FedRAMP / FIPS / SOC 2 templating)
 - Cost / resource accounting per workspace
 - Multi-region deployment patterns

@@ -63,7 +63,11 @@ jobs:
           for p in phase02_conversations phase03_workspaces phase04_nws_connector \
                    phase05_signals phase06_critic phase07_routing \
                    phase08_auth phase09_delivery phase10_auto_exec \
-                   phase11_mcp_server phase12_peer phase13_connectors phase13_demo; do
+                   phase11_mcp_server phase12_peer phase13_connectors phase13_demo \
+                   phase14_bindings phase_event_layers phase_geojson_poll \
+                   phase_map_layers phase_chart_aggregates phase_chart_peer \
+                   phase_table phase_table_peer phase_document_panels \
+                   phase_peer_token_refresh phase_push_ingress; do
             echo "=== $p ==="
             cargo test --test "$p" -- --ignored --test-threads=1
           done

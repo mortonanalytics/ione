@@ -241,7 +241,7 @@ pub async fn subscribe_peer(
         .map_err(AppError::Internal)?;
 
     let binding = match crate::services::workspace_peer_binding::bind_on_subscribe(
-        &state.pool,
+        &state,
         workspace_id,
         &peer,
     )
@@ -401,27 +401,22 @@ async fn fetch_manifest_over_mcp(state: &AppState, peer_id: Uuid) -> anyhow::Res
         anyhow::bail!("peer is not pending allowlist");
     }
 
-    let ciphertext = peer
-        .access_token_ciphertext
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("peer access token is unavailable"))?;
-    let access_token = crate::util::token_crypto::decrypt_token(ciphertext)?;
     let endpoint = peer.mcp_url.trim_end_matches('/');
-    let resp: Value = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?
-        .post(format!("{endpoint}/mcp"))
-        .bearer_auth(access_token)
-        .json(&json!({
+    let resp: Value = crate::services::peer_tokens::send_mcp_request(
+        &state.pool,
+        &state.http,
+        &peer,
+        &format!("{endpoint}/mcp"),
+        &json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/list"
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        }),
+    )
+    .await?
+    .error_for_status()?
+    .json()
+    .await?;
 
     let tools = resp
         .get("result")

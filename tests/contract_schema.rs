@@ -510,6 +510,20 @@ async fn schema_peers_extended_column_refresh_token_hash() {
 
 #[tokio::test]
 #[ignore]
+async fn schema_peers_extended_column_refresh_token_ciphertext() {
+    let pool = pool().await;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'peers' AND column_name = 'refresh_token_ciphertext')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("query failed");
+    assert!(exists, "peers.refresh_token_ciphertext must exist");
+}
+
+#[tokio::test]
+#[ignore]
 async fn schema_peers_extended_column_token_expires_at() {
     let pool = pool().await;
     let exists: bool = sqlx::query_scalar(

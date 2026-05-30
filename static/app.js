@@ -574,6 +574,21 @@ function setActiveWorkspace(ws) {
     updateMapLayers(ws.id);
   }
 
+  resetChartPanel();
+  if (activeTab === 'chart') {
+    updateChartPanel(ws.id);
+  }
+
+  resetTablePanel();
+  if (activeTab === 'table') {
+    updateTablePanel(ws.id);
+  }
+
+  resetDocumentPanel();
+  if (activeTab === 'document') {
+    updateDocumentPanel(ws.id);
+  }
+
   // If the signals tab is active, reload signals for the new workspace.
   if (activeTab === 'signals') {
     loadSignals();
@@ -997,18 +1012,24 @@ newWorkspaceForm.addEventListener('submit', async (e) => {
 
 const tabChat          = document.getElementById('tab-chat');
 const tabMap           = document.getElementById('tab-map');
+const tabChart         = document.getElementById('tab-chart');
+const tabTable         = document.getElementById('tab-table');
+const tabDocument      = document.getElementById('tab-document');
 const tabConnectors    = document.getElementById('tab-connectors');
 const tabSignals       = document.getElementById('tab-signals');
 const tabSurvivors     = document.getElementById('tab-survivors');
 const tabApprovals     = document.getElementById('tab-approvals');
 const panelChat        = document.getElementById('panel-chat');
 const panelMap         = document.getElementById('panel-map');
+const panelChart       = document.getElementById('panel-chart');
+const panelTable       = document.getElementById('panel-table');
+const panelDocument    = document.getElementById('panel-document');
 const panelConnectors  = document.getElementById('panel-connectors');
 const panelSignals     = document.getElementById('panel-signals');
 const panelSurvivors   = document.getElementById('panel-survivors');
 const panelApprovals   = document.getElementById('panel-approvals');
 
-let activeTab = 'chat'; // 'chat' | 'map' | 'connectors' | 'signals' | 'survivors' | 'approvals'
+let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'table' | 'document' | 'connectors' | 'signals' | 'survivors' | 'approvals'
 
 function switchTab(name) {
   // Stop auto-refresh when leaving a polling tab.
@@ -1031,6 +1052,18 @@ function switchTab(name) {
   tabMap.setAttribute('aria-selected', String(name === 'map'));
   tabMap.classList.toggle('tab--active', name === 'map');
   panelMap.hidden = name !== 'map';
+
+  tabChart.setAttribute('aria-selected', String(name === 'chart'));
+  tabChart.classList.toggle('tab--active', name === 'chart');
+  panelChart.hidden = name !== 'chart';
+
+  tabTable.setAttribute('aria-selected', String(name === 'table'));
+  tabTable.classList.toggle('tab--active', name === 'table');
+  panelTable.hidden = name !== 'table';
+
+  tabDocument.setAttribute('aria-selected', String(name === 'document'));
+  tabDocument.classList.toggle('tab--active', name === 'document');
+  panelDocument.hidden = name !== 'document';
 
   tabConnectors.setAttribute('aria-selected', String(name === 'connectors'));
   tabConnectors.classList.toggle('tab--active', name === 'connectors');
@@ -1058,6 +1091,18 @@ function switchTab(name) {
     window.mapInstance.resize();
   }
 
+  if (name === 'chart' && activeWorkspace && chartLoadedWorkspaceId !== activeWorkspace.id) {
+    updateChartPanel(activeWorkspace.id);
+  }
+
+  if (name === 'table' && activeWorkspace && tableLoadedWorkspaceId !== activeWorkspace.id) {
+    updateTablePanel(activeWorkspace.id);
+  }
+
+  if (name === 'document' && activeWorkspace && documentLoadedWorkspaceId !== activeWorkspace.id) {
+    updateDocumentPanel(activeWorkspace.id);
+  }
+
   if (name === 'signals' && activeWorkspace) {
     loadSignals();
     startSignalsPolling();
@@ -1076,6 +1121,9 @@ function switchTab(name) {
 
 tabChat.addEventListener('click', () => switchTab('chat'));
 tabMap.addEventListener('click', () => switchTab('map'));
+tabChart.addEventListener('click', () => switchTab('chart'));
+tabTable.addEventListener('click', () => switchTab('table'));
+tabDocument.addEventListener('click', () => switchTab('document'));
 tabConnectors.addEventListener('click', () => switchTab('connectors'));
 tabSignals.addEventListener('click', () => switchTab('signals'));
 tabSurvivors.addEventListener('click', () => switchTab('survivors'));
@@ -1086,10 +1134,22 @@ tabChat.addEventListener('keydown', (e) => {
 });
 tabMap.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); tabChat.focus(); tabChat.click(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabChart.focus(); tabChart.click(); }
+});
+tabChart.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabMap.focus(); tabMap.click(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabTable.focus(); tabTable.click(); }
+});
+tabTable.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabChart.focus(); tabChart.click(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); tabDocument.focus(); tabDocument.click(); }
+});
+tabDocument.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabTable.focus(); tabTable.click(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
 });
 tabConnectors.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabMap.focus(); tabMap.click(); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tabDocument.focus(); tabDocument.click(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); tabSignals.focus(); tabSignals.click(); }
 });
 tabSignals.addEventListener('keydown', (e) => {
@@ -1108,7 +1168,9 @@ tabApprovals.addEventListener('keydown', (e) => {
 
 let mapInstance = null;
 let mapLayerItems = [];
+let mapEventLayers = [];
 let mapLoadedWorkspaceId = null;
+let mapPopup = null;
 const mapLayerIds = new Set();
 const mapSourceIds = new Set();
 const mapEventLayerIds = new Set();
@@ -1138,19 +1200,24 @@ async function updateMapLayers(workspaceId) {
   showMapState('loading');
   const [rastersR, eventsR] = await Promise.allSettled([
     apiFetch(`/api/v1/workspaces/${workspaceId}/map-layers`),
-    apiFetch(`/api/v1/workspaces/${workspaceId}/event-layers`),
+    apiFetch(`/api/v1/workspaces/${workspaceId}/event-layers`, { skipErrorToast: true }),
   ]);
   if (!activeWorkspace || activeWorkspace.id !== workspaceId) return;
 
   mapLayerItems = rastersR.status === 'fulfilled' ? (rastersR.value.items || []) : [];
   const peersFailed = rastersR.status === 'fulfilled' ? (rastersR.value.peersFailed || []) : [];
   const rasterFail = rastersR.status === 'rejected';
-  const eventLayers = eventsR.status === 'fulfilled' ? (eventsR.value.layers || []) : [];
+  mapEventLayers = eventsR.status === 'fulfilled' ? (eventsR.value.layers || []) : [];
+  const streamsFailed = eventsR.status === 'fulfilled' ? (eventsR.value.streamsFailed || []) : [];
+  const eventsTruncated = eventsR.status === 'fulfilled' ? !!eventsR.value.truncated : false;
+  const eventsQueriedAt = eventsR.status === 'fulfilled' ? eventsR.value.queriedAt : null;
   const eventFail = eventsR.status === 'rejected';
 
-  if (mapLayerItems.length === 0 && eventLayers.length === 0) {
+  if (mapLayerItems.length === 0 && mapEventLayers.length === 0) {
     destroyMap();
-    renderLayerControl([]);
+    renderLayerControl([], { eventFail, streamsFailed, eventsTruncated });
+    renderLegend([], null);
+    renderEventList([]);
     if (rasterFail && eventFail) {
       showMapError('Could not load map. The data sources may be temporarily unavailable.');
     } else if (peersFailed.length > 0) {
@@ -1163,11 +1230,11 @@ async function updateMapLayers(workspaceId) {
   }
 
   showMapState('canvas');
-  renderMapWithLayers({ rasters: mapLayerItems, eventLayers });
-  renderLayerControl([...mapLayerItems, ...eventLayers]);
+  renderMapWithLayers({ rasters: mapLayerItems, eventLayers: mapEventLayers });
+  renderLayerControl([...mapLayerItems, ...mapEventLayers], { eventFail, streamsFailed, eventsTruncated });
+  renderLegend(mapEventLayers, eventsQueriedAt);
+  renderEventList(mapEventLayers, { truncated: eventsTruncated });
   if (peersFailed.length > 0) markFailedPeers(peersFailed);
-  // Phase 2 adds a visible event-layer error row; for now just surface to console.
-  if (eventFail) console.warn('event-layers fetch failed for workspace', workspaceId);
   rehydrateTranscriptChips();
 }
 
@@ -1248,6 +1315,14 @@ function addEventLayersToMap(eventLayers) {
         'circle-stroke-width': 1,
       },
     });
+    mapInstance.on('click', layerId, (e) => {
+      const r = 22;
+      const bbox = [[e.point.x - r, e.point.y - r], [e.point.x + r, e.point.y + r]];
+      const features = mapInstance.queryRenderedFeatures(bbox, { layers: [layerId] });
+      if (features[0]) openEventPopup(features[0], false);
+    });
+    mapInstance.on('mouseenter', layerId, () => { mapInstance.getCanvas().style.cursor = 'pointer'; });
+    mapInstance.on('mouseleave', layerId, () => { mapInstance.getCanvas().style.cursor = ''; });
   });
 }
 
@@ -1303,9 +1378,13 @@ function fitMapBounds(rasters, eventLayers, reduceMotion) {
   }
 }
 
-function renderLayerControl(items) {
+function renderLayerControl(items, eventState = {}) {
   const list = document.getElementById('map-layer-list');
+  const status = document.getElementById('event-layer-status');
   list.innerHTML = '';
+  if (status) {
+    status.textContent = eventStatusText(eventState);
+  }
   items.forEach((item) => {
     if (item.streamId !== undefined) {
       renderEventLayerRow(list, item);
@@ -1342,6 +1421,8 @@ function renderLayerControl(items) {
     }
     list.appendChild(li);
   });
+  if (eventState.eventFail) renderEventLayerError(list);
+  (eventState.streamsFailed || []).forEach((stream) => renderStreamErrorRow(list, stream));
 }
 
 function renderEventLayerRow(list, layer) {
@@ -1361,8 +1442,197 @@ function renderEventLayerRow(list, layer) {
     if (mapInstance && mapInstance.getLayer(layerId)) {
       mapInstance.setLayoutProperty(layerId, 'visibility', e.target.checked ? 'visible' : 'none');
     }
+    const visible = visibleEventLayers();
+    renderLegend(visible, null);
+    renderEventList(visible);
   });
   list.appendChild(li);
+}
+
+function eventStatusText(eventState) {
+  if (eventState.eventFail) return 'Event layers could not be loaded.';
+  if ((eventState.streamsFailed || []).length > 0) return `${eventState.streamsFailed.length} event stream could not be rendered.`;
+  const featureCount = countEventFeatures(mapEventLayers);
+  if (mapEventLayers.length > 0 && featureCount === 0) return 'No events in last 24 h.';
+  if (eventState.eventsTruncated) return `Showing ${featureCount} of more than ${featureCount} events - narrow your window.`;
+  return '';
+}
+
+function renderEventLayerError(list) {
+  const li = document.createElement('li');
+  li.className = 'layer-row layer-row--error';
+  li.innerHTML = `
+    <span class="layer-error-icon" aria-hidden="true"></span>
+    <span>Event layers unavailable</span>
+    <button type="button" class="layer-row-retry">Retry</button>
+  `;
+  li.querySelector('button').addEventListener('click', () => {
+    if (activeWorkspace) updateMapLayers(activeWorkspace.id);
+  });
+  list.appendChild(li);
+}
+
+function renderStreamErrorRow(list, stream) {
+  const li = document.createElement('li');
+  li.className = 'layer-row layer-row--error';
+  li.dataset.streamId = stream.streamId;
+  li.innerHTML = `
+    <span class="layer-error-icon" aria-hidden="true"></span>
+    <span>${escapeHtml(stream.streamName || 'Event stream')} config error</span>
+  `;
+  li.title = stream.error || 'Event stream config error';
+  list.appendChild(li);
+}
+
+function visibleEventLayers() {
+  return mapEventLayers.filter((layer) => {
+    const checkbox = document.querySelector(`#map-layer-list .layer-row--event[data-stream-id="${CSS.escape(layer.streamId)}"] input[type=checkbox]`);
+    return !checkbox || checkbox.checked;
+  });
+}
+
+function countEventFeatures(layers) {
+  return layers.reduce((sum, layer) => sum + (((layer.collection || {}).features || []).length), 0);
+}
+
+function renderLegend(layers, queriedAt) {
+  const legend = document.getElementById('event-layer-legend');
+  if (!legend) return;
+  const visible = layers.filter((layer) => ((layer.collection || {}).features || []).length > 0);
+  if (visible.length === 0) {
+    legend.hidden = true;
+    legend.innerHTML = '';
+    return;
+  }
+  legend.hidden = false;
+  const footer = queriedAt ? `Last 24 h · Updated ${escapeHtml(formatRelativeTime(queriedAt))}` : 'Last 24 h';
+  legend.innerHTML = visible.map((layer) => {
+    const style = layer.style || {};
+    warnLowContrastColor(style.colorRange);
+    const colorStops = Array.isArray(style.colorRange) && style.colorRange.length >= 2 ? style.colorRange : ['#f5d76e', '#d9534f'];
+    const gradient = `linear-gradient(90deg, ${colorStops.map(escapeHtml).join(', ')})`;
+    const minSize = Array.isArray(style.sizeRange) ? Number(style.sizeRange[0]) : 6;
+    const maxSize = Array.isArray(style.sizeRange) ? Number(style.sizeRange[1]) : 12;
+    return `
+      <div class="event-legend-layer">
+        <div class="event-legend-title">${escapeHtml(layer.streamName || 'Events')}</div>
+        <div class="event-legend-ramp" aria-hidden="true">
+          <span style="width:${Math.max(6, minSize)}px;height:${Math.max(6, minSize)}px"></span>
+          <span style="width:${Math.max(8, maxSize)}px;height:${Math.max(8, maxSize)}px"></span>
+        </div>
+        <div class="event-legend-gradient" style="background:${gradient}" aria-hidden="true"></div>
+        ${layer.attribution ? `<div class="event-legend-attribution">${escapeHtml(layer.attribution)}</div>` : ''}
+      </div>
+    `;
+  }).join('') + `<div class="event-legend-footer">${footer}</div>`;
+}
+
+function renderEventList(layers, opts = {}) {
+  const details = document.getElementById('event-list-disclosure');
+  if (!details) return;
+  const tbody = details.querySelector('tbody');
+  const summary = details.querySelector('summary');
+  const rows = [];
+  layers.forEach((layer) => {
+    ((layer.collection || {}).features || []).forEach((feature) => rows.push({ layer, feature }));
+  });
+  if (rows.length === 0) {
+    details.hidden = true;
+    tbody.innerHTML = '';
+    return;
+  }
+  const capped = rows.slice(0, 100);
+  details.hidden = false;
+  summary.textContent = opts.truncated || rows.length > 100
+    ? `Events (${capped.length}+ shown)`
+    : `Events (${capped.length})`;
+  tbody.innerHTML = '';
+  capped.forEach(({ layer, feature }, index) => {
+    const props = feature.properties || {};
+    const label = eventFeatureLabel(feature, layer);
+    const observed = props._observed_at || '';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(label)}</td>
+      <td>${escapeHtml(observed ? formatDateTime(observed) : '')}</td>
+      <td>${escapeHtml(layer.streamName || 'Events')}</td>
+      <td><button type="button" data-event-index="${index}">Show on map</button></td>
+    `;
+    tr.querySelector('button').addEventListener('click', () => showEventOnMap(feature, layer));
+    tbody.appendChild(tr);
+  });
+}
+
+function eventFeatureLabel(feature, layer) {
+  const props = feature.properties || {};
+  const labelField = layer.style && layer.style.labelField;
+  if (labelField && props[labelField] != null) return String(props[labelField]);
+  const firstKey = Object.keys(props).find((k) => !k.startsWith('_'));
+  if (firstKey) return `${firstKey}: ${props[firstKey]}`;
+  return props._event_id || layer.streamName || 'Event';
+}
+
+function showEventOnMap(feature, layer) {
+  const coords = feature.geometry && feature.geometry.coordinates;
+  if (!mapInstance || !Array.isArray(coords) || coords.length !== 2) return;
+  mapInstance.flyTo({ center: coords, zoom: Math.max(mapInstance.getZoom(), 8), essential: !prefersReducedMotion() });
+  openEventPopup({ ...feature, layer: { id: `evt-lyr-${layer.streamId}` } }, true);
+}
+
+function openEventPopup(feature, triggeredByKeyboard) {
+  const coords = feature.geometry && feature.geometry.coordinates;
+  if (!mapInstance || !Array.isArray(coords) || coords.length !== 2) return;
+  const props = feature.properties || {};
+  const content = document.createElement('div');
+  content.className = 'event-popup';
+  const rows = Object.entries(props)
+    .filter(([key]) => !key.startsWith('_'))
+    .slice(0, 6)
+    .map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`)
+    .join('');
+  content.innerHTML = `
+    <button type="button" class="event-popup-close" aria-label="Close popup">×</button>
+    <dl>${rows || '<dt>Event</dt><dd>Point event</dd>'}</dl>
+  `;
+  if (mapPopup) mapPopup.remove();
+  mapPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: true, offset: 16 })
+    .setLngLat(coords)
+    .setDOMContent(content)
+    .addTo(mapInstance);
+  content.querySelector('button').addEventListener('click', () => mapPopup?.remove());
+  if (triggeredByKeyboard) {
+    setTimeout(() => content.querySelector('button').focus(), 0);
+  }
+}
+
+function warnLowContrastColor(colorRange) {
+  if (!Array.isArray(colorRange) || colorRange.length === 0) return;
+  const contrast = contrastAgainstWhite(colorRange[0]);
+  if (contrast != null && contrast < 3) {
+    console.warn('event layer legend color has low contrast against white', colorRange[0]);
+  }
+}
+
+function contrastAgainstWhite(color) {
+  const rgb = parseHexColor(color);
+  if (!rgb) return null;
+  const lum = relativeLuminance(rgb);
+  return (1.05) / (lum + 0.05);
+}
+
+function parseHexColor(color) {
+  const m = String(color).trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!m) return null;
+  const hex = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
+  return [0, 2, 4].map((idx) => parseInt(hex.slice(idx, idx + 2), 16));
+}
+
+function relativeLuminance([r, g, b]) {
+  const vals = [r, g, b].map((v) => {
+    const n = v / 255;
+    return n <= 0.03928 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4;
+  });
+  return (0.2126 * vals[0]) + (0.7152 * vals[1]) + (0.0722 * vals[2]);
 }
 
 function setupMapKeyboard() {
@@ -1504,6 +1774,1062 @@ function highlightMapLayer(uri) {
 }
 
 initMapPanel();
+
+/* ── Chart panel ── */
+
+let chartLoadedWorkspaceId = null;
+let chartItems = [];
+let chartInstance = null;
+
+function initChartPanel() {
+  document.getElementById('chart-connect-peer')?.addEventListener('click', () => switchTab('connectors'));
+  document.getElementById('chart-error-retry')?.addEventListener('click', () => {
+    if (activeWorkspace) updateChartPanel(activeWorkspace.id);
+  });
+  document.getElementById('chart-refresh-btn')?.addEventListener('click', () => {
+    if (activeWorkspace) updateChartPanel(activeWorkspace.id);
+  });
+}
+
+function resetChartPanel() {
+  chartLoadedWorkspaceId = null;
+  chartItems = [];
+  destroyChart();
+  const list = document.getElementById('chart-list');
+  if (list) list.innerHTML = '';
+  const status = document.getElementById('chart-status');
+  if (status) status.textContent = '';
+  const title = document.getElementById('chart-title');
+  if (title) title.textContent = 'Select a chart';
+  const source = document.getElementById('chart-source-label');
+  if (source) source.textContent = '';
+  renderChartTable([]);
+  hideChartRenderError();
+}
+
+async function updateChartPanel(workspaceId) {
+  chartLoadedWorkspaceId = workspaceId;
+  showChartState('loading');
+  hideChartRenderError();
+  let data;
+  try {
+    data = await apiFetch(`/api/v1/workspaces/${workspaceId}/chart-panels`, { skipErrorToast: true });
+  } catch (_err) {
+    if (!activeWorkspace || activeWorkspace.id !== workspaceId || chartLoadedWorkspaceId !== workspaceId) return;
+    showChartError('Could not load charts. The data sources may be temporarily unavailable.');
+    return;
+  }
+  if (!activeWorkspace || activeWorkspace.id !== workspaceId || chartLoadedWorkspaceId !== workspaceId) return;
+
+  const ioneCharts = data.ioneCharts || data.ione_charts || [];
+  const peerCharts = data.peerCharts || data.peer_charts || [];
+  const peerErrors = data.peerErrors || data.peer_errors || [];
+  chartItems = [...ioneCharts, ...peerCharts];
+  renderChartList(chartItems, peerErrors);
+
+  if (chartItems.length === 0) {
+    showChartState(peerErrors.length > 0 ? 'error' : 'empty');
+    if (peerErrors.length > 0) {
+      document.getElementById('chart-error-msg').textContent = `Could not reach any connected peer (${peerErrors.length} failed).`;
+    }
+    return;
+  }
+
+  showChartState('workspace');
+}
+
+function renderChartList(items, peerErrors) {
+  const list = document.getElementById('chart-list');
+  const status = document.getElementById('chart-status');
+  list.innerHTML = '';
+  status.textContent = peerErrors.length > 0
+    ? `${peerErrors.length} peer could not be reached.`
+    : '';
+
+  items.forEach((item) => {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chart-row';
+    button.dataset.chartId = item.id;
+    button.innerHTML = `
+      <span class="chart-row-title">${escapeHtml(item.name || 'Chart')}</span>
+      <span class="chart-row-meta">${escapeHtml(chartMeta(item))}</span>
+    `;
+    button.addEventListener('click', () => selectChart(item));
+    li.appendChild(button);
+    list.appendChild(li);
+  });
+
+  peerErrors.forEach((peer) => {
+    const li = document.createElement('li');
+    li.className = 'chart-row--error';
+    li.title = peer.error || 'Peer unavailable';
+    li.innerHTML = `<span class="layer-error-icon" aria-hidden="true"></span><span>${escapeHtml(peer.peerName || 'Peer')} unavailable</span>`;
+    list.appendChild(li);
+  });
+}
+
+function chartMeta(item) {
+  const source = item.source === 'peer' ? (item.peerName || 'Peer') : 'IONe';
+  const type = (item.spec && (item.spec.chartType || item.spec.chart_type)) || 'line';
+  return `${source} · ${type}`;
+}
+
+async function selectChart(item) {
+  document.querySelectorAll('.chart-row--active').forEach((row) => row.classList.remove('chart-row--active'));
+  document.querySelector(`.chart-row[data-chart-id="${CSS.escape(item.id)}"]`)?.classList.add('chart-row--active');
+  document.getElementById('chart-title').textContent = item.name || 'Chart';
+  document.getElementById('chart-source-label').textContent = chartMeta(item);
+  hideChartRenderError();
+  destroyChart();
+
+  const workspaceId = activeWorkspace?.id;
+  if (!workspaceId) return;
+  let payload;
+  try {
+    if (item.source === 'peer') {
+      payload = await fetchPeerChart(workspaceId, item);
+    } else {
+      payload = await fetchIoneChart(workspaceId, item);
+    }
+  } catch (err) {
+    showChartRenderError(err.message || 'Could not load chart data.');
+    return;
+  }
+  if (!activeWorkspace || activeWorkspace.id !== workspaceId) return;
+  renderChartPayload(payload.spec, payload.rows || []);
+}
+
+async function fetchIoneChart(workspaceId, item) {
+  const descriptor = item.descriptor || {};
+  const until = new Date();
+  const since = new Date(until.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const params = new URLSearchParams({
+    stream_id: descriptor.streamId || descriptor.stream_id,
+    op: descriptor.op || 'count',
+    bucket: descriptor.bucket || 'day',
+    since: since.toISOString(),
+    until: until.toISOString()
+  });
+  const valuePointer = descriptor.valuePointer || descriptor.value_pointer;
+  const groupByPointer = descriptor.groupByPointer || descriptor.group_by_pointer;
+  if (valuePointer) params.set('value_pointer', valuePointer);
+  if (groupByPointer) params.set('group_by_pointer', groupByPointer);
+  if (descriptor.percentile != null) params.set('percentile', String(descriptor.percentile));
+  const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/event-aggregates?${params.toString()}`, { skipErrorToast: true });
+  return { spec: item.spec, rows: data.rows || [] };
+}
+
+async function fetchPeerChart(workspaceId, item) {
+  const peerId = item.peerId || item.peer_id;
+  const params = new URLSearchParams({ peer_id: peerId, uri: item.uri });
+  return apiFetch(`/api/v1/workspaces/${workspaceId}/chart-data?${params.toString()}`, { skipErrorToast: true });
+}
+
+function renderChartPayload(spec, rows) {
+  const target = document.getElementById('chart-myio-target');
+  target.innerHTML = '';
+  if (!window.IoneChartAdapter || typeof window.IoneChartAdapter.ioneToMyio !== 'function') {
+    showChartRenderError('Chart adapter did not load.');
+    return;
+  }
+  if (typeof window.myIOchart !== 'function') {
+    showChartRenderError('Chart engine did not load.');
+    return;
+  }
+
+  try {
+    const config = window.IoneChartAdapter.ioneToMyio(spec, rows);
+    const rect = target.getBoundingClientRect();
+    chartInstance = new window.myIOchart({
+      element: target,
+      config,
+      width: rect.width || 720,
+      height: Math.max(320, rect.height || 360)
+    });
+    chartInstance.on?.('error', (event) => {
+      showChartRenderError(event?.message || 'Chart render failed.');
+    });
+    renderChartTable(rows);
+  } catch (err) {
+    showChartRenderError(err.message || 'Chart render failed.');
+  }
+}
+
+function renderChartTable(rows) {
+  const details = document.getElementById('chart-data-disclosure');
+  const thead = details?.querySelector('thead');
+  const tbody = details?.querySelector('tbody');
+  if (!details || !thead || !tbody) return;
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (safeRows.length === 0) {
+    details.hidden = true;
+    thead.innerHTML = '';
+    tbody.innerHTML = '';
+    return;
+  }
+  const keys = Array.from(new Set(safeRows.flatMap((row) => Object.keys(row || {}))));
+  details.hidden = false;
+  details.querySelector('summary').textContent = `Data (${safeRows.length})`;
+  thead.innerHTML = `<tr>${keys.map((key) => `<th scope="col">${escapeHtml(labelizeKey(key))}</th>`).join('')}</tr>`;
+  tbody.innerHTML = '';
+  safeRows.forEach((row) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = keys.map((key) => `<td>${escapeHtml(formatChartCell(row[key]))}</td>`).join('');
+    tbody.appendChild(tr);
+  });
+}
+
+function labelizeKey(key) {
+  return String(key).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
+}
+
+function formatChartCell(value) {
+  if (value == null) return '';
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(3);
+  return String(value);
+}
+
+function destroyChart() {
+  if (chartInstance) {
+    try { chartInstance.destroy(); } catch (_) {}
+    chartInstance = null;
+  }
+  const target = document.getElementById('chart-myio-target');
+  if (target) target.innerHTML = '';
+}
+
+function showChartState(state) {
+  document.getElementById('chart-loading').hidden = state !== 'loading';
+  document.getElementById('chart-empty').hidden = state !== 'empty';
+  document.getElementById('chart-error').hidden = state !== 'error';
+  document.getElementById('chart-workspace').hidden = state !== 'workspace';
+}
+
+function showChartError(message) {
+  document.getElementById('chart-error-msg').textContent = message;
+  showChartState('error');
+}
+
+function showChartRenderError(message) {
+  const el = document.getElementById('chart-render-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function hideChartRenderError() {
+  const el = document.getElementById('chart-render-error');
+  if (!el) return;
+  el.textContent = '';
+  el.hidden = true;
+}
+
+initChartPanel();
+
+/* ── Table panel ── */
+
+let tableLoadedWorkspaceId = null;
+let tableItems = [];
+let tableActiveItem = null;
+let tableRequestController = null;
+let tablePeerCache = null;
+const tableState = {
+  page: 1,
+  perPage: 25,
+  sortBy: '_observed_at',
+  sortDir: 'desc',
+  filters: {},
+  totalCount: 0,
+  truncated: false,
+};
+
+function initTablePanel() {
+  document.getElementById('table-connect-peer')?.addEventListener('click', () => switchTab('connectors'));
+  document.getElementById('table-error-retry')?.addEventListener('click', () => {
+    if (activeWorkspace) updateTablePanel(activeWorkspace.id);
+  });
+  document.getElementById('table-refresh-btn')?.addEventListener('click', () => {
+    if (activeWorkspace) updateTablePanel(activeWorkspace.id);
+  });
+  document.getElementById('table-prev-page')?.addEventListener('click', () => {
+    if (tableState.page <= 1) return;
+    tableState.page -= 1;
+    refreshActiveTable();
+  });
+  document.getElementById('table-next-page')?.addEventListener('click', () => {
+    tableState.page += 1;
+    refreshActiveTable();
+  });
+  document.getElementById('table-per-page')?.addEventListener('change', (event) => {
+    tableState.perPage = Number(event.target.value) || 25;
+    tableState.page = 1;
+    refreshActiveTable();
+  });
+  document.getElementById('table-clear-filters')?.addEventListener('click', () => {
+    tableState.filters = {};
+    tableState.page = 1;
+    refreshActiveTable();
+  });
+}
+
+function resetTablePanel() {
+  tableLoadedWorkspaceId = null;
+  tableItems = [];
+  tableActiveItem = null;
+  tablePeerCache = null;
+  tableState.page = 1;
+  tableState.perPage = 25;
+  tableState.sortBy = '_observed_at';
+  tableState.sortDir = 'desc';
+  tableState.filters = {};
+  tableState.totalCount = 0;
+  tableState.truncated = false;
+  if (tableRequestController) {
+    tableRequestController.abort();
+    tableRequestController = null;
+  }
+  const list = document.getElementById('table-list');
+  if (list) list.innerHTML = '';
+  const status = document.getElementById('table-status');
+  if (status) status.textContent = '';
+  const title = document.getElementById('table-title');
+  if (title) title.textContent = 'Select a table';
+  const source = document.getElementById('table-source-label');
+  if (source) source.textContent = '';
+  const region = document.getElementById('table-render-region');
+  if (region) region.innerHTML = '';
+  updateTablePager();
+  hideTableRenderError();
+}
+
+async function updateTablePanel(workspaceId) {
+  tableLoadedWorkspaceId = workspaceId;
+  tableActiveItem = null;
+  tablePeerCache = null;
+  showTableState('loading');
+  hideTableRenderError();
+  const controller = replaceTableController();
+  let data;
+  try {
+    data = await apiFetch(`/api/v1/workspaces/${workspaceId}/table-panels`, {
+      skipErrorToast: true,
+      signal: controller.signal
+    });
+  } catch (_err) {
+    if (controller.signal.aborted || !activeWorkspace || activeWorkspace.id !== workspaceId || tableLoadedWorkspaceId !== workspaceId) return;
+    showTableError('Could not load tables. The data sources may be temporarily unavailable.');
+    return;
+  }
+  if (!activeWorkspace || activeWorkspace.id !== workspaceId || tableLoadedWorkspaceId !== workspaceId) return;
+
+  const ioneTables = data.ioneTables || data.ione_tables || [];
+  const peerTables = data.peerTables || data.peer_tables || [];
+  const peerErrors = data.peerErrors || data.peer_errors || [];
+  tableItems = [...ioneTables, ...peerTables];
+  renderTableList(tableItems, peerErrors);
+
+  if (tableItems.length === 0) {
+    showTableState(peerErrors.length > 0 ? 'error' : 'empty');
+    if (peerErrors.length > 0) {
+      document.getElementById('table-error-msg').textContent = `Could not reach any connected peer (${peerErrors.length} failed).`;
+    }
+    return;
+  }
+
+  showTableState('workspace');
+}
+
+function renderTableList(items, peerErrors) {
+  const list = document.getElementById('table-list');
+  const status = document.getElementById('table-status');
+  list.innerHTML = '';
+  status.textContent = peerErrors.length > 0
+    ? `${peerErrors.length} peer could not be reached.`
+    : '';
+
+  items.forEach((item) => {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'table-row';
+    button.dataset.tableId = item.id;
+    button.innerHTML = `
+      <span class="table-row-title">${escapeHtml(item.name || 'Table')}</span>
+      <span class="table-row-meta">${escapeHtml(tableMeta(item))}</span>
+    `;
+    button.addEventListener('click', () => selectTable(item));
+    li.appendChild(button);
+    list.appendChild(li);
+  });
+
+  peerErrors.forEach((peer) => {
+    const li = document.createElement('li');
+    li.className = 'table-row--error';
+    li.title = peer.error || 'Peer unavailable';
+    li.innerHTML = `<span class="layer-error-icon" aria-hidden="true"></span><span>${escapeHtml(peer.peerName || 'Peer')} unavailable</span>`;
+    list.appendChild(li);
+  });
+}
+
+function tableMeta(item) {
+  return item.source === 'peer' ? (item.peerName || item.peer_name || 'Peer') : 'IONe';
+}
+
+async function selectTable(item) {
+  tableActiveItem = item;
+  tablePeerCache = null;
+  tableState.page = 1;
+  tableState.perPage = Number(document.getElementById('table-per-page')?.value) || 25;
+  tableState.sortBy = item.source === 'peer' ? firstPeerSortColumn(item) : '_observed_at';
+  tableState.sortDir = item.source === 'peer' ? 'asc' : 'desc';
+  tableState.filters = {};
+  document.querySelectorAll('.table-row--active').forEach((row) => row.classList.remove('table-row--active'));
+  document.querySelector(`.table-row[data-table-id="${CSS.escape(item.id)}"]`)?.classList.add('table-row--active');
+  document.getElementById('table-title').textContent = item.name || 'Table';
+  document.getElementById('table-source-label').textContent = tableMeta(item);
+  hideTableRenderError();
+  await refreshActiveTable();
+}
+
+function firstPeerSortColumn(_item) {
+  return '';
+}
+
+async function refreshActiveTable() {
+  if (!tableActiveItem || !activeWorkspace) return;
+  if (tableActiveItem.source === 'peer') {
+    await refreshPeerTable(activeWorkspace.id, tableActiveItem);
+  } else {
+    await refreshIoneTable(activeWorkspace.id, tableActiveItem);
+  }
+}
+
+async function refreshIoneTable(workspaceId, item) {
+  const controller = replaceTableController();
+  showTableRenderLoading();
+  const streamId = item.streamId || item.stream_id;
+  const params = new URLSearchParams({
+    stream_id: streamId,
+    page: String(tableState.page),
+    per_page: String(tableState.perPage),
+    sort_by: tableState.sortBy || '_observed_at',
+    sort_dir: tableState.sortDir || 'desc',
+  });
+  const activeFilter = firstActiveFilter();
+  if (activeFilter) {
+    params.set('filter_col', activeFilter.name);
+    params.set('filter_val', activeFilter.value);
+  }
+  try {
+    const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/event-table?${params.toString()}`, {
+      skipErrorToast: true,
+      signal: controller.signal
+    });
+    if (controller.signal.aborted || !activeWorkspace || activeWorkspace.id !== workspaceId || tableActiveItem?.id !== item.id) return;
+    const columns = normalizeColumns(data.columns || []);
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    tableState.totalCount = Number(data.totalCount || data.total_count || rows.length);
+    tableState.truncated = !!data.truncated;
+    renderTable(columns, rows, { totalCount: tableState.totalCount });
+    hideTableRenderError();
+  } catch (err) {
+    if (controller.signal.aborted) return;
+    showTableRenderError(err.message || 'Could not load table data.');
+  }
+}
+
+async function refreshPeerTable(workspaceId, item) {
+  try {
+    if (!tablePeerCache) {
+      const controller = replaceTableController();
+      showTableRenderLoading();
+      const peerId = item.peerId || item.peer_id;
+      const params = new URLSearchParams({ peer_id: peerId, uri: item.uri });
+      const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/table-data?${params.toString()}`, {
+        skipErrorToast: true,
+        signal: controller.signal
+      });
+      if (controller.signal.aborted || !activeWorkspace || activeWorkspace.id !== workspaceId || tableActiveItem?.id !== item.id) return;
+      tablePeerCache = {
+        columns: normalizeColumns(data.schema || []),
+        rows: Array.isArray(data.rows) ? data.rows : []
+      };
+      if (!tableState.sortBy && tablePeerCache.columns[0]) {
+        tableState.sortBy = tablePeerCache.columns[0].name;
+      }
+    }
+    const sliced = slicePeerRows(tablePeerCache.columns, tablePeerCache.rows);
+    renderTable(tablePeerCache.columns, sliced.rows, { totalCount: sliced.totalCount });
+    hideTableRenderError();
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    showTableRenderError(err.message || 'Could not load table data.');
+  }
+}
+
+function replaceTableController() {
+  if (tableRequestController) tableRequestController.abort();
+  tableRequestController = new AbortController();
+  return tableRequestController;
+}
+
+function showTableRenderLoading() {
+  const live = document.getElementById('table-render-live');
+  if (live) live.textContent = 'Loading table rows';
+}
+
+function normalizeColumns(columns) {
+  return (Array.isArray(columns) ? columns : [])
+    .map((col) => {
+      const name = col.name || col.key || col.id;
+      if (!name) return null;
+      return {
+        name: String(name),
+        label: col.label || labelizeKey(name),
+        type: col.type || col.columnType || col.column_type || 'string',
+        pointer: col.pointer ?? null
+      };
+    })
+    .filter(Boolean);
+}
+
+function renderTable(columns, rows, { totalCount }) {
+  const region = document.getElementById('table-render-region');
+  const live = document.getElementById('table-render-live');
+  if (!region) return;
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const safeColumns = Array.isArray(columns) ? columns : [];
+  if (safeColumns.length === 0) {
+    region.innerHTML = '<p class="table-empty-copy">No columns available.</p>';
+    updateTablePager();
+    return;
+  }
+
+  const table = document.createElement('table');
+  table.className = 'data-table';
+  const caption = document.createElement('caption');
+  caption.textContent = `${Number(totalCount || safeRows.length).toLocaleString()} rows`;
+  table.appendChild(caption);
+
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  safeColumns.forEach((column) => {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.setAttribute('aria-sort', tableAriaSort(column.name));
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'table-sort-btn';
+    button.textContent = column.label || column.name;
+    button.addEventListener('click', () => sortTableBy(column.name));
+    th.appendChild(button);
+    headerRow.appendChild(th);
+  });
+  thead.appendChild(headerRow);
+
+  const filterRow = document.createElement('tr');
+  filterRow.className = 'table-filter-row';
+  safeColumns.forEach((column) => {
+    const td = document.createElement('td');
+    const input = document.createElement('input');
+    input.type = 'search';
+    input.value = tableState.filters[column.name] || '';
+    input.placeholder = 'Filter';
+    input.setAttribute('aria-label', `Filter ${column.label || column.name}`);
+    input.addEventListener('input', () => updateTableFilter(column.name, input.value));
+    td.appendChild(input);
+    filterRow.appendChild(td);
+  });
+  thead.appendChild(filterRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  safeRows.forEach((row) => {
+    const tr = document.createElement('tr');
+    safeColumns.forEach((column) => {
+      const td = document.createElement('td');
+      const value = row ? row[column.name] : null;
+      td.textContent = formatTableCell(value, column.type);
+      if (column.type === 'datetime' && value) {
+        td.title = String(value);
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  region.innerHTML = '';
+  region.appendChild(table);
+  if (live) live.textContent = `${safeRows.length} rows visible`;
+  updateTablePager();
+}
+
+function tableAriaSort(columnName) {
+  if (tableState.sortBy !== columnName) return 'none';
+  return tableState.sortDir === 'desc' ? 'descending' : 'ascending';
+}
+
+function sortTableBy(columnName) {
+  if (tableState.sortBy === columnName) {
+    tableState.sortDir = tableState.sortDir === 'desc' ? 'asc' : 'desc';
+  } else {
+    tableState.sortBy = columnName;
+    tableState.sortDir = 'asc';
+  }
+  tableState.page = 1;
+  refreshActiveTable();
+}
+
+let tableFilterTimer = null;
+function updateTableFilter(columnName, value) {
+  if (value) {
+    if (tableActiveItem?.source !== 'peer') {
+      tableState.filters = {};
+    }
+    tableState.filters[columnName] = value;
+  } else {
+    delete tableState.filters[columnName];
+  }
+  tableState.page = 1;
+  clearTimeout(tableFilterTimer);
+  tableFilterTimer = setTimeout(() => refreshActiveTable(), 200);
+}
+
+function firstActiveFilter() {
+  const entry = Object.entries(tableState.filters).find(([, value]) => String(value).length > 0);
+  return entry ? { name: entry[0], value: String(entry[1]) } : null;
+}
+
+function slicePeerRows(columns, rows) {
+  const filtered = rows.filter((row) => {
+    return Object.entries(tableState.filters).every(([key, filter]) => {
+      if (!filter) return true;
+      return String(row?.[key] ?? '').toLocaleLowerCase().includes(String(filter).toLocaleLowerCase());
+    });
+  });
+  const sortColumn = columns.find((column) => column.name === tableState.sortBy) || columns[0];
+  if (sortColumn) {
+    filtered.sort((a, b) => compareTableValues(a?.[sortColumn.name], b?.[sortColumn.name], sortColumn.type));
+    if (tableState.sortDir === 'desc') filtered.reverse();
+  }
+  const start = (tableState.page - 1) * tableState.perPage;
+  const end = start + tableState.perPage;
+  const pageRows = filtered.slice(start, end);
+  tableState.totalCount = filtered.length;
+  tableState.truncated = end < filtered.length;
+  return { rows: pageRows, totalCount: filtered.length };
+}
+
+function compareTableValues(a, b, type) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  if (type === 'number') {
+    const an = Number(a);
+    const bn = Number(b);
+    if (!Number.isNaN(an) && !Number.isNaN(bn)) return an - bn;
+  }
+  if (type === 'datetime') {
+    const at = Date.parse(a);
+    const bt = Date.parse(b);
+    if (!Number.isNaN(at) && !Number.isNaN(bt)) return at - bt;
+  }
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function formatTableCell(value, type) {
+  if (value == null) return '';
+  if (type === 'datetime') {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+  }
+  if (type === 'number' && typeof value === 'number') {
+    return Number.isInteger(value) ? String(value) : value.toFixed(3);
+  }
+  return String(value);
+}
+
+function updateTablePager() {
+  const pageStatus = document.getElementById('table-page-status');
+  const prev = document.getElementById('table-prev-page');
+  const next = document.getElementById('table-next-page');
+  const perPage = document.getElementById('table-per-page');
+  if (pageStatus) {
+    const total = Number(tableState.totalCount || 0).toLocaleString();
+    pageStatus.textContent = `Page ${tableState.page} · ${total} rows`;
+  }
+  if (prev) prev.disabled = tableState.page <= 1;
+  if (next) next.disabled = !tableState.truncated;
+  if (perPage) perPage.value = String(tableState.perPage);
+}
+
+function showTableState(state) {
+  document.getElementById('table-loading').hidden = state !== 'loading';
+  document.getElementById('table-empty').hidden = state !== 'empty';
+  document.getElementById('table-error').hidden = state !== 'error';
+  document.getElementById('table-workspace').hidden = state !== 'workspace';
+}
+
+function showTableError(message) {
+  document.getElementById('table-error-msg').textContent = message;
+  showTableState('error');
+}
+
+function showTableRenderError(message) {
+  const el = document.getElementById('table-render-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function hideTableRenderError() {
+  const el = document.getElementById('table-render-error');
+  if (!el) return;
+  el.textContent = '';
+  el.hidden = true;
+}
+
+initTablePanel();
+
+/* ── Document panel ── */
+
+const DOCUMENT_IFRAME_SANDBOX = 'allow-downloads allow-same-origin';
+const DOCUMENT_EMBED_TIMEOUT_MS = 3000;
+
+let documentLoadedWorkspaceId = null;
+let documentItems = [];
+let documentActiveItem = null;
+let documentRequestController = null;
+let documentEmbedTimer = null;
+
+function initDocumentPanel() {
+  document.getElementById('document-connect-peer')?.addEventListener('click', () => switchTab('connectors'));
+  document.getElementById('document-error-retry')?.addEventListener('click', () => {
+    if (activeWorkspace) updateDocumentPanel(activeWorkspace.id);
+  });
+  document.getElementById('document-refresh-btn')?.addEventListener('click', () => {
+    if (activeWorkspace) updateDocumentPanel(activeWorkspace.id);
+  });
+}
+
+function resetDocumentPanel() {
+  documentLoadedWorkspaceId = null;
+  documentItems = [];
+  documentActiveItem = null;
+  if (documentRequestController) {
+    documentRequestController.abort();
+    documentRequestController = null;
+  }
+  clearDocumentEmbed();
+  const list = document.getElementById('document-list');
+  if (list) list.innerHTML = '';
+  const status = document.getElementById('document-status');
+  if (status) status.textContent = '';
+  const title = document.getElementById('document-title');
+  if (title) title.textContent = 'Select a document';
+  const source = document.getElementById('document-source-label');
+  if (source) source.textContent = '';
+  const live = document.getElementById('document-render-live');
+  if (live) live.textContent = '';
+}
+
+async function updateDocumentPanel(workspaceId) {
+  documentLoadedWorkspaceId = workspaceId;
+  documentActiveItem = null;
+  showDocumentState('loading');
+  resetDocumentRender();
+  const controller = replaceDocumentController();
+  let data;
+  try {
+    data = await apiFetch(`/api/v1/workspaces/${workspaceId}/document-panels`, {
+      skipErrorToast: true,
+      signal: controller.signal
+    });
+  } catch (_err) {
+    if (controller.signal.aborted || !activeWorkspace || activeWorkspace.id !== workspaceId || documentLoadedWorkspaceId !== workspaceId) return;
+    showDocumentError('Could not load documents. The data sources may be temporarily unavailable.');
+    return;
+  }
+  if (!activeWorkspace || activeWorkspace.id !== workspaceId || documentLoadedWorkspaceId !== workspaceId) return;
+
+  documentItems = (data.peerDocuments || data.peer_documents || []).map(normalizeDocumentItem);
+  const peerErrors = data.peerErrors || data.peer_errors || [];
+  renderDocumentList(documentItems, peerErrors);
+
+  if (documentItems.length === 0) {
+    showDocumentState(peerErrors.length > 0 ? 'error' : 'empty');
+    if (peerErrors.length > 0) {
+      document.getElementById('document-error-msg').textContent = `Could not reach any connected peer (${peerErrors.length} failed).`;
+    }
+    return;
+  }
+
+  showDocumentState('workspace');
+}
+
+function normalizeDocumentItem(item) {
+  return {
+    id: item.id,
+    name: item.name || 'Document',
+    source: item.source || 'peer',
+    peerId: item.peerId || item.peer_id,
+    peerName: item.peerName || item.peer_name || 'Peer',
+    uri: item.uri,
+    downloadUrl: item.downloadUrl || item.download_url,
+    mimeType: item.mimeType || item.mime_type || 'application/octet-stream',
+    fileSizeBytes: item.fileSizeBytes ?? item.file_size_bytes ?? null,
+    lastModified: item.lastModified || item.last_modified || null
+  };
+}
+
+function renderDocumentList(items, peerErrors) {
+  const list = document.getElementById('document-list');
+  const status = document.getElementById('document-status');
+  list.innerHTML = '';
+  status.textContent = peerErrors.length > 0
+    ? `${peerErrors.length} peer could not be reached.`
+    : '';
+
+  items.forEach((item) => {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'document-row';
+    button.dataset.documentId = item.id;
+
+    const title = document.createElement('span');
+    title.className = 'document-row-title';
+    title.textContent = item.name;
+    button.appendChild(title);
+
+    const meta = document.createElement('span');
+    meta.className = 'document-row-meta';
+    meta.textContent = documentMeta(item);
+    button.appendChild(meta);
+
+    const badge = document.createElement('span');
+    badge.className = 'document-mime-badge';
+    badge.textContent = documentMimeLabel(item.mimeType);
+    button.appendChild(badge);
+
+    button.addEventListener('click', () => selectDocument(item));
+    li.appendChild(button);
+    list.appendChild(li);
+  });
+
+  peerErrors.forEach((peer) => {
+    const li = document.createElement('li');
+    li.className = 'document-row--error';
+    li.title = peer.error || 'Peer unavailable';
+    const icon = document.createElement('span');
+    icon.className = 'layer-error-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span');
+    label.textContent = `${peer.peerName || peer.peer_name || 'Peer'} unavailable`;
+    li.appendChild(icon);
+    li.appendChild(label);
+    list.appendChild(li);
+  });
+}
+
+function documentMeta(item) {
+  const details = [item.peerName || 'Peer'];
+  if (item.fileSizeBytes != null) details.push(formatBytes(item.fileSizeBytes));
+  if (item.lastModified) details.push(formatDate(item.lastModified));
+  return details.filter(Boolean).join(' · ');
+}
+
+function documentMimeLabel(mimeType) {
+  const value = String(mimeType || 'file').toLowerCase();
+  if (value === 'application/pdf') return 'PDF';
+  const parts = value.split('/');
+  return (parts[1] || parts[0] || 'file').slice(0, 16);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function selectDocument(item) {
+  documentActiveItem = item;
+  document.querySelectorAll('.document-row--active').forEach((row) => row.classList.remove('document-row--active'));
+  document.querySelector(`.document-row[data-document-id="${CSS.escape(item.id)}"]`)?.classList.add('document-row--active');
+  document.getElementById('document-title').textContent = item.name || 'Document';
+  document.getElementById('document-source-label').textContent = documentMeta(item);
+  resetDocumentRender();
+
+  if (isPdfDocument(item)) {
+    renderPdfDocument(item);
+  } else {
+    renderDocumentLinkCard(item);
+  }
+}
+
+function isPdfDocument(item) {
+  return String(item.mimeType || '').toLowerCase().split(';')[0].trim() === 'application/pdf';
+}
+
+function resetDocumentRender() {
+  clearDocumentEmbed();
+  const toolbar = document.getElementById('document-toolbar');
+  if (toolbar) {
+    toolbar.innerHTML = '';
+    toolbar.hidden = true;
+  }
+  const notice = document.getElementById('document-notice');
+  if (notice) {
+    notice.textContent = '';
+    notice.hidden = true;
+  }
+  const linkCard = document.getElementById('document-link-card');
+  if (linkCard) {
+    linkCard.innerHTML = '';
+    linkCard.hidden = true;
+  }
+}
+
+function clearDocumentEmbed() {
+  if (documentEmbedTimer) {
+    clearTimeout(documentEmbedTimer);
+    documentEmbedTimer = null;
+  }
+  const frameContainer = document.getElementById('document-frame-container');
+  if (frameContainer) frameContainer.innerHTML = '';
+}
+
+function renderPdfDocument(item) {
+  const frameContainer = document.getElementById('document-frame-container');
+  const toolbar = document.getElementById('document-toolbar');
+  const live = document.getElementById('document-render-live');
+  if (!frameContainer || !toolbar) return;
+
+  renderDocumentToolbar(item);
+  const iframe = document.createElement('iframe');
+  iframe.className = 'document-frame';
+  iframe.src = item.downloadUrl;
+  iframe.title = `${item.name || 'Document'} - PDF document`;
+  iframe.setAttribute('sandbox', DOCUMENT_IFRAME_SANDBOX);
+  iframe.setAttribute('referrerpolicy', 'no-referrer');
+
+  const fallback = buildDocumentLink(item, 'Open in new tab', 'document-fallback-link sr-only');
+  fallback.textContent = `Open ${item.name || 'document'} in new tab`;
+  iframe.appendChild(fallback);
+
+  iframe.addEventListener('load', () => {
+    if (documentActiveItem?.id !== item.id) return;
+    if (documentEmbedTimer) {
+      clearTimeout(documentEmbedTimer);
+      documentEmbedTimer = null;
+    }
+    let hasDocument = false;
+    try {
+      hasDocument = !!iframe.contentDocument;
+    } catch (_) {
+      hasDocument = false;
+    }
+    if (!hasDocument) {
+      showDocumentEmbedFallback(item);
+      return;
+    }
+    if (live) live.textContent = `${item.name || 'Document'} loaded`;
+  });
+  iframe.addEventListener('error', () => showDocumentEmbedFallback(item));
+
+  frameContainer.appendChild(iframe);
+  if (live) live.textContent = `Loading ${item.name || 'document'}`;
+  documentEmbedTimer = setTimeout(() => {
+    documentEmbedTimer = null;
+    let hasDocument = false;
+    try {
+      hasDocument = !!iframe.contentDocument;
+    } catch (_) {
+      hasDocument = false;
+    }
+    if (!hasDocument && documentActiveItem?.id === item.id) {
+      showDocumentEmbedFallback(item);
+    }
+  }, DOCUMENT_EMBED_TIMEOUT_MS);
+}
+
+function renderDocumentToolbar(item) {
+  const toolbar = document.getElementById('document-toolbar');
+  if (!toolbar) return;
+  toolbar.innerHTML = '';
+  toolbar.hidden = false;
+  toolbar.appendChild(buildDocumentLink(item, 'Open in new tab', 'document-action-link'));
+  const download = buildDocumentLink(item, 'Download', 'document-action-link');
+  download.setAttribute('download', '');
+  toolbar.appendChild(download);
+}
+
+function showDocumentEmbedFallback(item) {
+  clearDocumentEmbed();
+  const notice = document.getElementById('document-notice');
+  if (notice) {
+    notice.textContent = 'This document could not be displayed inline.';
+    notice.hidden = false;
+  }
+  renderDocumentLinkCard(item);
+}
+
+function renderDocumentLinkCard(item) {
+  clearDocumentEmbed();
+  const toolbar = document.getElementById('document-toolbar');
+  if (toolbar) {
+    toolbar.innerHTML = '';
+    toolbar.hidden = true;
+  }
+  const card = document.getElementById('document-link-card');
+  if (!card) return;
+  card.innerHTML = '';
+  card.hidden = false;
+
+  const title = document.createElement('h3');
+  title.textContent = item.name || 'Document';
+  card.appendChild(title);
+
+  const meta = document.createElement('p');
+  meta.className = 'document-link-meta';
+  meta.textContent = `${documentMimeLabel(item.mimeType)} · ${documentMeta(item)}`;
+  card.appendChild(meta);
+
+  card.appendChild(buildDocumentLink(item, 'Open in new tab', 'document-primary-link'));
+}
+
+function buildDocumentLink(item, label, className) {
+  const link = document.createElement('a');
+  link.href = item.downloadUrl;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.className = className;
+  link.textContent = label;
+  link.setAttribute('aria-label', `${label} ${item.name || 'document'} (opens in new tab)`);
+  return link;
+}
+
+function replaceDocumentController() {
+  if (documentRequestController) documentRequestController.abort();
+  documentRequestController = new AbortController();
+  return documentRequestController;
+}
+
+function showDocumentState(state) {
+  document.getElementById('document-loading').hidden = state !== 'loading';
+  document.getElementById('document-empty').hidden = state !== 'empty';
+  document.getElementById('document-error').hidden = state !== 'error';
+  document.getElementById('document-workspace').hidden = state !== 'workspace';
+}
+
+function showDocumentError(message) {
+  document.getElementById('document-error-msg').textContent = message;
+  showDocumentState('error');
+}
+
+initDocumentPanel();
 
 /* ── Connector + Stream API helpers ── */
 
