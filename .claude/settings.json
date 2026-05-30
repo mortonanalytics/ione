@@ -60,7 +60,15 @@
       "Bash(comm *)",
       "Bash(echo *)",
       "Bash(python3 *)",
-      "Bash(command -v *)"
+      "Bash(command -v *)",
+      "Bash(docker ps*)",
+      "Bash(docker compose *)",
+      "Bash(docker start *)",
+      "Bash(psql *)",
+      "Bash(DATABASE_URL=* psql*)",
+      "Agent(*)",
+      "Task(*)",
+      "Skill(*)"
     ]
   }
 }

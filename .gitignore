@@ -7,3 +7,4 @@
 /test-results
 /.playwright-mcp
 /playwright-report
+/.claude/state
