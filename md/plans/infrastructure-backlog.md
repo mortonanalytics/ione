@@ -18,8 +18,9 @@ These travel together as one unit. Per the "shipped = founder walked through it"
 | Generic `geojson_poll` / JSON-URL connector | P1 | `f0ff3e9`, `e239edb` | `md/design/geojson-poll-connector.md` |
 | Windowed / grouped aggregates (`event-aggregates`) | P2 | `b22f0fa` | (folded into chart-panel design) |
 | Rules-engine nested-field reach | P1 | verified-only (works as-is) | — see note below |
+| Document/report view — `ione_view:"document"` | P0 | `bbbdf1a`, `c61c9a2` | `md/design/document-view.md` |
 
-**Remaining P0:** Document view is the only unshipped visualization item.
+**P0 visualization is complete** — map ✓ chart ✓ table ✓ document ✓ (all pending founder walkthrough + merge). **P2 analytics** shipped too. Remaining work is breadth: P1 ingestion (MCP notifications), P3 federation, P4 identity, P5 UX — plus the `ux-security-audit-backlog.md` follow-ups.
 
 ---
 
@@ -33,7 +34,7 @@ IONe renders MapLibre tiles and nothing else today. No chart, table, or live-fea
 
 - ✅ **Table view — `ione_view:"table"`.** Shipped (`bcf01b3`, `7a235b7`). Schema negotiation, server-side pagination/sort/filter (IONe), client-side (peer); semantic accessible `<table>`. See `md/design/table-view.md`.
 
-- ⬜ **Document/report view — `ione_view:"document"`.** Render linked PDFs/reports in-app instead of just linking out (`metadata.download_url`). The last unshipped P0 visualization item; mostly a peer-resource render path, no aggregate side. Effort: ~2–3 d. **← next.**
+- ✅ **Document/report view — `ione_view:"document"`.** Shipped (`bbbdf1a`, `c61c9a2`). Peer-resource-only; inline-embeds `application/pdf` in a sandboxed iframe (`allow-downloads allow-same-origin`, never `allow-scripts`), other MIME types link out; https-only `download_url` validation, `nosniff` middleware, no proxy. App-wide CSP deferred to `ux-security-audit-backlog.md`. See `md/design/document-view.md`.
 
 ---
 

@@ -4,6 +4,7 @@ Status: tracked follow-up after the P0-P2 remediation pass.
 
 ## P3 Security
 
+- **App-wide Content-Security-Policy.** Deferred from the document-view design (`md/design/document-view.md` Slice 3 SHOULD). Add a baseline CSP HTTP header with `frame-src` limited to bound-peer origins + `frame-ancestors 'self'`. **Needs its own spike** — must not break the shipped MapLibre tiles, vendored myIO, or table panels. The per-element controls (iframe `sandbox`, https-only `download_url` validation, `nosniff`) already shipped; this is defense-in-depth on top.
 - Resolve the RLS false-security signal by either wiring request-scoped `SET LOCAL app.current_org_id` for protected tables or disabling RLS where app-layer predicates remain the real isolation boundary.
 - Add rate limiting to the MFA challenge endpoint.
 - Review `whoami://` disclosure and either document the current email/role exposure or scope-gate it.
