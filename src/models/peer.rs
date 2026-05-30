@@ -32,6 +32,8 @@ pub struct Peer {
     pub refresh_token_hash: Option<String>,
     #[serde(skip_serializing)]
     pub access_token_ciphertext: Option<Vec<u8>>,
+    #[serde(skip_serializing)]
+    pub refresh_token_ciphertext: Option<Vec<u8>>,
     pub token_expires_at: Option<DateTime<Utc>>,
     pub tool_allowlist: serde_json::Value,
 }

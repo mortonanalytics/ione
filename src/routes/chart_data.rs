@@ -47,7 +47,7 @@ pub async fn get_chart_data(
         .find(|peer| peer.id == peer_id)
         .ok_or_else(|| AppError::NotFound("peer not bound to workspace".into()))?;
 
-    let response = fetch_chart_data(&state.http, &peer, &uri)
+    let response = fetch_chart_data(&state, &peer, &uri)
         .await
         .map_err(|err| AppError::ConnectorError(err.to_string()))?;
     Ok(Json(response))

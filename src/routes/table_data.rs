@@ -47,7 +47,7 @@ pub async fn get_table_data(
         .find(|peer| peer.id == peer_id)
         .ok_or_else(|| AppError::NotFound("peer not bound to workspace".into()))?;
 
-    let response = fetch_table_data(&state.http, &peer, &uri)
+    let response = fetch_table_data(&state, &peer, &uri)
         .await
         .map_err(|err| match err {
             TableDataError::NotFound(msg) => AppError::NotFound(msg),

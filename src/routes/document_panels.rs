@@ -25,5 +25,5 @@ pub async fn list_document_panels(
         .await
         .map_err(AppError::Internal)?;
 
-    Ok(Json(fetch_document_panels(&state.http, peers).await))
+    Ok(Json(fetch_document_panels(&state, peers).await))
 }

@@ -177,7 +177,8 @@ impl WorkspacePeerBindingRepo {
             "SELECT p.id, p.org_id, p.name, p.mcp_url, p.issuer_id, p.sharing_policy,
                     p.status, p.created_at, p.oauth_client_id,
                     p.access_token_hash, p.refresh_token_hash,
-                    p.access_token_ciphertext, p.token_expires_at, p.tool_allowlist
+                    p.access_token_ciphertext, p.refresh_token_ciphertext,
+                    p.token_expires_at, p.tool_allowlist
              FROM workspace_peer_bindings b
              JOIN peers p ON p.id = b.peer_id
              WHERE b.workspace_id = $1

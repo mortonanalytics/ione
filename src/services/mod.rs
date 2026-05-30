@@ -14,6 +14,7 @@ pub mod map_layers;
 pub mod ollama;
 pub mod peer;
 pub mod peer_oauth;
+pub mod peer_tokens;
 pub mod pipeline_bus;
 pub mod router;
 pub mod rules;

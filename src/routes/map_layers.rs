@@ -34,6 +34,6 @@ pub async fn list_map_layers(
         .await
         .map_err(AppError::Internal)?;
 
-    let response = fetch_map_layers(&state.http, peers, query.peer_id).await;
+    let response = fetch_map_layers(&state, peers, query.peer_id).await;
     Ok(Json(response))
 }

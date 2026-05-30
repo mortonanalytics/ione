@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{models::Peer, util::url_guard};
+use crate::{models::Peer, state::AppState, util::url_guard};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,14 +39,11 @@ pub struct DocumentPanelsResponse {
     pub peer_errors: Vec<PeerFetchError>,
 }
 
-pub async fn fetch_document_panels(
-    http: &reqwest::Client,
-    peers: Vec<Peer>,
-) -> DocumentPanelsResponse {
+pub async fn fetch_document_panels(state: &AppState, peers: Vec<Peer>) -> DocumentPanelsResponse {
     let outcomes = join_all(
         peers
             .into_iter()
-            .map(|peer| fetch_documents_from_peer(http.clone(), peer)),
+            .map(|peer| fetch_documents_from_peer(state.clone(), peer)),
     )
     .await;
     let mut documents = Vec::new();
@@ -73,18 +70,13 @@ pub async fn fetch_document_panels(
 }
 
 async fn fetch_documents_from_peer(
-    http: reqwest::Client,
+    state: AppState,
     peer: Peer,
 ) -> Result<Vec<DocumentPanelItem>, PeerFetchError> {
-    let token = resolve_token(&peer).map_err(|err| PeerFetchError {
-        peer_id: peer.id,
-        peer_name: peer.name.clone(),
-        error: format!("token error: {err}"),
-    })?;
     let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
     let resources = match tokio::time::timeout(
         Duration::from_secs(5),
-        call_resources_list(&http, &endpoint, &token),
+        call_resources_list(&state, &peer, &endpoint),
     )
     .await
     {
@@ -112,27 +104,28 @@ async fn fetch_documents_from_peer(
 }
 
 async fn call_resources_list(
-    http: &reqwest::Client,
+    state: &AppState,
+    peer: &Peer,
     endpoint: &str,
-    token: &str,
 ) -> anyhow::Result<Vec<Value>> {
-    let resp: Value = http
-        .post(endpoint)
-        .bearer_auth(token)
-        .json(&json!({
+    let resp: Value = crate::services::peer_tokens::send_mcp_request(
+        &state.pool,
+        &state.http,
+        peer,
+        endpoint,
+        &json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "resources/list",
             "params": null
-        }))
-        .send()
-        .await
-        .context("HTTP send failed")?
-        .error_for_status()
-        .context("peer returned error status")?
-        .json()
-        .await
-        .context("failed to parse peer response")?;
+        }),
+    )
+    .await?
+    .error_for_status()
+    .context("peer returned error status")?
+    .json()
+    .await
+    .context("failed to parse peer response")?;
 
     if let Some(err) = resp.get("error").filter(|v| !v.is_null()) {
         anyhow::bail!("peer MCP error: {err}");
@@ -212,15 +205,6 @@ fn validate_document_url(raw: &str) -> anyhow::Result<()> {
         anyhow::bail!("unsafe document URL: unsupported scheme '{}'", url.scheme());
     }
     url_guard::ensure_safe_url(&url, "document download_url")
-}
-
-fn resolve_token(peer: &Peer) -> anyhow::Result<String> {
-    if let Some(ct) = &peer.access_token_ciphertext {
-        return crate::util::token_crypto::decrypt_token(ct)
-            .context("failed to decrypt peer token");
-    }
-    std::env::var("IONE_OAUTH_STATIC_BEARER")
-        .context("peer has no token and IONE_OAUTH_STATIC_BEARER is not set")
 }
 
 #[cfg(test)]

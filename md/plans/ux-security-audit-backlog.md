@@ -11,7 +11,7 @@ Status: tracked follow-up after the P0-P2 remediation pass.
 
 ## Identity-broker drift
 
-- **Peer delegated-token refresh.** `app-integration-playbook.md:34` asserts "IONe holds delegated tokens per (workspace, peer) and refreshes them automatically," but the `peers` path can't: `peer_oauth.rs` stores only `refresh_token_hash`, not recoverable ciphertext. Every peer call (`fetch_whoami`, manifest fetch in `peers.rs:404`, MCP tool calls, map-layers fan-out) uses the stored access token as-is; on expiry the peer returns 401 and is surfaced as "peer unavailable." The `broker_credentials` (SaaS OAuth) path already refreshes — this gap is specific to `peers`. Resolve by either (a) implementing peer-token refresh (needs a migration to store `peers.refresh_token_ciphertext` + refresh logic mirroring the broker path) or (b) amending the playbook to state v0.1 does not refresh peer tokens. Surfaced by the map-view code review (2026-05-21).
+- ✅ **Peer delegated-token refresh.** Resolved by `md/design/peer-token-refresh.md` and `md/plans/peer-token-refresh-plan.md`: peer OAuth callback now stores recoverable `peers.refresh_token_ciphertext`, peer MCP calls refresh before expiry and retry once on 401, and map/chart/table/document panels, chart/table data reads, manifest fetch, `whoami`, and MCP connector calls share the refresh-aware token path. Existing peers without refresh ciphertext still need re-authorization after expiry. Surfaced by the map-view code review (2026-05-21).
 
 ## P3 Code Quality
 

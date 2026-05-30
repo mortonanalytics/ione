@@ -1,10 +1,9 @@
 use std::{fmt, time::Duration};
 
-use anyhow::Context;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::models::Peer;
+use crate::{models::Peer, state::AppState};
 
 const MAX_TABLE_RESOURCE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TABLE_ROWS: usize = 5_000;
@@ -37,40 +36,41 @@ impl fmt::Display for TableDataError {
 impl std::error::Error for TableDataError {}
 
 pub async fn fetch_table_data(
-    http: &reqwest::Client,
+    state: &AppState,
     peer: &Peer,
     uri: &str,
 ) -> Result<TableDataResponse, TableDataError> {
-    let token = resolve_token(peer).map_err(|err| TableDataError::Unavailable(err.to_string()))?;
     let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
     tokio::time::timeout(
         Duration::from_secs(5),
-        call_resources_read(http, &endpoint, &token, uri),
+        call_resources_read(state, peer, &endpoint, uri),
     )
     .await
     .map_err(|_| TableDataError::Unavailable("timeout".to_string()))?
 }
 
 async fn call_resources_read(
-    http: &reqwest::Client,
+    state: &AppState,
+    peer: &Peer,
     endpoint: &str,
-    token: &str,
     uri: &str,
 ) -> Result<TableDataResponse, TableDataError> {
-    let response = http
-        .post(endpoint)
-        .bearer_auth(token)
-        .json(&serde_json::json!({
+    let response = crate::services::peer_tokens::send_mcp_request(
+        &state.pool,
+        &state.http,
+        peer,
+        endpoint,
+        &serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "resources/read",
             "params": { "uri": uri }
-        }))
-        .send()
-        .await
-        .map_err(|err| TableDataError::Unavailable(format!("HTTP send failed: {err}")))?
-        .error_for_status()
-        .map_err(|err| TableDataError::Unavailable(format!("peer returned error status: {err}")))?;
+        }),
+    )
+    .await
+    .map_err(|err| TableDataError::Unavailable(format!("HTTP send failed: {err}")))?
+    .error_for_status()
+    .map_err(|err| TableDataError::Unavailable(format!("peer returned error status: {err}")))?;
 
     let body = response.bytes().await.map_err(|err| {
         TableDataError::Unavailable(format!("failed to read peer response: {err}"))
@@ -177,15 +177,6 @@ async fn call_resources_read(
     Ok(TableDataResponse { schema, rows })
 }
 
-fn resolve_token(peer: &Peer) -> anyhow::Result<String> {
-    if let Some(ct) = &peer.access_token_ciphertext {
-        return crate::util::token_crypto::decrypt_token(ct)
-            .context("failed to decrypt peer token");
-    }
-    std::env::var("IONE_OAUTH_STATIC_BEARER")
-        .context("peer has no token and IONE_OAUTH_STATIC_BEARER is not set")
-}
-
 fn rpc_error_message(value: &Value) -> String {
     value
         .get("message")
@@ -194,4 +185,3 @@ fn rpc_error_message(value: &Value) -> String {
         .map(str::to_string)
         .unwrap_or_else(|| value.to_string())
 }
-

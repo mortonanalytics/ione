@@ -25,7 +25,7 @@ pub async fn list_chart_panels(
         .await
         .map_err(AppError::Internal)?;
 
-    let response = fetch_chart_panels(&state.pool, &state.http, workspace_id, ctx.org_id, peers)
+    let response = fetch_chart_panels(&state.pool, &state, workspace_id, ctx.org_id, peers)
         .await
         .map_err(AppError::Internal)?;
     Ok(Json(response))

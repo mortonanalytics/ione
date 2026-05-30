@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::models::Peer;
+use crate::{models::Peer, state::AppState};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,7 +46,7 @@ pub struct MapLayersResponse {
 }
 
 pub async fn fetch_map_layers(
-    http: &reqwest::Client,
+    state: &AppState,
     peers: Vec<Peer>,
     filter_peer_id: Option<Uuid>,
 ) -> MapLayersResponse {
@@ -57,7 +57,7 @@ pub async fn fetch_map_layers(
 
     let futures = peers
         .into_iter()
-        .map(|peer| fetch_from_peer(http.clone(), peer));
+        .map(|peer| fetch_from_peer(state.clone(), peer));
     let outcomes = join_all(futures).await;
 
     let mut items = Vec::new();
@@ -94,14 +94,12 @@ pub async fn fetch_map_layers(
 
 type PeerResult = Result<(Uuid, String, Vec<MapLayerItem>), (Uuid, String, String)>;
 
-async fn fetch_from_peer(http: reqwest::Client, peer: Peer) -> PeerResult {
-    let token = resolve_token(&peer)
-        .map_err(|e| (peer.id, peer.name.clone(), format!("token error: {e}")))?;
+async fn fetch_from_peer(state: AppState, peer: Peer) -> PeerResult {
     let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
 
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        call_resources_list(&http, &endpoint, &token),
+        call_resources_list(&state, &peer, &endpoint),
     )
     .await;
 
@@ -120,27 +118,28 @@ async fn fetch_from_peer(http: reqwest::Client, peer: Peer) -> PeerResult {
 }
 
 async fn call_resources_list(
-    http: &reqwest::Client,
+    state: &AppState,
+    peer: &Peer,
     endpoint: &str,
-    token: &str,
 ) -> anyhow::Result<Vec<Value>> {
-    let resp: Value = http
-        .post(endpoint)
-        .bearer_auth(token)
-        .json(&serde_json::json!({
+    let resp: Value = crate::services::peer_tokens::send_mcp_request(
+        &state.pool,
+        &state.http,
+        peer,
+        endpoint,
+        &serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "resources/list",
             "params": null
-        }))
-        .send()
-        .await
-        .context("HTTP send failed")?
-        .error_for_status()
-        .context("peer returned error status")?
-        .json()
-        .await
-        .context("failed to parse peer response")?;
+        }),
+    )
+    .await?
+    .error_for_status()
+    .context("peer returned error status")?
+    .json()
+    .await
+    .context("failed to parse peer response")?;
 
     if let Some(err) = resp.get("error").filter(|v| !v.is_null()) {
         anyhow::bail!("peer MCP error: {err}");
@@ -185,13 +184,4 @@ fn extract_map_layer(peer_id: Uuid, peer_name: &str, resource: Value) -> Option<
                 .map(str::to_string),
         },
     })
-}
-
-fn resolve_token(peer: &Peer) -> anyhow::Result<String> {
-    if let Some(ct) = &peer.access_token_ciphertext {
-        return crate::util::token_crypto::decrypt_token(ct)
-            .context("failed to decrypt peer token");
-    }
-    std::env::var("IONE_OAUTH_STATIC_BEARER")
-        .context("peer has no token and IONE_OAUTH_STATIC_BEARER is not set")
 }
