@@ -82,7 +82,10 @@ pub async fn get_workspace(
         .ok_or_else(|| AppError::BadRequest(format!("workspace {} not found", id)))?;
     let mut body = serde_json::to_value(ws).map_err(|e| AppError::Internal(e.into()))?;
     if let Value::Object(map) = &mut body {
-        map.insert("panels".to_string(), workspace_panels(&state.pool, id).await?);
+        map.insert(
+            "panels".to_string(),
+            workspace_panels(&state.pool, id).await?,
+        );
     }
     Ok(Json(body))
 }

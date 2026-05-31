@@ -58,6 +58,20 @@ Canonical names and types. All code (SQL migrations, Rust structs, TS/JS interfa
 | created_at | `created_at` | `created_at` | `createdAt` | TIMESTAMPTZ |
 | closed_at | `closed_at` | `closed_at` | `closedAt` | TIMESTAMPTZ NULL |
 
+*`GET /api/v1/workspaces/:id` additionally injects a non-persisted `panels`
+object (response extension; not a stored column) that drives adaptive tab
+visibility:*
+
+| JS field | Type | Meaning |
+|----------|------|---------|
+| `panels.charts` | int | count of native chart-capable streams (`view_config IS NOT NULL`) |
+| `panels.tables` | int | count of native table-capable streams (`view_config ? 'property_fields'`) |
+| `panels.hasActivePeer` | bool | an active peer binding exists (presence proxy for the federation-only Map/Document panels) |
+| `panels.approvalsPending` | int | count of pending approvals in the workspace |
+
+*Computed with cheap COUNT/EXISTS queries — no peer fan-out. `panels` is absent
+from `GET /api/v1/workspaces` list items.*
+
 ### role
 | Field | DB column | Rust field | JS field | Type |
 |-------|-----------|------------|----------|------|
@@ -251,7 +265,7 @@ Canonical names and types. All code (SQL migrations, Rust structs, TS/JS interfa
 | post message | POST | `/api/v1/conversations/:id/messages` | `{ content: string, model?: string }` | `Message` (assistant reply) |
 | list workspaces | GET | `/api/v1/workspaces` | — | `{ items: Workspace[] }` |
 | create workspace | POST | `/api/v1/workspaces` | `{ name, domain, lifecycle, parentId? }` | `Workspace` |
-| get workspace | GET | `/api/v1/workspaces/:id` | — | `Workspace` |
+| get workspace | GET | `/api/v1/workspaces/:id` | — | `Workspace` (+ `panels` summary) |
 | close workspace | POST | `/api/v1/workspaces/:id/close` | `{}` | `Workspace` |
 | list connectors | GET | `/api/v1/workspaces/:id/connectors` | — | `{ items: Connector[] }` |
 | create connector | POST | `/api/v1/workspaces/:id/connectors` | `{ kind, name, config }` | `Connector` |

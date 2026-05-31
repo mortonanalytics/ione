@@ -26,7 +26,11 @@ pub async fn seed_demo_if_enabled(pool: &PgPool) -> anyhow::Result<()> {
         .context("failed to check demo workspace existence")?;
 
     if exists {
-        return Ok(());
+        // The workspace is already seeded, but slices added after the initial
+        // seed (stream view_config for Charts/Tables, the loopback peer for
+        // Map/Documents) must still backfill so existing demo nodes pick them
+        // up without a purge. These are all idempotent upserts.
+        return backfill_demo(pool).await;
     }
 
     crate::repos::bootstrap::ensure_default_org_and_user(pool)
@@ -34,6 +38,24 @@ pub async fn seed_demo_if_enabled(pool: &PgPool) -> anyhow::Result<()> {
         .context("demo seeder failed to ensure default org+user bootstrap")?;
 
     seed_demo(pool).await
+}
+
+/// Re-run the idempotent slices that may post-date an existing demo workspace:
+/// stream `view_config` (Charts/Tables) and the loopback peer + active binding
+/// (Map/Documents). Keeps already-seeded demo nodes current without a purge.
+async fn backfill_demo(pool: &PgPool) -> anyhow::Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin demo backfill transaction")?;
+    let (org_id, _user_id) = resolve_default_org_and_user(&mut tx).await?;
+    seed_streams(&mut tx).await?;
+    seed_demo_peer(&mut tx, org_id).await?;
+    tx.commit()
+        .await
+        .context("failed to commit demo backfill transaction")?;
+    tracing::info!("demo workspace backfilled (view_config + loopback peer)");
+    Ok(())
 }
 
 async fn seed_demo(pool: &PgPool) -> anyhow::Result<()> {
@@ -240,8 +262,8 @@ async fn seed_demo_peer(
     .await
     .context("failed to insert demo trust issuer")?;
 
-    let access_ciphertext =
-        token_crypto::encrypt_token("demo-peer-token").context("failed to encrypt demo peer token")?;
+    let access_ciphertext = token_crypto::encrypt_token("demo-peer-token")
+        .context("failed to encrypt demo peer token")?;
 
     sqlx::query(
         "INSERT INTO peers (id, name, mcp_url, issuer_id, sharing_policy, status, access_token_ciphertext)

@@ -347,8 +347,10 @@ function renderMessageInto(div, role, text) {
 
   const body = document.createElement('span');
   body.className = 'message-body';
-  // marked escapes HTML by default; do not enable raw HTML rendering.
-  body.innerHTML = marked.parse(text, { breaks: true });
+  // Marked passes raw HTML through, so its output must be sanitized before it
+  // reaches innerHTML — chat content includes model/connector output and is not
+  // trusted. DOMPurify strips dangerous tags, attributes, and URL schemes.
+  body.innerHTML = DOMPurify.sanitize(marked.parse(text, { breaks: true }));
   div.appendChild(body);
 }
 
