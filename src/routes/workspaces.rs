@@ -80,9 +80,69 @@ pub async fn get_workspace(
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::BadRequest(format!("workspace {} not found", id)))?;
-    Ok(Json(
-        serde_json::to_value(ws).map_err(|e| AppError::Internal(e.into()))?,
-    ))
+    let mut body = serde_json::to_value(ws).map_err(|e| AppError::Internal(e.into()))?;
+    if let Value::Object(map) = &mut body {
+        map.insert(
+            "panels".to_string(),
+            workspace_panels(&state.pool, id).await?,
+        );
+    }
+    Ok(Json(body))
+}
+
+/// Per-panel data-presence summary driving the adaptive nav. Cheap COUNT/EXISTS
+/// queries only — no peer fan-out. `hasActivePeer` is the presence proxy for the
+/// federation-only Map/Document panels (and inclusively surfaces peer-fed
+/// charts/tables); native chart/table streams are counted directly.
+async fn workspace_panels(pool: &sqlx::PgPool, workspace_id: Uuid) -> Result<Value, AppError> {
+    let charts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM streams s
+         JOIN connectors c ON c.id = s.connector_id
+         WHERE c.workspace_id = $1 AND s.view_config IS NOT NULL",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
+
+    let tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM streams s
+         JOIN connectors c ON c.id = s.connector_id
+         WHERE c.workspace_id = $1 AND jsonb_exists(s.view_config, 'property_fields')",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
+
+    let has_active_peer: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM workspace_peer_bindings b
+            JOIN peers p ON p.id = b.peer_id
+            WHERE b.workspace_id = $1 AND b.status = 'active' AND p.status = 'active'
+         )",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
+
+    let approvals_pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM approvals ap
+         JOIN artifacts art ON art.id = ap.artifact_id
+         WHERE art.workspace_id = $1 AND ap.status = 'pending'",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
+
+    Ok(json!({
+        "charts": charts,
+        "tables": tables,
+        "hasActivePeer": has_active_peer,
+        "approvalsPending": approvals_pending,
+    }))
 }
 
 pub async fn close_workspace(

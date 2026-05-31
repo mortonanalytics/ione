@@ -331,12 +331,33 @@ function formatDate(iso) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+// Render a message's prefix label + markdown body into `div`, replacing any
+// existing content. Shared by appendMessage and rehydrateTranscriptChips so a
+// chip re-hydration pass never flattens rendered markdown back to raw text.
+function renderMessageInto(div, role, text) {
+  div.textContent = '';
+  const prefix = (role === 'user' ? 'You: ' : 'Model: ');
+  div.dataset.rawText = prefix + text;
+  div.dataset.body = text;
+
+  const label = document.createElement('span');
+  label.className = 'message-prefix';
+  label.textContent = prefix;
+  div.appendChild(label);
+
+  const body = document.createElement('span');
+  body.className = 'message-body';
+  // Marked passes raw HTML through, so its output must be sanitized before it
+  // reaches innerHTML — chat content includes model/connector output and is not
+  // trusted. DOMPurify strips dangerous tags, attributes, and URL schemes.
+  body.innerHTML = DOMPurify.sanitize(marked.parse(text, { breaks: true }));
+  div.appendChild(body);
+}
+
 function appendMessage(role, text) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
-  const prefix = (role === 'user' ? 'You: ' : 'Model: ');
-  div.dataset.rawText = prefix + text;
-  div.textContent = div.dataset.rawText;
+  renderMessageInto(div, role, text);
   transcript.appendChild(div);
   injectResourceChips(div);
   transcript.scrollTop = transcript.scrollHeight;
@@ -564,6 +585,19 @@ function setActiveWorkspace(ws) {
   clearStatus();
 
   renderSidebar();
+
+  // Adaptive tab visibility from the workspace's data-presence summary. List
+  // items carry no `panels`, so fetch the full workspace when it's absent.
+  applyTabVisibility(ws.panels || null);
+  if (!ws.panels) {
+    apiFetch('/api/v1/workspaces/' + ws.id, { skipErrorToast: true })
+      .then((full) => {
+        if (activeWorkspace && activeWorkspace.id === ws.id) {
+          applyTabVisibility(full.panels || null);
+        }
+      })
+      .catch(() => {});
+  }
 
   // If the connectors tab is active, reload connectors for the new workspace.
   if (activeTab === 'connectors') {
@@ -1119,49 +1153,58 @@ function switchTab(name) {
   }
 }
 
-tabChat.addEventListener('click', () => switchTab('chat'));
-tabMap.addEventListener('click', () => switchTab('map'));
-tabChart.addEventListener('click', () => switchTab('chart'));
-tabTable.addEventListener('click', () => switchTab('table'));
-tabDocument.addEventListener('click', () => switchTab('document'));
-tabConnectors.addEventListener('click', () => switchTab('connectors'));
-tabSignals.addEventListener('click', () => switchTab('signals'));
-tabSurvivors.addEventListener('click', () => switchTab('survivors'));
-tabApprovals.addEventListener('click', () => switchTab('approvals'));
+// Registry driving adaptive tab visibility + keyboard nav. Data-viz tabs
+// surface only when the workspace has that data (from its `panels` block); ops
+// tabs are always present (grouped to the right in the bar) except Approvals,
+// which appears only when something is pending. switchTab() keeps the per-tab
+// load side-effects above.
+const tabBar = document.getElementById('tab-bar');
+const TAB_REGISTRY = [
+  { id: 'chat',       el: tabChat,       always: true },
+  { id: 'map',        el: tabMap,        show: (p) => p.hasActivePeer },
+  { id: 'chart',      el: tabChart,      show: (p) => p.charts > 0 || p.hasActivePeer },
+  { id: 'table',      el: tabTable,      show: (p) => p.tables > 0 || p.hasActivePeer },
+  { id: 'document',   el: tabDocument,   show: (p) => p.hasActivePeer },
+  { id: 'connectors', el: tabConnectors, always: true },
+  { id: 'signals',    el: tabSignals,    always: true },
+  { id: 'survivors',  el: tabSurvivors,  always: true },
+  { id: 'approvals',  el: tabApprovals,  show: (p) => p.approvalsPending > 0 },
+];
 
-tabChat.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowRight') { e.preventDefault(); tabMap.focus(); tabMap.click(); }
+TAB_REGISTRY.forEach((t) => {
+  t.el.addEventListener('click', () => switchTab(t.id));
 });
-tabMap.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabChat.focus(); tabChat.click(); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); tabChart.focus(); tabChart.click(); }
-});
-tabChart.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabMap.focus(); tabMap.click(); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); tabTable.focus(); tabTable.click(); }
-});
-tabTable.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabChart.focus(); tabChart.click(); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); tabDocument.focus(); tabDocument.click(); }
-});
-tabDocument.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabTable.focus(); tabTable.click(); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
-});
-tabConnectors.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabDocument.focus(); tabDocument.click(); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); tabSignals.focus(); tabSignals.click(); }
-});
-tabSignals.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabConnectors.focus(); tabConnectors.click(); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); tabSurvivors.focus(); tabSurvivors.click(); }
-});
-tabSurvivors.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabSignals.focus(); tabSignals.click(); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); tabApprovals.focus(); tabApprovals.click(); }
-});
-tabApprovals.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); tabSurvivors.focus(); tabSurvivors.click(); }
+
+// Apply data-presence visibility from a workspace `panels` block. When panels
+// are unknown (null), nothing is hidden — we never hide a tab we can't disprove.
+// If the active tab gets hidden, fall back to Chat.
+function applyTabVisibility(panels) {
+  const known = panels != null;
+  const p = panels || {};
+  TAB_REGISTRY.forEach((t) => {
+    const visible = t.always || !known || (t.show ? t.show(p) : true);
+    t.el.hidden = !visible;
+  });
+  const active = TAB_REGISTRY.find((t) => t.id === activeTab);
+  if (active && active.el.hidden) {
+    switchTab('chat');
+  }
+}
+
+// Arrow-key nav across the currently-visible tabs (delegated so it survives
+// tabs being hidden/shown). Anchored on the focused tab, not the selected one,
+// to match roving-tabindex semantics.
+tabBar.addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const visible = TAB_REGISTRY.filter((t) => !t.el.hidden);
+  const idx = visible.findIndex((t) => t.el === e.target);
+  if (idx < 0) return;
+  e.preventDefault();
+  const next = e.key === 'ArrowRight'
+    ? visible[Math.min(idx + 1, visible.length - 1)]
+    : visible[Math.max(idx - 1, 0)];
+  next.el.focus();
+  switchTab(next.id);
 });
 
 /* ── Map panel ── */
@@ -1717,7 +1760,11 @@ function layerTokenForItem(item) {
 
 function rehydrateTranscriptChips() {
   transcript.querySelectorAll('.message[data-raw-text]').forEach((el) => {
-    el.textContent = el.dataset.rawText;
+    const role = el.classList.contains('user') ? 'user' : 'assistant';
+    const text = el.dataset.body != null
+      ? el.dataset.body
+      : el.dataset.rawText.replace(/^(You: |Model: )/, '');
+    renderMessageInto(el, role, text);
     injectResourceChips(el);
   });
 }

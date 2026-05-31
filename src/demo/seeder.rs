@@ -8,8 +8,9 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::demo::{fixture as f, DEMO_WORKSPACE_ID};
+use crate::demo::{fixture as f, DEMO_PEER_ID, DEMO_TRUST_ISSUER_ID, DEMO_WORKSPACE_ID};
 use crate::models::{ActorKind, ArtifactKind, MessageRole};
+use crate::util::token_crypto;
 
 /// Seed the demo workspace if `IONE_SEED_DEMO=1`.
 /// No-op if the workspace already exists (re-entrant).
@@ -25,7 +26,11 @@ pub async fn seed_demo_if_enabled(pool: &PgPool) -> anyhow::Result<()> {
         .context("failed to check demo workspace existence")?;
 
     if exists {
-        return Ok(());
+        // The workspace is already seeded, but slices added after the initial
+        // seed (stream view_config for Charts/Tables, the loopback peer for
+        // Map/Documents) must still backfill so existing demo nodes pick them
+        // up without a purge. These are all idempotent upserts.
+        return backfill_demo(pool).await;
     }
 
     crate::repos::bootstrap::ensure_default_org_and_user(pool)
@@ -33,6 +38,24 @@ pub async fn seed_demo_if_enabled(pool: &PgPool) -> anyhow::Result<()> {
         .context("demo seeder failed to ensure default org+user bootstrap")?;
 
     seed_demo(pool).await
+}
+
+/// Re-run the idempotent slices that may post-date an existing demo workspace:
+/// stream `view_config` (Charts/Tables) and the loopback peer + active binding
+/// (Map/Documents). Keeps already-seeded demo nodes current without a purge.
+async fn backfill_demo(pool: &PgPool) -> anyhow::Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin demo backfill transaction")?;
+    let (org_id, _user_id) = resolve_default_org_and_user(&mut tx).await?;
+    seed_streams(&mut tx).await?;
+    seed_demo_peer(&mut tx, org_id).await?;
+    tx.commit()
+        .await
+        .context("failed to commit demo backfill transaction")?;
+    tracing::info!("demo workspace backfilled (view_config + loopback peer)");
+    Ok(())
 }
 
 async fn seed_demo(pool: &PgPool) -> anyhow::Result<()> {
@@ -55,6 +78,7 @@ async fn seed_demo(pool: &PgPool) -> anyhow::Result<()> {
     seed_audit_events(&mut tx).await?;
     seed_conversation(&mut tx, user_id).await?;
     seed_pipeline_events(&mut tx).await?;
+    seed_demo_peer(&mut tx, org_id).await?;
 
     tx.commit()
         .await
@@ -175,24 +199,100 @@ async fn seed_connectors(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyh
 
 async fn seed_streams(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {
     for c in f::connectors() {
-        let stream_name = match c.id {
-            f::CONN_NWS => "observations",
-            f::CONN_FIRMS => "hotspots",
-            f::CONN_IRWIN => "incidents",
-            _ => "default",
+        // FIRMS (hotspots) and IRWIN (incidents) carry a view_config so the
+        // demo workspace's Charts and Tables panels render their IONe-native
+        // path; their stream events expose numeric fields the chart/table
+        // services aggregate (FIRMS `/hotspots`, IRWIN `/acres`).
+        let (stream_name, view_config): (&str, Option<serde_json::Value>) = match c.id {
+            f::CONN_NWS => ("observations", None),
+            f::CONN_FIRMS => (
+                "hotspots",
+                Some(serde_json::json!({
+                    "property_fields": [{ "pointer": "/hotspots", "name": "Hotspots" }]
+                })),
+            ),
+            f::CONN_IRWIN => (
+                "incidents",
+                Some(serde_json::json!({
+                    "property_fields": [{ "pointer": "/acres", "name": "Acres" }]
+                })),
+            ),
+            _ => ("default", None),
         };
         sqlx::query(
-            "INSERT INTO streams (id, connector_id, name, schema)
-             VALUES ($1, $2, $3, '{}'::jsonb)
-             ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO streams (id, connector_id, name, schema, view_config)
+             VALUES ($1, $2, $3, '{}'::jsonb, $4)
+             ON CONFLICT (id) DO UPDATE SET view_config = EXCLUDED.view_config",
         )
         .bind(c.stream_id)
         .bind(c.id)
         .bind(stream_name)
+        .bind(view_config)
         .execute(&mut **tx)
         .await
         .context("failed to insert demo stream")?;
     }
+    Ok(())
+}
+
+/// Seed a loopback peer + active binding so the federation-only Map and
+/// Document panels render in the demo workspace. The peer's `mcp_url` points at
+/// the node's own `/demo/mcp` route (derived from `IONE_BIND`). We store an
+/// encrypted dummy access token with no expiry so `peer_tokens::resolve_access_token`
+/// returns it without requiring `IONE_OAUTH_STATIC_BEARER`; the demo MCP route
+/// ignores the bearer anyway.
+async fn seed_demo_peer(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: Uuid,
+) -> anyhow::Result<()> {
+    let bind = std::env::var("IONE_BIND").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    let host_port = bind
+        .replace("0.0.0.0", "127.0.0.1")
+        .replace("[::]", "127.0.0.1");
+    let mcp_url = format!("http://{host_port}/demo/mcp");
+
+    sqlx::query(
+        "INSERT INTO trust_issuers (id, org_id, issuer_url, audience, jwks_uri, claim_mapping)
+         VALUES ($1, $2, 'https://demo-peer.ione.local', 'ione-mcp', 'secret:ZGVtbw==', '{}'::jsonb)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(DEMO_TRUST_ISSUER_ID)
+    .bind(org_id)
+    .execute(&mut **tx)
+    .await
+    .context("failed to insert demo trust issuer")?;
+
+    let access_ciphertext = token_crypto::encrypt_token("demo-peer-token")
+        .context("failed to encrypt demo peer token")?;
+
+    sqlx::query(
+        "INSERT INTO peers (id, name, mcp_url, issuer_id, sharing_policy, status, access_token_ciphertext)
+         VALUES ($1, 'Demo Peer — Lolo NF', $2, $3, '{}'::jsonb, 'active'::peer_status, $4)
+         ON CONFLICT (id) DO UPDATE
+            SET mcp_url = EXCLUDED.mcp_url,
+                status = 'active'::peer_status,
+                access_token_ciphertext = EXCLUDED.access_token_ciphertext",
+    )
+    .bind(DEMO_PEER_ID)
+    .bind(&mcp_url)
+    .bind(DEMO_TRUST_ISSUER_ID)
+    .bind(&access_ciphertext)
+    .execute(&mut **tx)
+    .await
+    .context("failed to insert demo peer")?;
+
+    sqlx::query(
+        "INSERT INTO workspace_peer_bindings
+             (workspace_id, peer_id, foreign_tenant_id, foreign_tenant_name, status)
+         VALUES ($1, $2, 'demo-tenant', 'Demo Peer Tenant', 'active'::binding_status)
+         ON CONFLICT (workspace_id, peer_id) DO UPDATE SET status = 'active'::binding_status",
+    )
+    .bind(DEMO_WORKSPACE_ID)
+    .bind(DEMO_PEER_ID)
+    .execute(&mut **tx)
+    .await
+    .context("failed to insert demo workspace_peer_binding")?;
+
     Ok(())
 }
 

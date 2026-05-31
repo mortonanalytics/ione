@@ -29,6 +29,7 @@ pub mod chart_panels;
 pub mod chat;
 pub mod connectors;
 pub mod conversations;
+pub mod demo_mcp;
 pub mod document_panels;
 pub mod event_aggregates;
 pub mod event_layers;
@@ -81,6 +82,15 @@ pub fn router(state: AppState) -> Router {
             post(webhooks::receive_webhook).layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .with_state(state.clone());
+
+    // Demo-only loopback MCP endpoint, registered when the demo workspace is
+    // seeded. The seeded demo peer points here so the Map and Document panels
+    // (federation-only) render in the demo workspace. Unauthenticated by design.
+    let public = if std::env::var("IONE_SEED_DEMO").as_deref() == Ok("1") {
+        public.route("/demo/mcp", post(demo_mcp::demo_mcp))
+    } else {
+        public
+    };
 
     // Routes that run through the auth middleware.
     let protected = Router::new()

@@ -128,6 +128,80 @@ async fn seed_is_reentrant() {
     );
 }
 
+/// An already-seeded demo node that predates the Charts/Tables `view_config` and
+/// the Map/Documents loopback peer must backfill those slices on next boot
+/// without a purge.
+///
+/// Requires IONE_SEED_DEMO=1 in the environment.
+#[tokio::test]
+#[ignore]
+async fn backfill_restores_viz_slices_for_existing_demo() {
+    std::env::set_var("IONE_SEED_DEMO", "1");
+
+    let pool = make_pool().await;
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migration failed");
+    truncate_all(&pool).await;
+
+    // Seed, then simulate an "old" demo predating the viz slices.
+    ione::demo::seeder::seed_demo_if_enabled(&pool)
+        .await
+        .expect("initial seed failed");
+    sqlx::query(
+        "UPDATE streams s SET view_config = NULL
+           FROM connectors c
+          WHERE c.id = s.connector_id AND c.workspace_id = $1",
+    )
+    .bind(DEMO_WORKSPACE_ID)
+    .execute(&pool)
+    .await
+    .expect("clearing view_config failed");
+    sqlx::query("DELETE FROM workspace_peer_bindings WHERE workspace_id = $1")
+        .bind(DEMO_WORKSPACE_ID)
+        .execute(&pool)
+        .await
+        .expect("deleting binding failed");
+    sqlx::query("DELETE FROM peers WHERE name = 'Demo Peer — Lolo NF'")
+        .execute(&pool)
+        .await
+        .expect("deleting peer failed");
+
+    // Re-run: workspace exists, so this exercises the backfill path.
+    ione::demo::seeder::seed_demo_if_enabled(&pool)
+        .await
+        .expect("backfill seed failed");
+
+    let with_view_config: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM streams s
+           JOIN connectors c ON c.id = s.connector_id
+          WHERE c.workspace_id = $1 AND s.view_config IS NOT NULL",
+    )
+    .bind(DEMO_WORKSPACE_ID)
+    .fetch_one(&pool)
+    .await
+    .expect("view_config count failed");
+    assert!(
+        with_view_config >= 1,
+        "backfill must restore stream view_config, got {with_view_config}"
+    );
+
+    let active_binding: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workspace_peer_bindings b
+           JOIN peers p ON p.id = b.peer_id
+          WHERE b.workspace_id = $1 AND b.status = 'active' AND p.status = 'active'",
+    )
+    .bind(DEMO_WORKSPACE_ID)
+    .fetch_one(&pool)
+    .await
+    .expect("binding count failed");
+    assert_eq!(
+        active_binding, 1,
+        "backfill must restore the active loopback peer binding, got {active_binding}"
+    );
+}
+
 // ─── Test 2: demo_blocks_writes_with_demo_read_only_error ────────────────────
 
 /// AC-1.3 (write-guard contract): any mutating request to the demo workspace

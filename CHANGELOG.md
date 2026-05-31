@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- UI overhaul (demo legibility + adaptive nav): chat renders sanitized markdown (Marked + DOMPurify); approvals render as styled cards; demo seeds `view_config` (Charts/Tables) and a loopback mock-MCP peer (Map/Documents) so all panels render; adaptive navigation hides data-viz tabs when a workspace has no such data via a new `panels` summary on `GET /api/v1/workspaces/:id`. Already-seeded demo nodes backfill the new slices on next boot (no purge).
 - Demo Workspace with `IONE_SEED_DEMO` seeder + canned-chat layer.
 - Ollama preflight (`GET /api/v1/health/ollama`) + chat remediation card.
 - Guided connector setup: 5 per-provider validators + `POST /connectors/validate`.

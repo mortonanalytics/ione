@@ -648,6 +648,30 @@ async fn close_workspace_sets_closed_at() {
         get_body
     );
 
+    // GET /workspaces/:id carries the adaptive-nav `panels` block. This
+    // workspace has no streams, peers, or approvals, so all signals are empty.
+    let panels = &get_body["panels"];
+    assert!(
+        panels.is_object(),
+        "GET must include a panels object, got: {get_body}"
+    );
+    assert_eq!(
+        panels["charts"], 0,
+        "panels.charts should be 0 for an empty workspace"
+    );
+    assert_eq!(
+        panels["tables"], 0,
+        "panels.tables should be 0 for an empty workspace"
+    );
+    assert_eq!(
+        panels["hasActivePeer"], false,
+        "panels.hasActivePeer should be false"
+    );
+    assert_eq!(
+        panels["approvalsPending"], 0,
+        "panels.approvalsPending should be 0 for an empty workspace"
+    );
+
     // DB: closed_at must be non-null
     let ws_uuid = Uuid::parse_str(ws_id).expect("ws_id must be a valid UUID");
     let db_closed_at: Option<chrono::DateTime<chrono::Utc>> =

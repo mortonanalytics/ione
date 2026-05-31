@@ -453,6 +453,14 @@ fn validate_style_field_reference(
 }
 
 /// Project catalog + events into the wire response. Pure (no I/O).
+/// Whether a `view_config` expresses any intent to be a geographic layer.
+/// Chart/table-only configs (property_fields without lon/lat pointers) return
+/// false and are excluded from event-layer projection entirely.
+fn has_geo_intent(vc: &Value) -> bool {
+    let present = |key: &str| matches!(vc.get(key), Some(v) if !v.is_null());
+    present("lon_pointer") || present("lat_pointer")
+}
+
 pub fn project_event_layers(
     catalog: Vec<GeoStreamRow>,
     mut events: Vec<GeoEventRow>,
@@ -475,6 +483,14 @@ pub fn project_event_layers(
     let mut streams_failed = Vec::new();
 
     for row in catalog {
+        // A stream whose view_config declares no geographic pointers is a
+        // chart/table-only stream (property_fields but no lon/lat), not a map
+        // layer — skip it silently rather than reporting a config error. A
+        // config error is only meaningful when there is geo intent: a lon/lat
+        // pointer present but the config otherwise invalid.
+        if !has_geo_intent(&row.view_config) {
+            continue;
+        }
         match CompiledConfig::parse(&row.view_config) {
             Err(error) => streams_failed.push(StreamProjectionError {
                 stream_id: row.stream_id,
@@ -627,6 +643,26 @@ mod tests {
         assert!(resp.layers.is_empty());
         assert_eq!(resp.streams_failed.len(), 1);
         assert!(resp.streams_failed[0].error.contains("lon_pointer"));
+    }
+
+    #[test]
+    fn chart_table_only_config_is_skipped_not_failed() {
+        // A view_config with property_fields but no lon/lat pointers is a
+        // chart/table stream, not a map layer — it must not appear as a failed
+        // event layer.
+        let catalog = vec![GeoStreamRow {
+            stream_id: Uuid::new_v4(),
+            stream_name: "hotspots".to_string(),
+            view_config: json!({
+                "property_fields": [{ "pointer": "/hotspots", "name": "Hotspots" }]
+            }),
+        }];
+
+        let resp = project_event_layers(catalog, vec![], 5000, Utc::now());
+
+        assert!(resp.layers.is_empty());
+        assert!(resp.streams_failed.is_empty());
+        assert!(resp.streams_ok.is_empty());
     }
 
     #[test]
