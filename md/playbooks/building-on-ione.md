@@ -27,6 +27,10 @@ Most demos, RFI/Sources-Sought responses, and proofs-of-capability are **Artifac
 
 If unsure: build Section B first (you get a working IONe-rendered app in hours), then graduate to Section A later. doi-reclamation is the canonical "started B, can grow to A" example.
 
+### A third relationship: *consume* IONe over MCP
+
+Beyond plugging *into* IONe (peer or artifact), your agent or app can **consume IONe's federated surface as an MCP client** — connect to IONe's `/mcp` server and call a unified `tools/list` across every connected peer, `tools/call` (routed to the owning peer, approval-gated where required), `resources/read`, and the aggregated `slice://`. This makes IONe-as-tool a peer to *your* agent, the mirror of the web shell. See [mcp-federation.md](../design/mcp-federation.md) "Consumption surfaces." Caveat: until the federation slice ships, IONe's `tools/list` is a hardcoded stub that does not reflect connected peers — don't rely on it for federated discovery yet.
+
 ---
 
 ## Section A — Federation Peer (live app)
