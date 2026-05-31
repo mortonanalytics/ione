@@ -12,6 +12,19 @@ use governor::{
 use serde::Serialize;
 use std::num::NonZeroU32;
 
+/// Three-way outcome for a peer call. Client-side errors (4xx) do not increment
+/// the circuit breaker failure counter — they reflect caller mistakes, not peer
+/// instability. Only peer-side failures (5xx, timeouts, parse errors) count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallOutcome {
+    /// The call succeeded; reset the breaker's consecutive-failure counter.
+    Success,
+    /// The peer returned 5xx, timed out, or produced a parse error.
+    PeerFailure,
+    /// The caller sent a bad request (4xx). Does not affect the breaker.
+    ClientError,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BreakerState {
@@ -86,6 +99,20 @@ impl PeerGovernor {
             return true;
         }
         false
+    }
+
+    /// Dispatch a `CallOutcome` to the circuit breaker.
+    /// Returns `true` if the breaker just transitioned to Open (caller should update DB).
+    /// `ClientError` is a no-op: 4xx indicates caller mistake, not peer instability.
+    pub fn record_outcome(&self, outcome: CallOutcome) -> bool {
+        match outcome {
+            CallOutcome::Success => {
+                self.record_success();
+                false
+            }
+            CallOutcome::PeerFailure => self.record_peer_failure(),
+            CallOutcome::ClientError => false,
+        }
     }
 
     pub fn maybe_half_open(&self, cooldown: Duration) -> BreakerState {

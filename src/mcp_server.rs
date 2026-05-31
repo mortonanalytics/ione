@@ -738,10 +738,11 @@ async fn dispatch_method(
                     )
                 }
             };
-            let workspace_id = match resolve_mcp_workspace(state, headers, req.params.as_ref()) {
-                Ok(workspace_id) => workspace_id,
-                Err(e) => return JsonRpcResponse::err(req.id, -32002, e.to_string(), None),
-            };
+            // Org-wide aggregation is intentionally disallowed: advertising tools from
+            // all org workspaces would expose uninvokable cross-workspace tools to callers.
+            // TODO(role-filter): filter federated tools by caller role once RBAC is wired.
+            let workspace_id =
+                resolve_explicit_workspace(state, headers, req.params.as_ref());
             handle_tools_list(req.id, state, workspace_id, &auth).await
         }
         "resources/list" => {
@@ -847,25 +848,31 @@ async fn handle_initialize(
 async fn handle_tools_list(
     id: Option<Value>,
     state: &AppState,
-    workspace_id: Uuid,
+    workspace_id: Option<Uuid>,
     auth: &AuthContext,
 ) -> JsonRpcResponse {
     let mut tools = tool_list().as_array().cloned().unwrap_or_default();
-    match crate::services::federation::aggregate_tools(state, workspace_id, auth).await {
-        Ok(peer_tools) => {
-            tools.extend(peer_tools.into_iter().map(|tool| {
-                json!({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "inputSchema": tool.input_schema.unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
-                    "ione_approval": { "required": tool.approval_required },
-                    "peerId": tool.peer_id,
-                })
-            }));
-            JsonRpcResponse::ok(id, json!({ "tools": tools }))
+    // Only aggregate federated tools when a workspace is explicitly scoped.
+    // Org-wide aggregation is intentionally disallowed: it would advertise
+    // tools from all workspaces that the caller cannot necessarily invoke.
+    // TODO(role-filter): filter federated tools by caller role once RBAC is wired.
+    if let Some(ws_id) = workspace_id {
+        match crate::services::federation::aggregate_tools(state, ws_id, auth).await {
+            Ok(peer_tools) => {
+                tools.extend(peer_tools.into_iter().map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "inputSchema": tool.input_schema.unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
+                        "ione_approval": { "required": tool.approval_required },
+                        "peerId": tool.peer_id,
+                    })
+                }));
+            }
+            Err(e) => return JsonRpcResponse::err(id, -32000, e.to_string(), None),
         }
-        Err(e) => JsonRpcResponse::err(id, -32000, e.to_string(), None),
     }
+    JsonRpcResponse::ok(id, json!({ "tools": tools }))
 }
 
 fn handle_resources_list(id: Option<Value>) -> JsonRpcResponse {
@@ -1139,6 +1146,40 @@ fn require_mcp_session(state: &AppState, headers: &HeaderMap) -> anyhow::Result<
         anyhow::bail!("MCP session not found");
     }
     Ok(session_id.to_string())
+}
+
+/// Resolve a workspace_id only from explicit params or session state — never from
+/// the default_workspace_id fallback. Returns `None` when no workspace is scoped,
+/// which callers use to suppress org-wide tool aggregation.
+fn resolve_explicit_workspace(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: Option<&Value>,
+) -> Option<Uuid> {
+    if let Some(workspace_id) = params
+        .and_then(|params| {
+            params
+                .get("workspace_id")
+                .or_else(|| params.get("workspaceId"))
+        })
+        .and_then(Value::as_str)
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+    {
+        return Some(workspace_id);
+    }
+    let session_id = headers
+        .get(MCP_SESSION_ID)
+        .and_then(|value| value.to_str().ok())?;
+    state
+        .mcp_sessions
+        .get(session_id)
+        .and_then(|entry| {
+            entry
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .and_then(|raw| Uuid::parse_str(&raw).ok())
 }
 
 fn resolve_mcp_workspace(

@@ -41,6 +41,43 @@ pub async fn resolve_access_token(
     refresh_access_token(pool, http, peer).await
 }
 
+/// Like `resolve_access_token` but serializes concurrent refresh for a single peer
+/// using a per-peer mutex stored in `AppState`. Prevents the token-overwrite race
+/// when multiple requests for the same peer race to refresh simultaneously.
+pub async fn resolve_access_token_locked(
+    state: &crate::state::AppState,
+    peer: &Peer,
+) -> Result<String> {
+    if peer.access_token_ciphertext.is_none() {
+        return static_bearer();
+    }
+    // Fast path: token is fresh — no need to take the lock.
+    if token_is_fresh(peer) {
+        return decrypt_access_token(peer);
+    }
+    // Acquire per-peer lock before refresh to serialize concurrent callers.
+    let lock = state
+        .peer_refresh_locks
+        .entry(peer.id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _guard = lock.lock().await;
+    // Re-check freshness under the lock: the thread that won the lock may have
+    // already refreshed the token, so reload from DB before deciding to refresh.
+    let fresh_peer = PeerRepo::new(state.pool.clone())
+        .get(peer.id)
+        .await
+        .ok()
+        .flatten();
+    if let Some(ref reloaded) = fresh_peer {
+        if token_is_fresh(reloaded) {
+            return decrypt_access_token(reloaded);
+        }
+        return refresh_access_token(&state.pool, &state.http, reloaded).await;
+    }
+    refresh_access_token(&state.pool, &state.http, peer).await
+}
+
 pub async fn refresh_access_token(
     pool: &PgPool,
     http: &reqwest::Client,
@@ -145,6 +182,46 @@ pub async fn send_mcp_request_with_session(
         }
         Err(e) => {
             record_peer_failure(pool, peer, &governor, &e).await;
+            Err(e)
+        }
+    }
+}
+
+/// Variant of `send_mcp_request_with_session` that uses the per-peer refresh mutex
+/// in `AppState` to prevent concurrent token overwrites on the same peer.
+pub async fn send_mcp_request_with_state(
+    state: &crate::state::AppState,
+    peer: &Peer,
+    endpoint: &str,
+    body: &Value,
+    mcp_session_id: Option<&str>,
+) -> Result<reqwest::Response> {
+    let governor = governor_for(peer.id);
+    governor.acquire().await?;
+    let token = resolve_access_token_locked(state, peer).await?;
+    let first = match send_with_token(&state.http, endpoint, body, &token, mcp_session_id).await {
+        Ok(response) => {
+            record_peer_response(&state.pool, peer, &governor, response.status()).await;
+            response
+        }
+        Err(e) => {
+            record_peer_failure(&state.pool, peer, &governor, &e).await;
+            return Err(e);
+        }
+    };
+    if first.status() != StatusCode::UNAUTHORIZED || !can_refresh(peer) {
+        return Ok(first);
+    }
+
+    governor.acquire().await?;
+    let token = refresh_access_token(&state.pool, &state.http, peer).await?;
+    match send_with_token(&state.http, endpoint, body, &token, mcp_session_id).await {
+        Ok(response) => {
+            record_peer_response(&state.pool, peer, &governor, response.status()).await;
+            Ok(response)
+        }
+        Err(e) => {
+            record_peer_failure(&state.pool, peer, &governor, &e).await;
             Err(e)
         }
     }

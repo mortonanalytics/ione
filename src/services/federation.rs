@@ -455,6 +455,10 @@ async fn fetch_manifest(state: &AppState, peer: &Peer) -> anyhow::Result<PeerMan
     })
 }
 
+/// Maximum pages fetched per `paginated_list` call. A buggy peer returning an
+/// infinite cursor would otherwise loop forever; this caps the damage.
+const MAX_PAGINATION_PAGES: usize = 50;
+
 async fn paginated_list(
     state: &AppState,
     peer: &Peer,
@@ -463,7 +467,7 @@ async fn paginated_list(
 ) -> anyhow::Result<Vec<Value>> {
     let mut cursor: Option<Value> = None;
     let mut out = Vec::new();
-    loop {
+    for page in 0..MAX_PAGINATION_PAGES {
         let params = cursor
             .as_ref()
             .map(|cursor| json!({ "cursor": cursor }))
@@ -480,6 +484,13 @@ async fn paginated_list(
         });
         if cursor.is_none() {
             break;
+        }
+        if page + 1 == MAX_PAGINATION_PAGES {
+            tracing::warn!(
+                peer_id = %peer.id,
+                method,
+                "paginated_list hit page cap ({MAX_PAGINATION_PAGES}); truncating results"
+            );
         }
     }
     Ok(out)
@@ -515,9 +526,8 @@ async fn send_jsonrpc_once(
         "method": method,
         "params": params,
     });
-    let resp = crate::services::peer_tokens::send_mcp_request_with_session(
-        &state.pool,
-        &state.http,
+    let resp = crate::services::peer_tokens::send_mcp_request_with_state(
+        state,
         peer,
         &endpoint,
         &body,
@@ -881,13 +891,27 @@ pub async fn assigned_prefix_for_org(
     Ok(derive_prefix(name, &taken))
 }
 
+/// Maximum byte length for a peer context slice inserted into a prompt fence.
+/// Truncation is on a UTF-8 char boundary to prevent panics on multi-byte chars.
+const MAX_SLICE_BYTES: usize = 2048;
+
 pub fn sanitize_slice_text(input: &str) -> String {
-    input
+    // Strip sentinel substrings before insertion so a malicious peer cannot
+    // break out of the <<<IONE_PEER_SLICE ...>>> ... <<<END_IONE_PEER_SLICE>>> fence.
+    let stripped = input
         .replace("<<<IONE_PEER_SLICE", "[removed-sentinel]")
-        .replace("<<<END_IONE_PEER_SLICE>>>", "[removed-sentinel]")
-        .chars()
-        .take(2048)
-        .collect()
+        .replace("<<<END_IONE_PEER_SLICE>>>", "[removed-sentinel]");
+    // Truncate on a char boundary at or before MAX_SLICE_BYTES bytes.
+    if stripped.len() <= MAX_SLICE_BYTES {
+        return stripped;
+    }
+    let boundary = stripped
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= MAX_SLICE_BYTES)
+        .last()
+        .unwrap_or(0);
+    stripped[..boundary].to_string()
 }
 
 pub fn build_slice_context(entries: &[SliceEntry]) -> String {
