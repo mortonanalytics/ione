@@ -679,7 +679,21 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   font-size: var(--font-size-sm);
   color: #555;
   margin-bottom: -1px;
+  flex-shrink: 0;
+  white-space: nowrap;
   transition: color 0.12s, border-color 0.12s;
+}
+
+/* Ops tabs (Connectors / Signals / Survivors / Approvals) are grouped to the
+   right of the data tabs and visually demoted to a secondary role. */
+#tab-connectors {
+  margin-left: auto;
+  border-left: 1px solid var(--color-border);
+}
+
+.tab--ops {
+  color: #888;
+  font-size: var(--font-size-xs);
 }
 
 .tab:hover {
