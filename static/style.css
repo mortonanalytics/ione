@@ -3074,3 +3074,126 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
     animation-duration: 0.001ms !important;
   }
 }
+
+/* ── Approvals panel ──
+   renderApprovals() already emits these classes; mirror the .signal-card
+   token-based card pattern so the panel stops rendering as a raw bullet list. */
+
+#approval-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.approval-item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.approval-item--empty {
+  color: var(--color-sidebar-muted);
+  font-style: italic;
+}
+
+.approval-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.approval-kind {
+  font-family: ui-monospace, monospace;
+  font-size: var(--font-size-xs);
+  padding: 1px var(--space-2);
+  border-radius: 99px;
+  background: #eef1f6;
+  color: #3949ab;
+}
+
+.approval-status {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  padding: 1px var(--space-2);
+  border-radius: 99px;
+  margin-left: auto;
+  text-transform: capitalize;
+}
+
+.approval-status--pending  { background: #fff8e1; color: #b45309; }
+.approval-status--approved { background: #e6f4ea; color: #1e7e34; }
+.approval-status--rejected { background: #fdecea; color: var(--color-error); }
+
+.approval-title {
+  font-weight: 600;
+}
+
+.approval-body,
+.approval-rationale,
+.approval-comment-display,
+.approval-decided-at {
+  font-size: var(--font-size-sm);
+  color: var(--color-sidebar-muted);
+}
+
+.approval-comment {
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+  resize: vertical;
+}
+
+.approval-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.approval-btn {
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  cursor: pointer;
+  font: inherit;
+}
+
+.approval-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.approval-btn--approve {
+  background: var(--color-primary);
+  color: #fff;
+  border-color: transparent;
+}
+
+.approval-btn--reject {
+  color: var(--color-error);
+}
+
+/* Severity badge — approvals use .severity-badge--*; signals use the
+   parallel .severity-chip--* set. Define the badge variant here. */
+
+.severity-badge {
+  font-size: var(--font-size-xs);
+  padding: 1px var(--space-2);
+  border-radius: 99px;
+  font-weight: 600;
+}
+
+.severity-badge--routine { background: #f0f0f0; color: #555; }
+.severity-badge--flagged { background: #fff8e1; color: #b45309; }
+.severity-badge--command { background: #fdecea; color: var(--color-error); }

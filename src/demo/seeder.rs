@@ -175,20 +175,35 @@ async fn seed_connectors(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyh
 
 async fn seed_streams(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {
     for c in f::connectors() {
-        let stream_name = match c.id {
-            f::CONN_NWS => "observations",
-            f::CONN_FIRMS => "hotspots",
-            f::CONN_IRWIN => "incidents",
-            _ => "default",
+        // FIRMS (hotspots) and IRWIN (incidents) carry a view_config so the
+        // demo workspace's Charts and Tables panels render their IONe-native
+        // path; their stream events expose numeric fields the chart/table
+        // services aggregate (FIRMS `/hotspots`, IRWIN `/acres`).
+        let (stream_name, view_config): (&str, Option<serde_json::Value>) = match c.id {
+            f::CONN_NWS => ("observations", None),
+            f::CONN_FIRMS => (
+                "hotspots",
+                Some(serde_json::json!({
+                    "property_fields": [{ "pointer": "/hotspots", "name": "Hotspots" }]
+                })),
+            ),
+            f::CONN_IRWIN => (
+                "incidents",
+                Some(serde_json::json!({
+                    "property_fields": [{ "pointer": "/acres", "name": "Acres" }]
+                })),
+            ),
+            _ => ("default", None),
         };
         sqlx::query(
-            "INSERT INTO streams (id, connector_id, name, schema)
-             VALUES ($1, $2, $3, '{}'::jsonb)
-             ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO streams (id, connector_id, name, schema, view_config)
+             VALUES ($1, $2, $3, '{}'::jsonb, $4)
+             ON CONFLICT (id) DO UPDATE SET view_config = EXCLUDED.view_config",
         )
         .bind(c.stream_id)
         .bind(c.id)
         .bind(stream_name)
+        .bind(view_config)
         .execute(&mut **tx)
         .await
         .context("failed to insert demo stream")?;

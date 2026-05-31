@@ -331,12 +331,31 @@ function formatDate(iso) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+// Render a message's prefix label + markdown body into `div`, replacing any
+// existing content. Shared by appendMessage and rehydrateTranscriptChips so a
+// chip re-hydration pass never flattens rendered markdown back to raw text.
+function renderMessageInto(div, role, text) {
+  div.textContent = '';
+  const prefix = (role === 'user' ? 'You: ' : 'Model: ');
+  div.dataset.rawText = prefix + text;
+  div.dataset.body = text;
+
+  const label = document.createElement('span');
+  label.className = 'message-prefix';
+  label.textContent = prefix;
+  div.appendChild(label);
+
+  const body = document.createElement('span');
+  body.className = 'message-body';
+  // marked escapes HTML by default; do not enable raw HTML rendering.
+  body.innerHTML = marked.parse(text, { breaks: true });
+  div.appendChild(body);
+}
+
 function appendMessage(role, text) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
-  const prefix = (role === 'user' ? 'You: ' : 'Model: ');
-  div.dataset.rawText = prefix + text;
-  div.textContent = div.dataset.rawText;
+  renderMessageInto(div, role, text);
   transcript.appendChild(div);
   injectResourceChips(div);
   transcript.scrollTop = transcript.scrollHeight;
@@ -1717,7 +1736,11 @@ function layerTokenForItem(item) {
 
 function rehydrateTranscriptChips() {
   transcript.querySelectorAll('.message[data-raw-text]').forEach((el) => {
-    el.textContent = el.dataset.rawText;
+    const role = el.classList.contains('user') ? 'user' : 'assistant';
+    const text = el.dataset.body != null
+      ? el.dataset.body
+      : el.dataset.rawText.replace(/^(You: |Model: )/, '');
+    renderMessageInto(el, role, text);
     injectResourceChips(el);
   });
 }
