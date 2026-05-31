@@ -24,6 +24,7 @@ Canonical names and types. All code (SQL migrations, Rust structs, TS/JS interfa
 | audit event | `audit_events` | `AuditEvent` | `AuditEvent` |
 | trust issuer (OIDC) | `trust_issuers` | `TrustIssuer` | `TrustIssuer` |
 | peer IONe | `peers` | `Peer` | `Peer` |
+| pending peer tool call | `pending_peer_tool_calls` | `PendingPeerToolCall` | `PendingPeerToolCall` |
 
 ## Fields
 
@@ -186,7 +187,7 @@ from `GET /api/v1/workspaces` list items.*
 |-------|-----------|------------|----------|------|
 | id | `id` | `id` | `id` | UUID |
 | workspace_id | `workspace_id` | `workspace_id` | `workspaceId` | UUID |
-| kind | `kind` | `kind` | `kind` | ENUM `artifact_kind` (`briefing`, `notification_draft`, `resource_order`, `message`, `report`) |
+| kind | `kind` | `kind` | `kind` | ENUM `artifact_kind` (`briefing`, `notification_draft`, `resource_order`, `message`, `report`, `tool_call`) |
 | source_survivor_id | `source_survivor_id` | `source_survivor_id` | `sourceSurvivorId` | UUID NULL |
 | content | `content` | `content` | `content` | JSONB |
 | blob_ref | `blob_ref` | `blob_ref` | `blobRef` | TEXT NULL (S3 key) |
@@ -229,12 +230,44 @@ from `GET /api/v1/workspaces` list items.*
 | Field | DB column | Rust field | JS field | Type |
 |-------|-----------|------------|----------|------|
 | id | `id` | `id` | `id` | UUID |
+| org_id | `org_id` | `org_id` | `orgId` | UUID |
 | name | `name` | `name` | `name` | TEXT |
 | mcp_url | `mcp_url` | `mcp_url` | `mcpUrl` | TEXT |
 | issuer_id | `issuer_id` | `issuer_id` | `issuerId` | UUID (trust_issuer) |
+| status | `status` | `status` | `status` | ENUM `peer_status` (`pending_oauth`, `pending_allowlist`, `active`, `revoked`, `paused`, `error`) |
+| tool_allowlist | `tool_allowlist` | `tool_allowlist` | `toolAllowlist` | JSONB (operator-approved tool names) |
+| tool_prefix | `tool_prefix` | `tool_prefix` | `toolPrefix` | VARCHAR(16) NULL — federation namespace, unique per `(org_id, tool_prefix)`, immutable once set (mig 0033) |
+| session_status | `session_status` | `session_status` | `sessionStatus` | TEXT (`disconnected`\|`connecting`\|`live`\|`error`; free-form, default `disconnected`) (mig 0033) |
+| last_connected_at | `last_connected_at` | `last_connected_at` | `lastConnectedAt` | TIMESTAMPTZ NULL (mig 0033) |
+| last_session_error | `last_session_error` | `last_session_error` | `lastSessionError` | TEXT NULL (mig 0033) |
+| last_manifest_jsonb | `last_manifest_jsonb` | `last_manifest_jsonb` | `lastManifestJsonb` | JSONB NULL — last-known-good manifest cache (mig 0034) |
+| oauth_client_id | `oauth_client_id` | `oauth_client_id` | `oauthClientId` | TEXT NULL |
+| access_token_ciphertext | `access_token_ciphertext` | `access_token_ciphertext` | `accessTokenCiphertext` | TEXT NULL (AES-256-GCM; `serde(skip)` in API) |
+| refresh_token_ciphertext | `refresh_token_ciphertext` | `refresh_token_ciphertext` | `refreshTokenCiphertext` | TEXT NULL (AES-256-GCM; mig 0032) |
+| token_expires_at | `token_expires_at` | `token_expires_at` | `tokenExpiresAt` | TIMESTAMPTZ NULL |
 | sharing_policy | `sharing_policy` | `sharing_policy` | `sharingPolicy` | JSONB |
-| status | `status` | `status` | `status` | ENUM `peer_status` (`active`, `paused`, `error`) |
 | created_at | `created_at` | `created_at` | `createdAt` | TIMESTAMPTZ |
+
+### pending_peer_tool_call
+*An approval-gated, agent-initiated `tools/call` durably parked until a human approves; executes exactly once on approval. Arguments encrypted at rest; replay-protected by `(workspace_id, arguments_digest)` unique partial index over non-terminal rows. (mig 0034)*
+
+| Field | DB column | Rust field | JS field | Type |
+|-------|-----------|------------|----------|------|
+| id | `id` | `id` | `id` | UUID |
+| workspace_id | `workspace_id` | `workspace_id` | `workspaceId` | UUID |
+| peer_id | `peer_id` | `peer_id` | `peerId` | UUID |
+| artifact_id | `artifact_id` | `artifact_id` | `artifactId` | UUID (artifact of kind `tool_call`) |
+| approval_id | `approval_id` | `approval_id` | `approvalId` | UUID |
+| namespaced_tool | `namespaced_tool` | `namespaced_tool` | `namespacedTool` | TEXT (`‹prefix›:‹tool›`) |
+| arguments_ciphertext | `arguments_ciphertext` | `arguments_ciphertext` | — | BYTEA (`serde(skip)`; AES-256-GCM) |
+| arguments_digest | `arguments_digest` | `arguments_digest` | `argumentsDigest` | TEXT (SHA-256, idempotency/replay key) |
+| requested_by | `requested_by` | `requested_by` | `requestedBy` | UUID (user) |
+| status | `status` | `status` | `status` | ENUM `pending_peer_tool_call_status` |
+| expires_at | `expires_at` | `expires_at` | `expiresAt` | TIMESTAMPTZ |
+| approver_user_id | `approver_user_id` | `approver_user_id` | `approverUserId` | UUID NULL |
+| created_at | `created_at` | `created_at` | `createdAt` | TIMESTAMPTZ |
+| executed_at | `executed_at` | `executed_at` | `executedAt` | TIMESTAMPTZ NULL |
+| result_ref | `result_ref` | `result_ref` | `resultRef` | JSONB NULL |
 
 ## Enums
 
@@ -248,10 +281,11 @@ from `GET /api/v1/workspaces` list items.*
 | `severity` | Postgres enum | `routine`, `flagged`, `command` |
 | `critic_verdict` | Postgres enum | `survive`, `reject`, `defer` |
 | `routing_target` | Postgres enum | `feed`, `notification`, `draft`, `peer` |
-| `artifact_kind` | Postgres enum | `briefing`, `notification_draft`, `resource_order`, `message`, `report` |
+| `artifact_kind` | Postgres enum | `briefing`, `notification_draft`, `resource_order`, `message`, `report`, `tool_call` (mig 0034) |
 | `approval_status` | Postgres enum | `pending`, `approved`, `rejected` |
 | `actor_kind` | Postgres enum | `user`, `system`, `peer` |
-| `peer_status` | Postgres enum | `active`, `paused`, `error` |
+| `peer_status` | Postgres enum | `active`, `paused`, `error`, `pending_oauth`, `pending_allowlist`, `revoked` (migs 0010, 0016) |
+| `pending_peer_tool_call_status` | Postgres enum | `pending`, `approved`, `rejected`, `executed`, `expired` (mig 0034) |
 
 ## API operations
 
@@ -277,9 +311,27 @@ from `GET /api/v1/workspaces` list items.*
 | list approvals | GET | `/api/v1/workspaces/:id/approvals?status=pending` | — | `{ items: Approval[] }` |
 | decide approval | POST | `/api/v1/approvals/:id` | `{ decision: "approved"\|"rejected", comment? }` | `Approval` |
 | list peers | GET | `/api/v1/peers` | — | `{ items: Peer[] }` |
-| add peer | POST | `/api/v1/peers` | `{ name, mcpUrl, issuerId, sharingPolicy }` | `Peer` |
-| MCP server | * | `/mcp` | MCP protocol | MCP protocol |
+| add peer (federated) | POST | `/api/v1/peers` | `{ peerUrl }` (preferred) — begins OAuth federation | `{ id, status: "pending_oauth", authorizeUrl }` |
+| add peer (legacy) | POST | `/api/v1/peers` | `{ name, mcpUrl, issuerId, sharingPolicy }` (fallback shape, SSRF-guarded) | `Peer` |
+| delete peer | DELETE | `/api/v1/peers/:id` | — | `204` |
+| authorize peer | POST | `/api/v1/peers/:id/authorize` | `{}` | `{ authorizeUrl }` |
+| peer OAuth callback | GET | `/api/v1/peers/callback` | `?code&state` | sets peer tokens, redirects |
+| provision peer webhook | POST | `/api/v1/peers/:id/webhook/provision` | `{}` | `{ signingSecret, webhookUrl }` (secret shown once) |
+| list peer bindings | GET | `/api/v1/peers/:id/bindings` | — | `{ items: WorkspacePeerBinding[] }` |
+| get peer session | GET | `/api/v1/peers/:id/session` | — | `{ peerId, sessionStatus, lastConnectedAt, lastSessionError }` |
+| reconnect peer session | POST | `/api/v1/peers/:id/session` (or `…/session/reconnect`) | `{}` | `{ peerId, sessionStatus: "connecting" }` |
+| get peer manifest | GET | `/api/v1/peers/:id/manifest` | — | `{ tools, resources, stale, fetchedAt }` |
+| refresh peer manifest | POST | `/api/v1/peers/:id/manifest/refresh` | `{}` | `{ tools, resources, fetchedAt }` |
+| list peer tools (workspace-scoped) | GET | `/api/v1/workspaces/:id/peers/:peerId/tools` | — | `{ items: [{ name, namespaced, description, approvalRequired }] }` |
+| list peer resources | GET | `/api/v1/workspaces/:id/peers/:peerId/resources` | — | `{ items: [{ uri, name, mimeType, ioneView }] }` |
+| subscribe peer | POST | `/api/v1/workspaces/:id/peers/:peerId/subscribe` | `{}` | `{ ok }` |
+| list context slices | GET | `/api/v1/workspaces/:id/context-slices` | — | `{ items: [{ peerId, summary, domainTags, sampleQueries, toolIndex }] }` |
+| MCP server (Streamable HTTP, 2025-11-25) | POST | `/mcp` | JSON-RPC (`initialize`, aggregated workspace-scoped `tools/list`, namespaced `tools/call`, `resources/list`, `resources/read`); requires auth + `MCP-Session-Id` after init | JSON-RPC; `MCP-Protocol-Version` echoed; Origin-validated |
+| MCP SSE stream | GET | `/mcp/sse` | — | `text/event-stream` (server→client notifications) |
+| MCP session teardown | DELETE | `/mcp` | header `MCP-Session-Id` | `204` |
 | OIDC callback | GET | `/auth/callback` | — | sets session |
+
+*Approval-gated peer `tools/call`: when a tool's `ione_approval.required` is set, `/mcp tools/call` does not execute — it parks a `pending_peer_tool_call` (artifact kind `tool_call` + approval) and returns `{ status: "pending_approval", pendingId }`. `POST /api/v1/approvals/:id` with `approved` then executes the peer call exactly once.*
 
 ## Relationships
 
@@ -299,4 +351,5 @@ from `GET /api/v1/workspaces` list items.*
 - `approval` belongs to `artifact`
 - `audit_event` optionally belongs to `workspace`
 - `trust_issuer` belongs to `organization`
-- `peer` references `trust_issuer` via `issuer_id`
+- `peer` belongs to `organization` via `org_id` and references `trust_issuer` via `issuer_id`
+- `pending_peer_tool_call` belongs to `workspace`, `peer`, an `artifact` (kind `tool_call`), and an `approval`; references the requesting `user`
