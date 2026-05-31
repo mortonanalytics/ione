@@ -147,8 +147,7 @@ async fn connect_and_read(
                 .map(str::to_string)
         })
         .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))?;
-    let token =
-        crate::services::peer_tokens::resolve_access_token_locked(state, &peer).await?;
+    let token = crate::services::peer_tokens::resolve_access_token_locked(state, &peer).await?;
     let mut request = state
         .http
         .get(&endpoint)

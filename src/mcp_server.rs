@@ -741,8 +741,7 @@ async fn dispatch_method(
             // Org-wide aggregation is intentionally disallowed: advertising tools from
             // all org workspaces would expose uninvokable cross-workspace tools to callers.
             // TODO(role-filter): filter federated tools by caller role once RBAC is wired.
-            let workspace_id =
-                resolve_explicit_workspace(state, headers, req.params.as_ref());
+            let workspace_id = resolve_explicit_workspace(state, headers, req.params.as_ref());
             handle_tools_list(req.id, state, workspace_id, &auth).await
         }
         "resources/list" => {
