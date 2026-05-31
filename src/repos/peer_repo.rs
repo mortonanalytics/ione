@@ -4,6 +4,12 @@ use uuid::Uuid;
 
 use crate::models::{Peer, PeerStatus};
 
+const PEER_COLUMNS: &str =
+    "id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
+    oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
+    refresh_token_ciphertext, token_expires_at, tool_allowlist, tool_prefix, session_status,
+    last_connected_at, last_session_error, last_manifest_jsonb";
+
 pub struct PeerRepo {
     pub(crate) pool: PgPool,
 }
@@ -20,13 +26,11 @@ impl PeerRepo {
         issuer_id: Uuid,
         sharing_policy: serde_json::Value,
     ) -> anyhow::Result<Peer> {
-        sqlx::query_as::<_, Peer>(
+        sqlx::query_as::<_, Peer>(&format!(
             "INSERT INTO peers (org_id, name, mcp_url, issuer_id, sharing_policy)
-             SELECT org_id, $1, $2, id, $4 FROM trust_issuers WHERE id = $3
-             RETURNING id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                 refresh_token_ciphertext, token_expires_at, tool_allowlist",
-        )
+                 SELECT org_id, $1, $2, id, $4 FROM trust_issuers WHERE id = $3
+                 RETURNING {PEER_COLUMNS}"
+        ))
         .bind(name)
         .bind(mcp_url)
         .bind(issuer_id)
@@ -37,27 +41,18 @@ impl PeerRepo {
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<Peer>> {
-        sqlx::query_as::<_, Peer>(
-            "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                 refresh_token_ciphertext, token_expires_at, tool_allowlist
-             FROM peers
-             ORDER BY created_at DESC",
-        )
+        sqlx::query_as::<_, Peer>(&format!(
+            "SELECT {PEER_COLUMNS} FROM peers ORDER BY created_at DESC"
+        ))
         .fetch_all(&self.pool)
         .await
         .context("failed to list peers")
     }
 
     pub async fn list_for_org(&self, org_id: Uuid) -> anyhow::Result<Vec<Peer>> {
-        sqlx::query_as::<_, Peer>(
-            "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                 refresh_token_ciphertext, token_expires_at, tool_allowlist
-             FROM peers
-             WHERE org_id = $1
-             ORDER BY created_at DESC",
-        )
+        sqlx::query_as::<_, Peer>(&format!(
+            "SELECT {PEER_COLUMNS} FROM peers WHERE org_id = $1 ORDER BY created_at DESC"
+        ))
         .bind(org_id)
         .fetch_all(&self.pool)
         .await
@@ -65,17 +60,11 @@ impl PeerRepo {
     }
 
     pub async fn get(&self, id: Uuid) -> anyhow::Result<Option<Peer>> {
-        sqlx::query_as::<_, Peer>(
-            "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                 refresh_token_ciphertext, token_expires_at, tool_allowlist
-             FROM peers
-             WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("failed to get peer")
+        sqlx::query_as::<_, Peer>(&format!("SELECT {PEER_COLUMNS} FROM peers WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("failed to get peer")
     }
 
     pub async fn set_webhook_secret(&self, peer_id: Uuid, ciphertext: &[u8]) -> anyhow::Result<()> {
@@ -96,13 +85,9 @@ impl PeerRepo {
         &self,
         id: Uuid,
     ) -> anyhow::Result<Option<(Peer, Option<Vec<u8>>)>> {
-        let row = sqlx::query(
-            "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                    oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                    refresh_token_ciphertext, token_expires_at, tool_allowlist, webhook_secret_ciphertext
-             FROM peers
-             WHERE id = $1",
-        )
+        let row = sqlx::query(&format!(
+            "SELECT {PEER_COLUMNS}, webhook_secret_ciphertext FROM peers WHERE id = $1"
+        ))
         .bind(id)
         .fetch_optional(&self.pool)
         .await
@@ -125,6 +110,11 @@ impl PeerRepo {
                 refresh_token_ciphertext: row.get("refresh_token_ciphertext"),
                 token_expires_at: row.get("token_expires_at"),
                 tool_allowlist: row.get("tool_allowlist"),
+                tool_prefix: row.get("tool_prefix"),
+                session_status: row.get("session_status"),
+                last_connected_at: row.get("last_connected_at"),
+                last_session_error: row.get("last_session_error"),
+                last_manifest_jsonb: row.get("last_manifest_jsonb"),
             };
             let secret = row.get("webhook_secret_ciphertext");
             (peer, secret)
@@ -132,14 +122,9 @@ impl PeerRepo {
     }
 
     pub async fn update_status(&self, id: Uuid, status: PeerStatus) -> anyhow::Result<Peer> {
-        sqlx::query_as::<_, Peer>(
-            "UPDATE peers
-             SET status = $2
-             WHERE id = $1
-             RETURNING id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                 refresh_token_ciphertext, token_expires_at, tool_allowlist",
-        )
+        sqlx::query_as::<_, Peer>(&format!(
+            "UPDATE peers SET status = $2 WHERE id = $1 RETURNING {PEER_COLUMNS}"
+        ))
         .bind(id)
         .bind(status)
         .fetch_one(&self.pool)
@@ -249,6 +234,73 @@ impl PeerRepo {
             .execute(&self.pool)
             .await
             .context("failed to set peer status")?;
+        Ok(())
+    }
+
+    pub async fn get_for_org(&self, id: Uuid, org_id: Uuid) -> anyhow::Result<Option<Peer>> {
+        sqlx::query_as::<_, Peer>(&format!(
+            "SELECT {PEER_COLUMNS} FROM peers WHERE id = $1 AND org_id = $2"
+        ))
+        .bind(id)
+        .bind(org_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to get org-scoped peer")
+    }
+
+    pub async fn list_active_for_org(&self, org_id: Uuid) -> anyhow::Result<Vec<Peer>> {
+        sqlx::query_as::<_, Peer>(&format!(
+            "SELECT {PEER_COLUMNS} FROM peers WHERE org_id = $1 AND status = 'active' ORDER BY created_at DESC"
+        ))
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list active peers by org")
+    }
+
+    pub async fn set_tool_prefix(&self, peer_id: Uuid, prefix: &str) -> anyhow::Result<()> {
+        sqlx::query("UPDATE peers SET tool_prefix = $1 WHERE id = $2")
+            .bind(prefix)
+            .bind(peer_id)
+            .execute(&self.pool)
+            .await
+            .context("failed to set peer tool prefix")?;
+        Ok(())
+    }
+
+    pub async fn set_last_manifest(
+        &self,
+        peer_id: Uuid,
+        manifest: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE peers SET last_manifest_jsonb = $1 WHERE id = $2")
+            .bind(manifest)
+            .bind(peer_id)
+            .execute(&self.pool)
+            .await
+            .context("failed to set peer last manifest")?;
+        Ok(())
+    }
+
+    pub async fn set_session_status(
+        &self,
+        peer_id: Uuid,
+        session_status: &str,
+        error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE peers
+             SET session_status = $1,
+                 last_session_error = $2,
+                 last_connected_at = CASE WHEN $1 = 'live' THEN now() ELSE last_connected_at END
+             WHERE id = $3",
+        )
+        .bind(session_status)
+        .bind(error)
+        .bind(peer_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to set peer session status")?;
         Ok(())
     }
 

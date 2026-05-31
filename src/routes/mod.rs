@@ -211,6 +211,18 @@ pub fn router(state: AppState) -> Router {
             post(bindings::refresh_binding),
         )
         .route(
+            "/api/v1/workspaces/:id/peers/:peerId/tools",
+            get(workspaces::list_peer_tools),
+        )
+        .route(
+            "/api/v1/workspaces/:id/peers/:peerId/resources",
+            get(workspaces::list_peer_resources),
+        )
+        .route(
+            "/api/v1/workspaces/:id/context-slices",
+            get(workspaces::list_context_slices),
+        )
+        .route(
             "/api/v1/workspaces/:id/artifacts",
             get(artifacts::list_artifacts),
         )
@@ -253,6 +265,15 @@ pub fn router(state: AppState) -> Router {
             get(peers::list_peers).post(peers::create_peer),
         )
         .route("/api/v1/peers/:id/manifest", get(peers::get_manifest))
+        .route(
+            "/api/v1/peers/:id/manifest/refresh",
+            post(peers::refresh_manifest),
+        )
+        .route("/api/v1/peers/:id/session", get(peers::get_session))
+        .route(
+            "/api/v1/peers/:id/session/reconnect",
+            post(peers::reconnect_session),
+        )
         .route(
             "/api/v1/peers/:id/webhook/provision",
             post(webhooks::provision_webhook),

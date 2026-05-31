@@ -134,6 +134,7 @@ pub async fn evaluate_workspace(pool: &PgPool, workspace_id: Uuid) -> anyhow::Re
             };
 
             if matched {
+                let approval_required = matches!(severity, Severity::Flagged | Severity::Command);
                 signal_repo
                     .insert(
                         workspace_id,
@@ -143,7 +144,7 @@ pub async fn evaluate_workspace(pool: &PgPool, workspace_id: Uuid) -> anyhow::Re
                         evidence,
                         severity.clone(),
                         None,
-                        false,
+                        approval_required,
                     )
                     .await
                     .context("failed to insert rule signal")?;

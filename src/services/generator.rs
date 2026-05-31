@@ -138,6 +138,7 @@ Observations:
             .map(|id| serde_json::Value::String(id.clone()))
             .collect(),
     );
+    let approval_required = matches!(severity, Severity::Flagged | Severity::Command);
 
     signal_repo
         .insert(
@@ -148,7 +149,7 @@ Observations:
             evidence,
             severity,
             Some(model.as_str()),
-            false,
+            approval_required,
         )
         .await
         .context("failed to insert generator signal")?;

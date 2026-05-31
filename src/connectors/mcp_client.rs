@@ -45,7 +45,7 @@ impl McpClientConnector {
         Ok(Self {
             mcp_url,
             bearer_token,
-            http: reqwest::Client::new(),
+            http: crate::util::url_guard::guarded_client(15_000),
             workspace_id,
             peer_id,
             pool,
@@ -54,6 +54,23 @@ impl McpClientConnector {
 
     /// Post a JSON-RPC 2.0 request to the peer's /mcp endpoint.
     async fn jsonrpc_call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        match self.jsonrpc_call_once(method, params.clone(), None).await {
+            Ok(value) => Ok(value),
+            Err(e) if looks_like_missing_session(&e) => {
+                let session_id = self.initialize_session().await?;
+                self.jsonrpc_call_once(method, params, Some(&session_id))
+                    .await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn jsonrpc_call_once(
+        &self,
+        method: &str,
+        params: Value,
+        mcp_session_id: Option<&str>,
+    ) -> anyhow::Result<Value> {
         let body = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -62,17 +79,46 @@ impl McpClientConnector {
         });
 
         let token = self.resolve_bearer_token(false).await?;
-        let mut resp = self.send_jsonrpc(&body, &token).await?;
+        let mut resp = self.send_jsonrpc(&body, &token, mcp_session_id).await?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             let Some(token) = self.try_refresh_bearer_token().await? else {
                 return self.handle_jsonrpc_response(resp).await;
             };
-            resp = self.send_jsonrpc(&body, &token).await?;
+            resp = self.send_jsonrpc(&body, &token, mcp_session_id).await?;
         }
 
         self.handle_jsonrpc_response(resp).await
+    }
+
+    async fn initialize_session(&self) -> anyhow::Result<String> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25", "capabilities": {} },
+        });
+        let token = self.resolve_bearer_token(false).await?;
+        let resp = self.send_jsonrpc(&body, &token, None).await?;
+        let header_session = resp
+            .headers()
+            .get("MCP-Session-Id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let value: Value = resp.error_for_status()?.json().await?;
+        if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+            anyhow::bail!("peer initialize error: {}", error);
+        }
+        header_session
+            .or_else(|| {
+                value
+                    .get("result")
+                    .and_then(|result| result.get("sessionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))
     }
 
     async fn handle_jsonrpc_response(&self, resp: reqwest::Response) -> anyhow::Result<Value> {
@@ -95,10 +141,18 @@ impl McpClientConnector {
         Ok(val["result"].clone())
     }
 
-    async fn send_jsonrpc(&self, body: &Value, token: &str) -> anyhow::Result<reqwest::Response> {
+    async fn send_jsonrpc(
+        &self,
+        body: &Value,
+        token: &str,
+        mcp_session_id: Option<&str>,
+    ) -> anyhow::Result<reqwest::Response> {
         let mut req = self.http.post(&self.mcp_url).json(body);
         if !token.is_empty() {
             req = req.bearer_auth(token);
+        }
+        if let Some(session_id) = mcp_session_id {
+            req = req.header("MCP-Session-Id", session_id);
         }
         Ok(req.send().await?)
     }
@@ -134,6 +188,11 @@ impl McpClientConnector {
             .await
             .map(Some)
     }
+}
+
+fn looks_like_missing_session(error: &anyhow::Error) -> bool {
+    let msg = error.to_string().to_ascii_lowercase();
+    msg.contains("mcp-session-id") || msg.contains("session not found")
 }
 
 // Readable tool names that map to synthetic pull streams.

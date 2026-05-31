@@ -130,6 +130,14 @@ pub async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
     {
         warn!(error = %e, "webhook dedup cleanup failed");
     }
+    if let Err(e) = crate::repos::PendingPeerToolCallRepo::new(state.pool.clone())
+        .expire_due()
+        .await
+    {
+        warn!(error = %e, "pending peer tool-call expiry failed");
+    }
+
+    refresh_active_peer_manifests(state).await;
 
     // List all workspaces
     let workspaces: Vec<(uuid::Uuid, uuid::Uuid)> =
@@ -195,6 +203,26 @@ pub async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn refresh_active_peer_manifests(state: &AppState) {
+    let peers = match crate::repos::PeerRepo::new(state.pool.clone()).list().await {
+        Ok(peers) => peers,
+        Err(e) => {
+            warn!(error = %e, "scheduler peer manifest list failed");
+            return;
+        }
+    };
+    for peer in peers
+        .into_iter()
+        .filter(|peer| peer.status == crate::models::PeerStatus::Active)
+    {
+        match crate::services::federation::refresh_manifest_if_changed(state, peer.id).await {
+            Ok(true) => info!(peer_id = %peer.id, "peer manifest changed"),
+            Ok(false) => {}
+            Err(e) => warn!(peer_id = %peer.id, error = %e, "peer manifest refresh failed"),
+        }
+    }
 }
 
 pub async fn run_delivery_for_workspace(state: &AppState, workspace_id: uuid::Uuid) {

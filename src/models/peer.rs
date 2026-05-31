@@ -36,4 +36,9 @@ pub struct Peer {
     pub refresh_token_ciphertext: Option<Vec<u8>>,
     pub token_expires_at: Option<DateTime<Utc>>,
     pub tool_allowlist: serde_json::Value,
+    pub tool_prefix: Option<String>,
+    pub session_status: String,
+    pub last_connected_at: Option<DateTime<Utc>>,
+    pub last_session_error: Option<String>,
+    pub last_manifest_jsonb: Option<serde_json::Value>,
 }

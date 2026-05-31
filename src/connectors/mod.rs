@@ -5,6 +5,7 @@ pub mod irwin;
 pub mod mcp_client;
 pub mod nws;
 pub mod openapi;
+pub mod peer_session;
 pub mod slack;
 pub mod smtp;
 pub mod validate;

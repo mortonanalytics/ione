@@ -5,7 +5,13 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
-    services::{ollama::OllamaClient, pipeline_bus::PipelineBus},
+    connectors::peer_session::PeerSessionRegistry,
+    services::{
+        federation::{PeerManifest, SliceEntry},
+        ollama::OllamaClient,
+        peer_governor::PeerGovernor,
+        pipeline_bus::PipelineBus,
+    },
 };
 
 #[derive(Clone)]
@@ -17,6 +23,11 @@ pub struct AppState {
     pub pool: PgPool,
     pub default_user_id: Uuid,
     pub default_workspace_id: Uuid,
+    pub peer_manifest_cache: Arc<dashmap::DashMap<Uuid, PeerManifest>>,
+    pub peer_slice_cache: Arc<dashmap::DashMap<Uuid, SliceEntry>>,
+    pub peer_sessions: Arc<PeerSessionRegistry>,
+    pub peer_governor: Arc<dashmap::DashMap<Uuid, Arc<PeerGovernor>>>,
+    pub mcp_sessions: Arc<dashmap::DashMap<String, serde_json::Value>>,
 }
 
 impl AppState {
@@ -26,10 +37,7 @@ impl AppState {
         default_user_id: Uuid,
         default_workspace_id: Uuid,
     ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .expect("failed to build shared HTTP client");
+        let http = crate::util::url_guard::guarded_client(15_000);
         let ollama = Arc::new(OllamaClient::new(config.ollama_base_url.clone()));
         let pipeline_bus = Arc::new(PipelineBus::new());
         Self {
@@ -40,6 +48,11 @@ impl AppState {
             pool,
             default_user_id,
             default_workspace_id,
+            peer_manifest_cache: Arc::new(dashmap::DashMap::new()),
+            peer_slice_cache: Arc::new(dashmap::DashMap::new()),
+            peer_sessions: Arc::new(PeerSessionRegistry::default()),
+            peer_governor: Arc::new(dashmap::DashMap::new()),
+            mcp_sessions: Arc::new(dashmap::DashMap::new()),
         }
     }
 }

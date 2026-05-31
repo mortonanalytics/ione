@@ -602,6 +602,7 @@ function setActiveWorkspace(ws) {
   // If the connectors tab is active, reload connectors for the new workspace.
   if (activeTab === 'connectors') {
     loadConnectors(ws.id);
+    loadPeerBrowser(ws.id);
   }
 
   if (activeTab === 'map') {
@@ -1117,6 +1118,7 @@ function switchTab(name) {
 
   if (name === 'connectors' && activeWorkspace) {
     loadConnectors(activeWorkspace.id);
+    loadPeerBrowser(activeWorkspace.id);
   }
 
   if (name === 'map' && activeWorkspace && mapLoadedWorkspaceId !== activeWorkspace.id) {
@@ -3181,6 +3183,103 @@ async function loadConnectors(workspaceId) {
     connectorListEl.innerHTML = '';
     setConnectorsStatus('Error loading connectors: ' + err.message, true);
   }
+}
+
+document.getElementById('peer-browser-refresh')?.addEventListener('click', () => {
+  if (activeWorkspace) loadPeerBrowser(activeWorkspace.id);
+});
+
+async function loadPeerBrowser(workspaceId) {
+  const list = document.getElementById('peer-browser-list');
+  const status = document.getElementById('peer-browser-status');
+  if (!list || !status) return;
+  list.innerHTML = '';
+  status.textContent = 'Loading peers...';
+  try {
+    const bindings = await apiFetch(`/api/v1/workspaces/${workspaceId}/bindings`, { skipErrorToast: true });
+    const active = (bindings.items || []).filter((binding) => (binding.status || 'pending') === 'active');
+    if (!active.length) {
+      status.textContent = 'No active peer bindings for this workspace.';
+      return;
+    }
+    status.textContent = `${active.length} active peer${active.length === 1 ? '' : 's'}.`;
+    for (const binding of active) {
+      list.appendChild(await buildPeerBrowserCard(workspaceId, binding));
+    }
+  } catch (err) {
+    status.textContent = 'Could not load peers: ' + (err.message || String(err));
+  }
+}
+
+async function buildPeerBrowserCard(workspaceId, binding) {
+  const li = document.createElement('li');
+  li.className = 'peer-browser-card';
+  const peerId = binding.peerId;
+  li.innerHTML = `
+    <header class="peer-browser-card-header">
+      <div>
+        <h3>${escapeHtml(binding.peerName || binding.foreignTenantName || 'Peer')}</h3>
+        <p>${escapeHtml(binding.foreignTenantId || '')}</p>
+      </div>
+      <span class="peer-session-badge">checking...</span>
+    </header>
+    <div class="peer-browser-columns">
+      <section>
+        <h4>Tools</h4>
+        <ul class="peer-browser-tools"></ul>
+      </section>
+      <section>
+        <h4>Resources</h4>
+        <ul class="peer-browser-resources"></ul>
+      </section>
+    </div>
+  `;
+  const toolsList = li.querySelector('.peer-browser-tools');
+  const resourcesList = li.querySelector('.peer-browser-resources');
+  const badge = li.querySelector('.peer-session-badge');
+  try {
+    const [tools, resources, session] = await Promise.all([
+      apiFetch(`/api/v1/workspaces/${workspaceId}/peers/${peerId}/tools`, { skipErrorToast: true }),
+      apiFetch(`/api/v1/workspaces/${workspaceId}/peers/${peerId}/resources`, { skipErrorToast: true }),
+      apiFetch(`/api/v1/peers/${peerId}/session`, { skipErrorToast: true }).catch(() => null),
+    ]);
+    renderPeerBrowserItems(toolsList, tools.items || [], 'tool');
+    renderPeerBrowserItems(resourcesList, resources.items || [], 'resource');
+    if (badge) {
+      const state = session?.sessionStatus || session?.runtimeState || 'disconnected';
+      badge.textContent = typeof state === 'string' ? state : 'live';
+      badge.className = `peer-session-badge peer-session-badge--${String(badge.textContent).toLowerCase()}`;
+      if (session?.lastSessionError) badge.title = session.lastSessionError;
+    }
+  } catch (err) {
+    li.classList.add('peer-browser-card--error');
+    if (toolsList) toolsList.innerHTML = `<li>${escapeHtml(err.message || String(err))}</li>`;
+    if (resourcesList) resourcesList.innerHTML = '<li>Unavailable</li>';
+    if (badge) {
+      badge.textContent = 'error';
+      badge.className = 'peer-session-badge peer-session-badge--error';
+    }
+  }
+  return li;
+}
+
+function renderPeerBrowserItems(list, items, kind) {
+  if (!list) return;
+  list.innerHTML = '';
+  if (!items.length) {
+    const empty = document.createElement('li');
+    empty.className = 'peer-browser-empty';
+    empty.textContent = `No ${kind}s.`;
+    list.appendChild(empty);
+    return;
+  }
+  items.slice(0, 12).forEach((item) => {
+    const li = document.createElement('li');
+    const name = item.name || item.uri || '(unnamed)';
+    const desc = item.description || item.mimeType || item.ioneView || '';
+    li.innerHTML = `<strong>${escapeHtml(name)}</strong>${desc ? `<span>${escapeHtml(desc)}</span>` : ''}`;
+    list.appendChild(li);
+  });
 }
 
 /* ── Add connector dialog ── */

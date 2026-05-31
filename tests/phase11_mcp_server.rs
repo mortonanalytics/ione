@@ -19,6 +19,8 @@
 /// All tests are #[ignore]-gated and must be run with --test-threads=1.
 use std::net::SocketAddr;
 
+use chrono::Utc;
+use ione::{auth::AuthContext, services::federation::PeerManifest, state::AppState};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -29,6 +31,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
 const TEST_STATIC_BEARER: &str = "phase11-test-bearer";
+const TEST_TOKEN_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 // ─── Harness ──────────────────────────────────────────────────────────────────
 
@@ -37,8 +40,32 @@ async fn spawn_app() -> (String, PgPool) {
 }
 
 async fn spawn_app_with_auth_mode(auth_mode: &str) -> (String, PgPool) {
+    let pool = setup_pool(auth_mode).await;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind random port");
+    let addr: SocketAddr = listener.local_addr().expect("failed to get local addr");
+
+    let app = ione::app(pool.clone()).await;
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("server error");
+    });
+
+    (format!("http://{}", addr), pool)
+}
+
+async fn spawn_state() -> (PgPool, AppState) {
+    let pool = setup_pool("local").await;
+    let (_router, state) = ione::app_with_state(pool.clone()).await;
+    (pool, state)
+}
+
+async fn setup_pool(auth_mode: &str) -> PgPool {
     std::env::set_var("IONE_AUTH_MODE", auth_mode);
     std::env::set_var("IONE_OAUTH_STATIC_BEARER", TEST_STATIC_BEARER);
+    std::env::set_var("IONE_TOKEN_KEY", TEST_TOKEN_KEY);
 
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
 
@@ -54,8 +81,9 @@ async fn spawn_app_with_auth_mode(auth_mode: &str) -> (String, PgPool) {
         .expect("migration failed");
 
     sqlx::query(
-        "TRUNCATE webhook_events_seen, audit_events, approvals, artifacts,
-                  trust_issuers, routing_decisions, survivors, signals,
+        "TRUNCATE pending_peer_tool_calls, webhook_events_seen, workspace_peer_bindings,
+                  audit_events, approvals, artifacts,
+                  peers, trust_issuers, routing_decisions, survivors, signals,
                   stream_events, streams, connectors,
                   memberships, roles, messages, conversations,
                   workspaces, users, organizations
@@ -65,18 +93,7 @@ async fn spawn_app_with_auth_mode(auth_mode: &str) -> (String, PgPool) {
     .await
     .expect("truncate failed");
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind random port");
-    let addr: SocketAddr = listener.local_addr().expect("failed to get local addr");
-
-    let app = ione::app(pool.clone()).await;
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("server error");
-    });
-
-    (format!("http://{}", addr), pool)
+    pool
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -97,13 +114,17 @@ async fn default_org_id(pool: &PgPool) -> Uuid {
 
 /// POST a JSON-RPC request to /mcp and return parsed response body.
 async fn mcp_post(base: &str, body: Value) -> reqwest::Response {
-    reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let mut req = client
         .post(format!("{}/mcp", base))
         .header("Authorization", format!("Bearer {}", TEST_STATIC_BEARER))
-        .json(&body)
-        .send()
-        .await
-        .expect("POST /mcp failed")
+        .json(&body);
+    if body["method"].as_str() != Some("initialize") {
+        if let Some(session_id) = mcp_session_id(&client, base, TEST_STATIC_BEARER, None).await {
+            req = req.header("MCP-Session-Id", session_id);
+        }
+    }
+    req.send().await.expect("POST /mcp failed")
 }
 
 /// POST a JSON-RPC request to /mcp without Authorization.
@@ -118,25 +139,66 @@ async fn mcp_post_unauthenticated(base: &str, body: Value) -> reqwest::Response 
 
 /// POST to /mcp with bearer auth and a valid session cookie attached.
 async fn mcp_post_with_cookie(base: &str, body: Value, cookie: &str) -> reqwest::Response {
-    reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let mut req = client
         .post(format!("{}/mcp", base))
         .header("Authorization", format!("Bearer {}", TEST_STATIC_BEARER))
         .header("Cookie", cookie)
-        .json(&body)
-        .send()
-        .await
-        .expect("POST /mcp with cookie failed")
+        .json(&body);
+    if body["method"].as_str() != Some("initialize") {
+        if let Some(session_id) =
+            mcp_session_id(&client, base, TEST_STATIC_BEARER, Some(cookie)).await
+        {
+            req = req.header("MCP-Session-Id", session_id);
+        }
+    }
+    req.send().await.expect("POST /mcp with cookie failed")
 }
 
 /// POST to /mcp with an Authorization: Bearer token.
 async fn mcp_post_with_bearer(base: &str, body: Value, token: &str) -> reqwest::Response {
-    reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let mut req = client
         .post(format!("{}/mcp", base))
         .header("Authorization", format!("Bearer {}", token))
-        .json(&body)
-        .send()
-        .await
-        .expect("POST /mcp with bearer failed")
+        .json(&body);
+    if body["method"].as_str() != Some("initialize") {
+        if let Some(session_id) = mcp_session_id(&client, base, token, None).await {
+            req = req.header("MCP-Session-Id", session_id);
+        }
+    }
+    req.send().await.expect("POST /mcp with bearer failed")
+}
+
+async fn mcp_session_id(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    cookie: Option<&str>,
+) -> Option<String> {
+    let mut req = client
+        .post(format!("{}/mcp", base))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": "session",
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25", "capabilities": {} }
+        }));
+    if let Some(cookie) = cookie {
+        req = req.header("Cookie", cookie);
+    }
+    let resp = req.send().await.expect("initialize for MCP session failed");
+    if !resp.status().is_success() {
+        return None;
+    }
+    let header_session = resp
+        .headers()
+        .get("MCP-Session-Id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body: Value = resp.json().await.expect("initialize response not JSON");
+    header_session.or_else(|| body["result"]["sessionId"].as_str().map(str::to_string))
 }
 
 /// Issue a signed test session cookie for the given user.
@@ -166,6 +228,19 @@ async fn insert_org(pool: &PgPool, name: &str) -> Uuid {
         .fetch_one(pool)
         .await
         .expect("insert org failed")
+}
+
+async fn insert_trust_issuer(pool: &PgPool, org_id: Uuid, issuer_url: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO trust_issuers (org_id, issuer_url, audience, jwks_uri, claim_mapping)
+         VALUES ($1, $2, 'mcp', 'secret:test', '{}'::jsonb)
+         RETURNING id",
+    )
+    .bind(org_id)
+    .bind(issuer_url)
+    .fetch_one(pool)
+    .await
+    .expect("insert trust issuer failed")
 }
 
 /// Seed a signal and return its id.
@@ -917,6 +992,135 @@ async fn mcp_tools_call_deliver_notification_invokes_connector() {
         actor_kind, "user",
         "cookie-authenticated call must have actor_kind='user', got: {actor_kind}"
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn approval_gated_peer_tool_call_executes_once_on_retry() {
+    let (pool, state) = spawn_state().await;
+    let org_id = default_org_id(&pool).await;
+    let workspace_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("default workspace not found");
+    let user_id = default_user_id(&pool).await;
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "ok": true }
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let issuer_id = insert_trust_issuer(&pool, org_id, "https://peer-tools.issuer.test").await;
+    let peer_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO peers
+           (org_id, name, mcp_url, issuer_id, sharing_policy, tool_allowlist, status, tool_prefix)
+         VALUES ($1, 'Peer Tools', $2, $3, '{}'::jsonb, '[]'::jsonb, 'active'::peer_status, 'gp')
+         RETURNING id",
+    )
+    .bind(org_id)
+    .bind(mock_server.uri())
+    .bind(issuer_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert peer failed");
+
+    sqlx::query(
+        "INSERT INTO workspace_peer_bindings
+           (workspace_id, peer_id, foreign_tenant_id, status)
+         VALUES ($1, $2, 'tenant-1', 'active'::binding_status)",
+    )
+    .bind(workspace_id)
+    .bind(peer_id)
+    .execute(&pool)
+    .await
+    .expect("insert peer binding failed");
+
+    state.peer_manifest_cache.insert(
+        peer_id,
+        PeerManifest {
+            peer_id,
+            tools: vec![json!({
+                "name": "danger",
+                "description": "Approval-gated peer action",
+                "inputSchema": { "type": "object", "properties": {} },
+                "ione_approval": { "required": true }
+            })],
+            resources: vec![],
+            fetched_at: Utc::now(),
+            etag: None,
+            stale: false,
+        },
+    );
+
+    let auth = AuthContext {
+        user_id,
+        org_id,
+        is_oidc: false,
+        is_mcp_peer: false,
+        active_role_id: None,
+        session_id: None,
+        mfa_verified: true,
+    };
+
+    let pending_result = ione::services::federation::route_tool_call(
+        &state,
+        workspace_id,
+        "gp:danger",
+        json!({ "target": "site-1" }),
+        &auth,
+    )
+    .await
+    .expect("route peer tool call");
+    assert_eq!(
+        pending_result["status"].as_str(),
+        Some("pending_approval"),
+        "approval-gated peer tool should not execute immediately: {pending_result}"
+    );
+    let pending_id = Uuid::parse_str(
+        pending_result["pending_id"]
+            .as_str()
+            .expect("pending id string"),
+    )
+    .expect("pending id uuid");
+    let approval_id: Uuid =
+        sqlx::query_scalar("SELECT approval_id FROM pending_peer_tool_calls WHERE id = $1")
+            .bind(pending_id)
+            .fetch_one(&pool)
+            .await
+            .expect("pending approval id");
+
+    let first = ione::services::federation::execute_pending_tool_call(&state, approval_id, user_id)
+        .await
+        .expect("first pending execution");
+    let second =
+        ione::services::federation::execute_pending_tool_call(&state, approval_id, user_id)
+            .await
+            .expect("retry pending execution");
+
+    assert_eq!(first, Some(json!({ "ok": true })));
+    assert_eq!(
+        second, first,
+        "retry should return the recorded result without calling the peer again"
+    );
+
+    let status: String =
+        sqlx::query_scalar("SELECT status::text FROM pending_peer_tool_calls WHERE id = $1")
+            .bind(pending_id)
+            .fetch_one(&pool)
+            .await
+            .expect("pending status");
+    assert_eq!(status, "executed");
+
+    mock_server.verify().await;
 }
 
 // ─── Test 9: unauthenticated request rejected by /mcp middleware ──────────────

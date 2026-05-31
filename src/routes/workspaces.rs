@@ -11,7 +11,7 @@ use crate::{
     error::AppError,
     middleware::session_cookie::SessionId,
     models::WorkspaceLifecycle,
-    repos::{RoleRepo, WorkspaceRepo},
+    repos::{PeerRepo, RoleRepo, WorkspaceRepo},
     state::AppState,
 };
 
@@ -172,5 +172,54 @@ pub async fn list_roles(
     ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     let repo = RoleRepo::new(state.pool.clone());
     let items = repo.list(workspace_id).await.map_err(AppError::Internal)?;
+    Ok(Json(json!({ "items": items })))
+}
+
+pub async fn list_peer_tools(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((workspace_id, peer_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
+    let manifest =
+        crate::services::federation::workspace_peer_manifest(&state, workspace_id, peer_id, &ctx)
+            .await
+            .map_err(AppError::Internal)?;
+    let peer = PeerRepo::new(state.pool.clone())
+        .get_for_org(peer_id, ctx.org_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound("peer not found".into()))?;
+    let tools = crate::services::federation::namespaced_tools_from_manifest(&peer, &manifest);
+    Ok(Json(json!({
+        "peerId": peer_id,
+        "stale": manifest.stale,
+        "fetchedAt": manifest.fetched_at,
+        "items": tools,
+    })))
+}
+
+pub async fn list_peer_resources(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((workspace_id, peer_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
+    let body =
+        crate::services::federation::workspace_peer_resources(&state, workspace_id, peer_id, &ctx)
+            .await
+            .map_err(AppError::Internal)?;
+    Ok(Json(body))
+}
+
+pub async fn list_context_slices(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
+    let items = crate::services::federation::workspace_context_slices(&state, workspace_id, &ctx)
+        .await
+        .map_err(AppError::Internal)?;
     Ok(Json(json!({ "items": items })))
 }

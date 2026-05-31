@@ -85,10 +85,28 @@ pub async fn decide_approval(
             })?;
 
     // If the approval is already in a terminal state matching the request, return it
-    // as-is (idempotent path — no re-delivery).
+    // as-is after draining any pending peer tool-call side effect that may have
+    // failed after the approval row was decided.
     if existing.status == decision {
         if let Some(workspace_id) = workspace_id {
             ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id).await?;
+        }
+        if decision == ApprovalStatus::Approved {
+            let _ = crate::services::federation::execute_pending_tool_call(
+                &state,
+                approval_id,
+                auth.user_id,
+            )
+            .await
+            .map_err(AppError::Internal)?;
+        } else if decision == ApprovalStatus::Rejected {
+            let _ = crate::services::federation::reject_pending_tool_call(
+                &state,
+                approval_id,
+                auth.user_id,
+            )
+            .await
+            .map_err(AppError::Internal)?;
         }
         return Ok(Json(
             serde_json::to_value(&existing).map_err(|e| AppError::Internal(e.into()))?,
@@ -189,7 +207,28 @@ pub async fn decide_approval(
         }
     }
 
-    // On approval, deliver the artifact.
+    if decision == ApprovalStatus::Rejected
+        && crate::services::federation::reject_pending_tool_call(&state, approval_id, auth.user_id)
+            .await
+            .map_err(AppError::Internal)?
+    {
+        return Ok(Json(
+            serde_json::to_value(&approval).map_err(|e| AppError::Internal(e.into()))?,
+        ));
+    }
+
+    if decision == ApprovalStatus::Approved
+        && crate::services::federation::execute_pending_tool_call(&state, approval_id, auth.user_id)
+            .await
+            .map_err(AppError::Internal)?
+            .is_some()
+    {
+        return Ok(Json(
+            serde_json::to_value(&approval).map_err(|e| AppError::Internal(e.into()))?,
+        ));
+    }
+
+    // On approval, deliver artifact-backed approval types.
     if decision == ApprovalStatus::Approved {
         delivery::deliver_artifact(&state, existing.artifact_id, auth.user_id)
             .await

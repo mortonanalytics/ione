@@ -25,22 +25,20 @@ pub struct WhoamiResponse {
 
 pub async fn fetch_whoami(state: &AppState, peer: &Peer) -> anyhow::Result<WhoamiResponse> {
     let endpoint = peer.mcp_url.trim_end_matches('/');
-    let body: Value = crate::services::peer_tokens::send_mcp_request(
-        &state.pool,
-        &state.http,
-        peer,
-        endpoint,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "resources/read",
-            "params": { "uri": "whoami://" }
-        }),
-    )
-    .await?
-    .error_for_status()?
-    .json()
-    .await?;
+    let request_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "resources/read",
+        "params": { "uri": "whoami://" }
+    });
+    let body = match fetch_whoami_body(state, peer, endpoint, &request_body, None).await {
+        Ok(body) => body,
+        Err(e) if looks_like_missing_session(&e) => {
+            let session_id = initialize_peer_session(state, peer, endpoint).await?;
+            fetch_whoami_body(state, peer, endpoint, &request_body, Some(&session_id)).await?
+        }
+        Err(e) => return Err(e),
+    };
     if let Some(err) = body.get("error").filter(|err| !err.is_null()) {
         anyhow::bail!("peer MCP error: {}", err);
     }
@@ -54,6 +52,70 @@ pub async fn fetch_whoami(state: &AppState, peer: &Peer) -> anyhow::Result<Whoam
         anyhow::bail!("whoami response missing foreign_tenant_id");
     }
     Ok(whoami)
+}
+
+async fn fetch_whoami_body(
+    state: &AppState,
+    peer: &Peer,
+    endpoint: &str,
+    body: &Value,
+    mcp_session_id: Option<&str>,
+) -> anyhow::Result<Value> {
+    let body: Value = crate::services::peer_tokens::send_mcp_request_with_session(
+        &state.pool,
+        &state.http,
+        peer,
+        endpoint,
+        body,
+        mcp_session_id,
+    )
+    .await?
+    .error_for_status()?
+    .json()
+    .await?;
+    if let Some(error) = body.get("error").filter(|error| !error.is_null()) {
+        anyhow::bail!("peer MCP error: {}", error);
+    }
+    Ok(body)
+}
+
+async fn initialize_peer_session(
+    state: &AppState,
+    peer: &Peer,
+    endpoint: &str,
+) -> anyhow::Result<String> {
+    let resp = crate::services::peer_tokens::send_mcp_request(
+        &state.pool,
+        &state.http,
+        peer,
+        endpoint,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25", "capabilities": {} }
+        }),
+    )
+    .await?;
+    let header_session = resp
+        .headers()
+        .get("MCP-Session-Id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body: Value = resp.error_for_status()?.json().await?;
+    header_session
+        .or_else(|| {
+            body.get("result")
+                .and_then(|result| result.get("sessionId"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))
+}
+
+fn looks_like_missing_session(error: &anyhow::Error) -> bool {
+    let msg = error.to_string().to_ascii_lowercase();
+    msg.contains("mcp-session-id") || msg.contains("session not found")
 }
 
 pub async fn bind_on_subscribe(

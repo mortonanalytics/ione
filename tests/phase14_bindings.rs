@@ -73,6 +73,30 @@ async fn spawn_second_app() -> (String, PgPool) {
     (format!("http://{}", addr), pool)
 }
 
+async fn mcp_session_id(base: &str, bearer: &str) -> String {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/mcp"))
+        .bearer_auth(bearer)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": "session",
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25", "capabilities": {} }
+        }))
+        .send()
+        .await
+        .expect("mcp initialize");
+    let header_session = resp
+        .headers()
+        .get("MCP-Session-Id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body: Value = resp.json().await.expect("initialize response");
+    header_session
+        .or_else(|| body["result"]["sessionId"].as_str().map(str::to_string))
+        .expect("session id")
+}
+
 async fn default_org_id(pool: &PgPool) -> Uuid {
     sqlx::query_scalar("SELECT id FROM organizations WHERE name = 'Default Org' LIMIT 1")
         .fetch_one(pool)
@@ -1040,6 +1064,10 @@ async fn ione_whoami_resource_returns_caller_identity() {
     let resp = reqwest::Client::new()
         .post(format!("{base}/mcp"))
         .bearer_auth(TEST_STATIC_BEARER)
+        .header(
+            "MCP-Session-Id",
+            mcp_session_id(&base, TEST_STATIC_BEARER).await,
+        )
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1311,7 +1339,8 @@ async fn approval_for_inbound_peer_proposal_carries_foreign_tenant_id() {
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/mcp"))
-        .bearer_auth(token)
+        .bearer_auth(&token)
+        .header("MCP-Session-Id", mcp_session_id(&base, &token).await)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1356,6 +1385,10 @@ async fn approval_for_unbound_local_proposal_has_null_foreign_tenant_id() {
     let resp = reqwest::Client::new()
         .post(format!("{base}/mcp"))
         .bearer_auth(TEST_STATIC_BEARER)
+        .header(
+            "MCP-Session-Id",
+            mcp_session_id(&base, TEST_STATIC_BEARER).await,
+        )
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,

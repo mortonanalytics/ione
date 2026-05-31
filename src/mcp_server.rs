@@ -9,7 +9,8 @@ use std::convert::Infallible;
 
 use axum::{
     extract::{Query, State},
-    http::{header, HeaderMap},
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
     response::{
         sse::{Event, KeepAlive, Sse},
         Json,
@@ -33,6 +34,10 @@ use crate::{
     },
     state::AppState,
 };
+
+const MCP_PROTOCOL: &str = "2025-11-25";
+const MCP_SESSION_ID: &str = "MCP-Session-Id";
+const MCP_PROTOCOL_VERSION: &str = "MCP-Protocol-Version";
 
 // ─── JSON-RPC 2.0 types ───────────────────────────────────────────────────────
 
@@ -88,7 +93,7 @@ impl JsonRpcResponse {
 
 // ─── Tool schemas ─────────────────────────────────────────────────────────────
 
-fn tool_list() -> Value {
+pub(crate) fn tool_list() -> Value {
     json!([
         {
             "name": "list_workspaces",
@@ -671,18 +676,44 @@ pub async fn jsonrpc_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
-) -> Json<JsonRpcResponse> {
+) -> axum::response::Response {
+    if let Err(status) = validate_origin(&state, &headers) {
+        return (status, "invalid Origin").into_response();
+    }
     if req.jsonrpc != "2.0" {
-        return Json(JsonRpcResponse::err(
-            req.id,
-            -32600,
-            "invalid JSON-RPC version; expected 2.0",
+        return mcp_json_response(
+            JsonRpcResponse::err(
+                req.id,
+                -32600,
+                "invalid JSON-RPC version; expected 2.0",
+                None,
+            ),
             None,
-        ));
+        );
     }
 
     let resp = dispatch_method(&state, &headers, req).await;
-    Json(resp)
+    let session_id = resp
+        .result
+        .as_ref()
+        .and_then(|result| result.get("sessionId"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    mcp_json_response(resp, session_id)
+}
+
+fn mcp_json_response(
+    resp: JsonRpcResponse,
+    session_id: Option<String>,
+) -> axum::response::Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(MCP_PROTOCOL_VERSION, MCP_PROTOCOL.parse().unwrap());
+    if let Some(session_id) = session_id {
+        if let Ok(value) = session_id.parse() {
+            headers.insert(MCP_SESSION_ID, value);
+        }
+    }
+    (headers, Json(resp)).into_response()
 }
 
 async fn dispatch_method(
@@ -691,10 +722,38 @@ async fn dispatch_method(
     req: JsonRpcRequest,
 ) -> JsonRpcResponse {
     match req.method.as_str() {
-        "initialize" => handle_initialize(req.id),
-        "tools/list" => handle_tools_list(req.id),
-        "resources/list" => handle_resources_list(req.id),
+        "initialize" => handle_initialize(state, headers, req.id, req.params).await,
+        "tools/list" => {
+            if let Err(e) = require_mcp_session(state, headers) {
+                return JsonRpcResponse::err(req.id, -32002, e.to_string(), None);
+            }
+            let auth = match resolve_auth(state, headers).await {
+                Some(a) => a,
+                None => {
+                    return JsonRpcResponse::err(
+                        req.id,
+                        -32001,
+                        "unauthorized: valid session cookie or bearer JWT required",
+                        None,
+                    )
+                }
+            };
+            let workspace_id = match resolve_mcp_workspace(state, headers, req.params.as_ref()) {
+                Ok(workspace_id) => workspace_id,
+                Err(e) => return JsonRpcResponse::err(req.id, -32002, e.to_string(), None),
+            };
+            handle_tools_list(req.id, state, workspace_id, &auth).await
+        }
+        "resources/list" => {
+            if let Err(e) = require_mcp_session(state, headers) {
+                return JsonRpcResponse::err(req.id, -32002, e.to_string(), None);
+            }
+            handle_resources_list(req.id)
+        }
         "resources/read" => {
+            if let Err(e) = require_mcp_session(state, headers) {
+                return JsonRpcResponse::err(req.id, -32002, e.to_string(), None);
+            }
             let auth = match resolve_auth(state, headers).await {
                 Some(a) => a,
                 None => {
@@ -709,6 +768,9 @@ async fn dispatch_method(
             handle_resources_read(req.id, req.params.unwrap_or(Value::Null), &auth, state).await
         }
         "tools/call" => {
+            if let Err(e) = require_mcp_session(state, headers) {
+                return JsonRpcResponse::err(req.id, -32002, e.to_string(), None);
+            }
             let auth = match resolve_auth(state, headers).await {
                 Some(a) => a,
                 None => {
@@ -720,17 +782,56 @@ async fn dispatch_method(
                     )
                 }
             };
-            handle_tools_call(req.id, req.params.unwrap_or(Value::Null), &auth, state).await
+            let workspace_id = match resolve_mcp_workspace(state, headers, req.params.as_ref()) {
+                Ok(workspace_id) => workspace_id,
+                Err(e) => return JsonRpcResponse::err(req.id, -32002, e.to_string(), None),
+            };
+            handle_tools_call(
+                req.id,
+                req.params.unwrap_or(Value::Null),
+                &auth,
+                state,
+                workspace_id,
+            )
+            .await
         }
         other => JsonRpcResponse::err(req.id, -32601, format!("method not found: {}", other), None),
     }
 }
 
-fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
+async fn handle_initialize(
+    state: &AppState,
+    headers: &HeaderMap,
+    id: Option<Value>,
+    params: Option<Value>,
+) -> JsonRpcResponse {
+    let session_id = Uuid::new_v4().to_string();
+    let workspace_id = params
+        .as_ref()
+        .and_then(|params| {
+            params
+                .get("workspace_id")
+                .or_else(|| params.get("workspaceId"))
+        })
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let requested_protocol = headers
+        .get(MCP_PROTOCOL_VERSION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or(MCP_PROTOCOL);
+    state.mcp_sessions.insert(
+        session_id.clone(),
+        json!({
+            "protocol": if requested_protocol <= MCP_PROTOCOL { requested_protocol } else { MCP_PROTOCOL },
+            "workspace_id": workspace_id,
+            "created_at": chrono::Utc::now(),
+        }),
+    );
     JsonRpcResponse::ok(
         id,
         json!({
-            "protocolVersion": "2025-03",
+            "protocolVersion": MCP_PROTOCOL,
+            "sessionId": session_id,
             "serverInfo": {
                 "name": "ione",
                 "version": env!("CARGO_PKG_VERSION")
@@ -743,8 +844,28 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
     )
 }
 
-fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
-    JsonRpcResponse::ok(id, json!({ "tools": tool_list() }))
+async fn handle_tools_list(
+    id: Option<Value>,
+    state: &AppState,
+    workspace_id: Uuid,
+    auth: &AuthContext,
+) -> JsonRpcResponse {
+    let mut tools = tool_list().as_array().cloned().unwrap_or_default();
+    match crate::services::federation::aggregate_tools(state, workspace_id, auth).await {
+        Ok(peer_tools) => {
+            tools.extend(peer_tools.into_iter().map(|tool| {
+                json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema.unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
+                    "ione_approval": { "required": tool.approval_required },
+                    "peerId": tool.peer_id,
+                })
+            }));
+            JsonRpcResponse::ok(id, json!({ "tools": tools }))
+        }
+        Err(e) => JsonRpcResponse::err(id, -32000, e.to_string(), None),
+    }
 }
 
 fn handle_resources_list(id: Option<Value>) -> JsonRpcResponse {
@@ -830,6 +951,7 @@ async fn handle_tools_call(
     params: Value,
     auth: &AuthContext,
     state: &AppState,
+    workspace_id: Uuid,
 ) -> JsonRpcResponse {
     let tool_name = match params["name"].as_str() {
         Some(n) if !n.is_empty() => n,
@@ -837,6 +959,24 @@ async fn handle_tools_call(
     };
 
     let args = params["arguments"].clone();
+
+    if tool_name.contains(':') {
+        return match crate::services::federation::route_tool_call(
+            state,
+            workspace_id,
+            tool_name,
+            args,
+            auth,
+        )
+        .await
+        {
+            Ok(result) => JsonRpcResponse::ok(
+                id,
+                json!({ "content": [{ "type": "text", "text": result.to_string() }], "isError": false }),
+            ),
+            Err(e) => JsonRpcResponse::err(id, -32000, e.to_string(), None),
+        };
+    }
 
     // Schema-level validation: workspace_id required for multi-workspace tools.
     if needs_workspace_id(tool_name) && args["workspace_id"].as_str().is_none() {
@@ -902,9 +1042,24 @@ pub async fn sse_handler(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+pub async fn delete_session_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(session_id) = headers
+        .get(MCP_SESSION_ID)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+    else {
+        return StatusCode::BAD_REQUEST;
+    };
+    state.mcp_sessions.remove(&session_id);
+    StatusCode::NO_CONTENT
+}
+
 fn build_init_event() -> Event {
     let payload = json!({
-        "protocolVersion": "2025-03",
+        "protocolVersion": MCP_PROTOCOL,
         "serverInfo": { "name": "ione", "version": env!("CARGO_PKG_VERSION") },
         "capabilities": { "tools": {}, "resources": {} }
     });
@@ -944,6 +1099,85 @@ fn sse_error_event(msg: &str) -> Event {
 /// at the tool-call level.
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/mcp", post(jsonrpc_handler))
+        .route(
+            "/mcp",
+            post(jsonrpc_handler)
+                .get(sse_handler)
+                .delete(delete_session_handler),
+        )
         .route("/mcp/sse", get(sse_handler))
+}
+
+fn validate_origin(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Ok(());
+    };
+    let mut allowed: Vec<String> = std::env::var("IONE_CORS_ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect();
+    allowed.push(state.config.oauth_issuer.clone());
+    if allowed.iter().any(|allowed| allowed == origin) {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
+fn require_mcp_session(state: &AppState, headers: &HeaderMap) -> anyhow::Result<String> {
+    let session_id = headers
+        .get(MCP_SESSION_ID)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| anyhow::anyhow!("MCP-Session-Id is required after initialize"))?;
+    if !state.mcp_sessions.contains_key(session_id) {
+        anyhow::bail!("MCP session not found");
+    }
+    Ok(session_id.to_string())
+}
+
+fn resolve_mcp_workspace(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: Option<&Value>,
+) -> anyhow::Result<Uuid> {
+    if let Some(workspace_id) = params
+        .and_then(|params| {
+            params
+                .get("workspace_id")
+                .or_else(|| params.get("workspaceId"))
+        })
+        .and_then(Value::as_str)
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+    {
+        return Ok(workspace_id);
+    }
+    if let Some(workspace_id) = params
+        .and_then(|params| params.get("arguments"))
+        .and_then(|args| args.get("workspace_id").or_else(|| args.get("workspaceId")))
+        .and_then(Value::as_str)
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+    {
+        return Ok(workspace_id);
+    }
+    let session_id = require_mcp_session(state, headers)?;
+    if let Some(workspace_id) = state
+        .mcp_sessions
+        .get(&session_id)
+        .and_then(|entry| {
+            entry
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .and_then(|raw| Uuid::parse_str(&raw).ok())
+    {
+        return Ok(workspace_id);
+    }
+    Ok(state.default_workspace_id)
 }

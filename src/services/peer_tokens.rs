@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
@@ -10,6 +14,9 @@ use crate::{
 };
 
 const REFRESH_SKEW_SECONDS: i64 = 60;
+static PEER_GOVERNORS: Lazy<
+    DashMap<uuid::Uuid, Arc<crate::services::peer_governor::PeerGovernor>>,
+> = Lazy::new(DashMap::new);
 
 #[derive(Debug, Deserialize)]
 struct RefreshTokenResp {
@@ -101,14 +108,54 @@ pub async fn send_mcp_request(
     endpoint: &str,
     body: &Value,
 ) -> Result<reqwest::Response> {
+    send_mcp_request_with_session(pool, http, peer, endpoint, body, None).await
+}
+
+pub async fn send_mcp_request_with_session(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    peer: &Peer,
+    endpoint: &str,
+    body: &Value,
+    mcp_session_id: Option<&str>,
+) -> Result<reqwest::Response> {
+    let governor = governor_for(peer.id);
+    governor.acquire().await?;
     let token = resolve_access_token(pool, http, peer).await?;
-    let first = send_with_token(http, endpoint, body, &token).await?;
+    let first = match send_with_token(http, endpoint, body, &token, mcp_session_id).await {
+        Ok(response) => {
+            record_peer_response(pool, peer, &governor, response.status()).await;
+            response
+        }
+        Err(e) => {
+            record_peer_failure(pool, peer, &governor, &e).await;
+            return Err(e);
+        }
+    };
     if first.status() != StatusCode::UNAUTHORIZED || !can_refresh(peer) {
         return Ok(first);
     }
 
+    governor.acquire().await?;
     let token = refresh_access_token(pool, http, peer).await?;
-    send_with_token(http, endpoint, body, &token).await
+    match send_with_token(http, endpoint, body, &token, mcp_session_id).await {
+        Ok(response) => {
+            record_peer_response(pool, peer, &governor, response.status()).await;
+            Ok(response)
+        }
+        Err(e) => {
+            record_peer_failure(pool, peer, &governor, &e).await;
+            Err(e)
+        }
+    }
+}
+
+pub fn governor_snapshot(
+    peer_id: uuid::Uuid,
+) -> Option<crate::services::peer_governor::PeerGovernorSnapshot> {
+    PEER_GOVERNORS
+        .get(&peer_id)
+        .map(|entry| entry.value().snapshot())
 }
 
 async fn send_with_token(
@@ -116,10 +163,14 @@ async fn send_with_token(
     endpoint: &str,
     body: &Value,
     token: &str,
+    mcp_session_id: Option<&str>,
 ) -> Result<reqwest::Response> {
     let mut request = http.post(endpoint).json(body);
     if !token.is_empty() {
         request = request.bearer_auth(token);
+    }
+    if let Some(session_id) = mcp_session_id {
+        request = request.header("MCP-Session-Id", session_id);
     }
     request.send().await.context("HTTP send failed")
 }
@@ -134,6 +185,55 @@ fn token_is_fresh(peer: &Peer) -> bool {
 
 fn can_refresh(peer: &Peer) -> bool {
     peer.refresh_token_ciphertext.is_some() && peer.oauth_client_id.is_some()
+}
+
+fn governor_for(peer_id: uuid::Uuid) -> Arc<crate::services::peer_governor::PeerGovernor> {
+    PEER_GOVERNORS
+        .entry(peer_id)
+        .or_insert_with(|| {
+            let rps = std::env::var("IONE_PEER_CALL_RPS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(10);
+            let burst = std::env::var("IONE_PEER_CALL_BURST")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(20);
+            Arc::new(crate::services::peer_governor::PeerGovernor::new(
+                rps, burst,
+            ))
+        })
+        .clone()
+}
+
+async fn record_peer_response(
+    pool: &PgPool,
+    peer: &Peer,
+    governor: &crate::services::peer_governor::PeerGovernor,
+    status: StatusCode,
+) {
+    if status.is_server_error() {
+        if governor.record_peer_failure() {
+            let _ = PeerRepo::new(pool.clone())
+                .set_session_status(peer.id, "error", Some("peer circuit breaker opened"))
+                .await;
+        }
+    } else if !status.is_client_error() {
+        governor.record_success();
+    }
+}
+
+async fn record_peer_failure(
+    pool: &PgPool,
+    peer: &Peer,
+    governor: &crate::services::peer_governor::PeerGovernor,
+    error: &anyhow::Error,
+) {
+    if governor.record_peer_failure() {
+        let _ = PeerRepo::new(pool.clone())
+            .set_session_status(peer.id, "error", Some(&error.to_string()))
+            .await;
+    }
 }
 
 fn decrypt_access_token(peer: &Peer) -> Result<String> {
