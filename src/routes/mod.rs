@@ -123,7 +123,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces",
             get(workspaces::list_workspaces).post(workspaces::create_workspace),
         )
-        .route("/api/v1/workspaces/:id", get(workspaces::get_workspace))
+        .route(
+            "/api/v1/workspaces/:id",
+            get(workspaces::get_workspace).patch(workspaces::patch_workspace),
+        )
         .route(
             "/api/v1/workspaces/:id/map-layers",
             get(map_layers::list_map_layers),
@@ -339,7 +342,13 @@ fn cors_layer_from_env() -> CorsLayer {
     } else {
         CorsLayer::new()
             .allow_origin(parsed)
-            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+            ])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
     }
 }

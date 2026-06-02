@@ -1054,6 +1054,7 @@ const tabConnectors    = document.getElementById('tab-connectors');
 const tabSignals       = document.getElementById('tab-signals');
 const tabSurvivors     = document.getElementById('tab-survivors');
 const tabApprovals     = document.getElementById('tab-approvals');
+const tabAudit         = document.getElementById('tab-audit');
 const panelChat        = document.getElementById('panel-chat');
 const panelMap         = document.getElementById('panel-map');
 const panelChart       = document.getElementById('panel-chart');
@@ -1063,8 +1064,9 @@ const panelConnectors  = document.getElementById('panel-connectors');
 const panelSignals     = document.getElementById('panel-signals');
 const panelSurvivors   = document.getElementById('panel-survivors');
 const panelApprovals   = document.getElementById('panel-approvals');
+const panelAudit       = document.getElementById('panel-audit');
 
-let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'table' | 'document' | 'connectors' | 'signals' | 'survivors' | 'approvals'
+let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'table' | 'document' | 'connectors' | 'signals' | 'survivors' | 'approvals' | 'audit'
 
 function switchTab(name) {
   // Stop auto-refresh when leaving a polling tab.
@@ -1076,6 +1078,9 @@ function switchTab(name) {
   }
   if (activeTab === 'approvals' && name !== 'approvals') {
     stopApprovalsPolling();
+  }
+  if (activeTab === 'audit' && name !== 'audit') {
+    stopAuditPolling();
   }
 
   activeTab = name;
@@ -1116,6 +1121,10 @@ function switchTab(name) {
   tabApprovals.classList.toggle('tab--active', name === 'approvals');
   panelApprovals.hidden = name !== 'approvals';
 
+  tabAudit.setAttribute('aria-selected', String(name === 'audit'));
+  tabAudit.classList.toggle('tab--active', name === 'audit');
+  panelAudit.hidden = name !== 'audit';
+
   if (name === 'connectors' && activeWorkspace) {
     loadConnectors(activeWorkspace.id);
     loadPeerBrowser(activeWorkspace.id);
@@ -1153,6 +1162,11 @@ function switchTab(name) {
     loadApprovals();
     startApprovalsPolling();
   }
+
+  if (name === 'audit' && activeWorkspace) {
+    loadAuditTrail();
+    startAuditPolling();
+  }
 }
 
 // Registry driving adaptive tab visibility + keyboard nav. Data-viz tabs
@@ -1163,7 +1177,7 @@ function switchTab(name) {
 const tabBar = document.getElementById('tab-bar');
 const TAB_REGISTRY = [
   { id: 'chat',       el: tabChat,       always: true },
-  { id: 'map',        el: tabMap,        show: (p) => p.hasActivePeer },
+  { id: 'map',        el: tabMap,        show: (p) => p.eventLayers > 0 || p.hasActivePeer },
   { id: 'chart',      el: tabChart,      show: (p) => p.charts > 0 || p.hasActivePeer },
   { id: 'table',      el: tabTable,      show: (p) => p.tables > 0 || p.hasActivePeer },
   { id: 'document',   el: tabDocument,   show: (p) => p.hasActivePeer },
@@ -1171,6 +1185,7 @@ const TAB_REGISTRY = [
   { id: 'signals',    el: tabSignals,    always: true },
   { id: 'survivors',  el: tabSurvivors,  always: true },
   { id: 'approvals',  el: tabApprovals,  show: (p) => p.approvalsPending > 0 },
+  { id: 'audit',      el: tabAudit,      always: true },
 ];
 
 TAB_REGISTRY.forEach((t) => {
@@ -1215,7 +1230,6 @@ let mapInstance = null;
 let mapLayerItems = [];
 let mapEventLayers = [];
 let mapLoadedWorkspaceId = null;
-let mapPopup = null;
 const mapLayerIds = new Set();
 const mapSourceIds = new Set();
 const mapEventLayerIds = new Set();
@@ -1231,6 +1245,11 @@ function initMapPanel() {
   connectBtn?.addEventListener('click', () => switchTab('connectors'));
   retryBtn?.addEventListener('click', () => {
     if (activeWorkspace) updateMapLayers(activeWorkspace.id);
+  });
+  document.getElementById('map-detail-close')?.addEventListener('click', () => {
+    const panel = document.getElementById('map-detail-panel');
+    if (panel) panel.hidden = true;
+    document.getElementById('map-canvas')?.focus();
   });
   toggleBtn?.addEventListener('click', () => {
     const expanded = toggleBtn.getAttribute('aria-expanded') !== 'false';
@@ -1262,6 +1281,7 @@ async function updateMapLayers(workspaceId) {
     destroyMap();
     renderLayerControl([], { eventFail, streamsFailed, eventsTruncated });
     renderLegend([], null);
+    renderFeedFreshness(null, []);
     renderEventList([]);
     if (rasterFail && eventFail) {
       showMapError('Could not load map. The data sources may be temporarily unavailable.');
@@ -1278,6 +1298,7 @@ async function updateMapLayers(workspaceId) {
   renderMapWithLayers({ rasters: mapLayerItems, eventLayers: mapEventLayers });
   renderLayerControl([...mapLayerItems, ...mapEventLayers], { eventFail, streamsFailed, eventsTruncated });
   renderLegend(mapEventLayers, eventsQueriedAt);
+  renderFeedFreshness(eventsQueriedAt, mapEventLayers);
   renderEventList(mapEventLayers, { truncated: eventsTruncated });
   if (peersFailed.length > 0) markFailedPeers(peersFailed);
   rehydrateTranscriptChips();
@@ -1540,6 +1561,31 @@ function countEventFeatures(layers) {
   return layers.reduce((sum, layer) => sum + (((layer.collection || {}).features || []).length), 0);
 }
 
+// "Feed last updated {ts}" trust signal. queriedAt is the event-layers query
+// time (contract #9). Flags "may be delayed" when the feed is older than the
+// staleness window (default 15 min — ~3× a 5-min USGS poll, since the poll
+// interval is not surfaced per-layer on the event-layers response).
+const FEED_STALE_MS = 15 * 60 * 1000;
+
+function renderFeedFreshness(queriedAt, layers) {
+  const el = document.getElementById('event-feed-freshness');
+  if (!el) return;
+  const hasEvents = (layers || []).some((l) => (((l.collection || {}).features) || []).length > 0);
+  if (!queriedAt || !hasEvents) {
+    el.hidden = true;
+    el.textContent = '';
+    el.classList.remove('feed-freshness--stale');
+    return;
+  }
+  el.hidden = false;
+  const ts = new Date(queriedAt);
+  const stale = Date.now() - ts.getTime() > FEED_STALE_MS;
+  el.classList.toggle('feed-freshness--stale', stale);
+  el.textContent = stale
+    ? `Feed may be delayed · last updated ${formatRelativeTime(queriedAt)}`
+    : `Feed last updated ${formatRelativeTime(queriedAt)}`;
+}
+
 function renderLegend(layers, queriedAt) {
   const legend = document.getElementById('event-layer-legend');
   if (!legend) return;
@@ -1624,29 +1670,63 @@ function showEventOnMap(feature, layer) {
   openEventPopup({ ...feature, layer: { id: `evt-lyr-${layer.streamId}` } }, true);
 }
 
+// First property whose key matches any of `names` (case-insensitive). Field
+// names are the allowlisted view_config.property_fields[].name values.
+function firstProp(props, names) {
+  const lower = {};
+  Object.keys(props).forEach((k) => { lower[k.toLowerCase()] = props[k]; });
+  for (const n of names) {
+    const v = lower[n.toLowerCase()];
+    if (v != null && v !== '') return v;
+  }
+  return null;
+}
+
+// PAGER alert level → human label. USGS green<yellow<orange<red. We pair the
+// color chip with a TEXT label so meaning is never conveyed by color alone
+// (AC-2.6 / WCAG 1.4.1).
+const PAGER_LABELS = {
+  green: 'Green — no impact expected',
+  yellow: 'Yellow — local impact',
+  orange: 'Orange — regional impact',
+  red: 'Red — major impact',
+};
+
 function openEventPopup(feature, triggeredByKeyboard) {
-  const coords = feature.geometry && feature.geometry.coordinates;
-  if (!mapInstance || !Array.isArray(coords) || coords.length !== 2) return;
+  const panel = document.getElementById('map-detail-panel');
+  if (!panel) return;
   const props = feature.properties || {};
-  const content = document.createElement('div');
-  content.className = 'event-popup';
-  const rows = Object.entries(props)
-    .filter(([key]) => !key.startsWith('_'))
-    .slice(0, 6)
-    .map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`)
-    .join('');
-  content.innerHTML = `
-    <button type="button" class="event-popup-close" aria-label="Close popup">×</button>
-    <dl>${rows || '<dt>Event</dt><dd>Point event</dd>'}</dl>
-  `;
-  if (mapPopup) mapPopup.remove();
-  mapPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: true, offset: 16 })
-    .setLngLat(coords)
-    .setDOMContent(content)
-    .addTo(mapInstance);
-  content.querySelector('button').addEventListener('click', () => mapPopup?.remove());
+
+  const mag = firstProp(props, ['magnitude', 'mag']);
+  const depth = firstProp(props, ['depth_km', 'depth']);
+  const place = firstProp(props, ['place', 'location', 'region']);
+  const alert = firstProp(props, ['alert', 'pager']);
+  const url = firstProp(props, ['url', 'usgs_url', 'detail']);
+
+  const titleEl = document.getElementById('map-detail-title');
+  titleEl.textContent = place != null ? String(place) : (eventFeatureLabel(feature, feature.layer || {}) || 'Event');
+
+  const rows = [];
+  if (mag != null) rows.push(`<dt>Magnitude</dt><dd>${escapeHtml(mag)}</dd>`);
+  if (depth != null) rows.push(`<dt>Depth (km)</dt><dd>${escapeHtml(depth)}</dd>`);
+  if (place != null) rows.push(`<dt>Place</dt><dd>${escapeHtml(place)}</dd>`);
+
+  // PAGER impact assessment: chip carries a text label, never color-alone.
+  const alertKey = alert != null ? String(alert).toLowerCase() : null;
+  if (alertKey && PAGER_LABELS[alertKey]) {
+    rows.push(`<dt>PAGER alert</dt><dd><span class="pager-chip pager-chip--${escapeHtml(alertKey)}">${escapeHtml(PAGER_LABELS[alertKey])}</span></dd>`);
+  } else {
+    rows.push('<dt>PAGER alert</dt><dd>No impact assessment</dd>');
+  }
+
+  if (url != null) {
+    rows.push(`<dt>Source</dt><dd><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">View on USGS</a></dd>`);
+  }
+
+  document.getElementById('map-detail-fields').innerHTML = rows.join('');
+  panel.hidden = false;
   if (triggeredByKeyboard) {
-    setTimeout(() => content.querySelector('button').focus(), 0);
+    setTimeout(() => document.getElementById('map-detail-close')?.focus(), 0);
   }
 }
 
@@ -4016,16 +4096,73 @@ function clearApprovalsStatus() {
 async function updateApprovalsBadge(workspaceId) {
   try {
     const data = await listApprovals(workspaceId, 'pending');
-    const count = (data.items || []).length;
+    const items = data.items || [];
+    const count = items.length;
     if (count > 0) {
       approvalsBadgeEl.textContent = count;
       approvalsBadgeEl.hidden = false;
     } else {
       approvalsBadgeEl.hidden = true;
     }
+    renderAlertBanner(items);
   } catch (_) {
     approvalsBadgeEl.hidden = true;
+    renderAlertBanner([]);
   }
+}
+
+// Severity rank for picking the most-urgent pending approval to surface.
+function approvalSeverityRank(item) {
+  const sev = ((item.artifactContent || {}).severity || '').toLowerCase();
+  if (sev === 'command') return 3;
+  if (sev === 'flagged') return 2;
+  return 1;
+}
+
+// Ambient unacknowledged-alert banner over the existing toast container. Persists
+// (no auto-dismiss) whenever any approval is pending, surfacing the highest-
+// severity / most-recent item plus a "+N more" tail. Clicking jumps to Approvals.
+function renderAlertBanner(pendingItems) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  let banner = document.getElementById('alert-banner');
+  const items = pendingItems || [];
+  if (items.length === 0) {
+    if (banner) banner.remove();
+    return;
+  }
+  // Most urgent: highest severity, then most recent.
+  const sorted = [...items].sort((a, b) => {
+    const r = approvalSeverityRank(b) - approvalSeverityRank(a);
+    if (r !== 0) return r;
+    return String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
+  });
+  const top = sorted[0];
+  const content = top.artifactContent || {};
+  const title = content.title || top.kind || 'Unacknowledged command';
+  const more = items.length - 1;
+  const label = `${items.length} pending approval${items.length === 1 ? '' : 's'}: ${title}${more > 0 ? ` · +${more} more` : ''}`;
+
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'alert-banner';
+    banner.className = 'alert-banner';
+    banner.setAttribute('role', 'alert');
+    banner.tabIndex = 0;
+    banner.addEventListener('click', () => {
+      switchTab('approvals');
+      document.getElementById('panel-approvals')?.focus();
+    });
+    banner.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        switchTab('approvals');
+        document.getElementById('panel-approvals')?.focus();
+      }
+    });
+    container.appendChild(banner);
+  }
+  banner.textContent = label;
 }
 
 async function loadApprovals() {
@@ -4193,8 +4330,84 @@ function stopApprovalsPolling() {
   }
 }
 
+// Ambient poll that keeps the unacknowledged-alert banner + badge live on every
+// tab, not just Approvals. updateApprovalsBadge drives both.
+let ambientAlertTimer = null;
+function startAmbientAlertPolling() {
+  if (ambientAlertTimer !== null) return;
+  ambientAlertTimer = setInterval(() => {
+    if (activeTab !== 'approvals' && activeWorkspace) {
+      updateApprovalsBadge(activeWorkspace.id);
+    }
+  }, APPROVALS_POLL_MS);
+}
+
 approvalsRefreshBtn.addEventListener('click', loadApprovals);
 approvalsFilterStatus.addEventListener('change', loadApprovals);
+
+/* ── Audit-trail panel (read-only ingest→signal→routing→decision chronology) ── */
+
+const auditRefreshBtn = document.getElementById('audit-refresh-btn');
+const auditStatusEl   = document.getElementById('audit-status');
+const auditRowsEl      = document.getElementById('audit-rows');
+
+let auditPollTimer = null;
+const AUDIT_POLL_MS = 10000;
+
+async function loadAuditTrail() {
+  if (!activeWorkspace) return;
+  try {
+    const data = await apiFetch(`/api/v1/workspaces/${activeWorkspace.id}/audit_events`);
+    renderAuditTrail(data.items || []);
+    auditStatusEl.textContent = '';
+  } catch (err) {
+    auditStatusEl.textContent = 'Error loading audit trail: ' + err.message;
+  }
+}
+
+function renderAuditTrail(items) {
+  auditRowsEl.innerHTML = '';
+  if (items.length === 0) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4;
+    td.textContent = 'No audit events yet.';
+    tr.appendChild(td);
+    auditRowsEl.appendChild(tr);
+    return;
+  }
+  items.forEach((ev) => {
+    const tr = document.createElement('tr');
+    const artifact = ev.objectId
+      ? `${ev.objectKind || 'object'} ${String(ev.objectId).slice(0, 8)}`
+      : (ev.objectKind || '');
+    [ev.verb || '', artifact, ev.actorRef || (ev.actorKind || ''), ev.createdAt ? formatDateTime(ev.createdAt) : '']
+      .forEach((text) => {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      });
+    auditRowsEl.appendChild(tr);
+  });
+}
+
+function startAuditPolling() {
+  stopAuditPolling();
+  auditPollTimer = setInterval(() => {
+    if (activeTab === 'audit') {
+      loadAuditTrail();
+    }
+  }, AUDIT_POLL_MS);
+}
+
+function stopAuditPolling() {
+  if (auditPollTimer !== null) {
+    clearInterval(auditPollTimer);
+    auditPollTimer = null;
+  }
+}
+
+auditRefreshBtn.addEventListener('click', loadAuditTrail);
 
 /* ── Init: load workspaces then conversations ── */
 
@@ -4226,8 +4439,9 @@ approvalsFilterStatus.addEventListener('change', loadApprovals);
       const isClosed = workspaceIsClosed(initial);
       newChatBtn.hidden = isClosed;
       workspaceClosedNotice.hidden = !isClosed;
-      // Seed the pending approvals badge.
+      // Seed the pending approvals badge + ambient alert banner.
       updateApprovalsBadge(initial.id);
+      startAmbientAlertPolling();
       renderActivationTracker(initial);
     } else {
       workspaceNameEl.textContent = 'No workspaces';

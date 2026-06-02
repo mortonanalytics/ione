@@ -77,6 +77,29 @@ impl WorkspaceRepo {
         Ok(())
     }
 
+    /// Shallow-merge `patch` (a JSON object) into `workspaces.metadata` at the
+    /// top level. Existing keys present in `patch` are overwritten; keys absent
+    /// from `patch` are preserved. Used by `PATCH /workspaces/:id` to install
+    /// `rules`, `default_map_center`, `product`, etc. without clobbering siblings.
+    pub async fn update_metadata(
+        &self,
+        id: Uuid,
+        patch: &serde_json::Value,
+    ) -> anyhow::Result<Workspace> {
+        sqlx::query_as::<_, Workspace>(
+            "UPDATE workspaces
+             SET metadata = COALESCE(metadata, '{}'::jsonb) || $2
+             WHERE id = $1
+             RETURNING id, org_id, parent_id, name, domain, lifecycle,
+                       end_condition, metadata, created_at, closed_at",
+        )
+        .bind(id)
+        .bind(patch)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to update workspace metadata")
+    }
+
     pub async fn close(&self, id: Uuid) -> anyhow::Result<Workspace> {
         sqlx::query_as::<_, Workspace>(
             "UPDATE workspaces

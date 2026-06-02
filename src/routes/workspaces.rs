@@ -90,6 +90,44 @@ pub async fn get_workspace(
     Ok(Json(body))
 }
 
+#[derive(Deserialize)]
+pub struct PatchWorkspaceRequest {
+    pub metadata: Value,
+}
+
+/// PATCH /api/v1/workspaces/:id
+///
+/// Shallow-merges the supplied `metadata` object into `workspaces.metadata`,
+/// the canonical home for `rules`, `default_map_center`, `product`, and (for the
+/// app-onramp artifact path) `view_config` installs. Returns the workspace with
+/// the recomputed `panels` summary, identical in shape to `GET`.
+pub async fn patch_workspace(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<PatchWorkspaceRequest>,
+) -> Result<Json<Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, id, ctx.org_id).await?;
+    if !req.metadata.is_object() {
+        return Err(AppError::BadRequest(
+            "metadata must be a JSON object".to_string(),
+        ));
+    }
+    let repo = WorkspaceRepo::new(state.pool.clone());
+    let ws = repo
+        .update_metadata(id, &req.metadata)
+        .await
+        .map_err(AppError::Internal)?;
+    let mut body = serde_json::to_value(ws).map_err(|e| AppError::Internal(e.into()))?;
+    if let Value::Object(map) = &mut body {
+        map.insert(
+            "panels".to_string(),
+            workspace_panels(&state.pool, id).await?,
+        );
+    }
+    Ok(Json(body))
+}
+
 /// Per-panel data-presence summary driving the adaptive nav. Cheap COUNT/EXISTS
 /// queries only — no peer fan-out. `hasActivePeer` is the presence proxy for the
 /// federation-only Map/Document panels (and inclusively surfaces peer-fed
@@ -109,6 +147,21 @@ async fn workspace_panels(pool: &sqlx::PgPool, workspace_id: Uuid) -> Result<Val
         "SELECT COUNT(*) FROM streams s
          JOIN connectors c ON c.id = s.connector_id
          WHERE c.workspace_id = $1 AND jsonb_exists(s.view_config, 'property_fields')",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
+
+    // Event layers are native point streams: view_config carries both a
+    // longitude and latitude pointer. Drives the Map tab for no-peer
+    // artifact-path workspaces (onramp ONR-004).
+    let event_layers: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM streams s
+         JOIN connectors c ON c.id = s.connector_id
+         WHERE c.workspace_id = $1
+           AND jsonb_exists(s.view_config, 'lon_pointer')
+           AND jsonb_exists(s.view_config, 'lat_pointer')",
     )
     .bind(workspace_id)
     .fetch_one(pool)
@@ -140,6 +193,7 @@ async fn workspace_panels(pool: &sqlx::PgPool, workspace_id: Uuid) -> Result<Val
     Ok(json!({
         "charts": charts,
         "tables": tables,
+        "eventLayers": event_layers,
         "hasActivePeer": has_active_peer,
         "approvalsPending": approvals_pending,
     }))
