@@ -44,6 +44,7 @@ pub mod oauth;
 pub mod peers;
 pub mod pipeline_events;
 pub mod public_issuers;
+pub mod rule_diagnostics;
 pub mod signals;
 pub mod survivors;
 pub mod table_data;
@@ -185,6 +186,10 @@ pub fn router(state: AppState) -> Router {
             put(connectors::put_stream_view_config),
         )
         .route("/api/v1/workspaces/:id/signals", get(signals::list_signals))
+        .route(
+            "/api/v1/workspaces/:id/rule-diagnostics",
+            get(rule_diagnostics::get_diagnostics),
+        )
         .route(
             "/api/v1/workspaces/:id/survivors",
             get(survivors::list_survivors),

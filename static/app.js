@@ -324,6 +324,10 @@ function listSignals(workspaceId, source, severity) {
   return apiFetch(url);
 }
 
+function getRuleDiagnostics(workspaceId) {
+  return apiFetch('/api/v1/workspaces/' + workspaceId + '/rule-diagnostics', { skipErrorToast: true });
+}
+
 /* ── Render helpers ── */
 
 function formatDate(iso) {
@@ -3077,6 +3081,10 @@ function handlePipelineEvent(ev) {
       acProgressHint.textContent = 'Still waiting — this can take up to a minute on a cold Ollama.';
     }
   }
+
+  if (ev.stage === 'rule_diagnostic' && activeTab === 'signals') {
+    refreshRuleDiagnostics();
+  }
 }
 
 /* ── Build stream sub-list ── */
@@ -3634,6 +3642,7 @@ const signalsFilterSource   = document.getElementById('signals-filter-source');
 const signalsFilterSeverity = document.getElementById('signals-filter-severity');
 const signalsRefreshBtn     = document.getElementById('signals-refresh-btn');
 const signalsStatusEl       = document.getElementById('signals-status');
+const ruleDiagnosticsEl     = document.getElementById('rule-diagnostics');
 const signalListEl          = document.getElementById('signal-list');
 
 let signalsPollTimer = null;
@@ -3736,6 +3745,103 @@ function buildSignalCard(signal) {
   return li;
 }
 
+function diagnosticIsBroken(item) {
+  return item.status && item.status !== 'ok' && item.status !== 'no_events';
+}
+
+function diagnosticStatusLabel(status) {
+  const labels = {
+    ok: 'Active',
+    no_events: 'No events',
+    stream_not_found: 'Stream missing',
+    parse_error: 'Rule parse error',
+    type_mismatch: 'Type mismatch',
+    rules_unparseable: 'Rules invalid',
+  };
+  return labels[status] || status || 'Unknown';
+}
+
+function renderRuleDiagnostics(data) {
+  if (!ruleDiagnosticsEl) return;
+  const items = data?.items || [];
+  ruleDiagnosticsEl.innerHTML = '';
+  ruleDiagnosticsEl.hidden = items.length === 0;
+  if (items.length === 0) return;
+
+  const header = document.createElement('div');
+  header.className = 'rule-diagnostics-header';
+  const title = document.createElement('strong');
+  title.textContent = 'Rule diagnostics';
+  header.appendChild(title);
+  if (data.evaluatedAt) {
+    const when = document.createElement('span');
+    when.textContent = formatDateTime(data.evaluatedAt);
+    header.appendChild(when);
+  }
+  ruleDiagnosticsEl.appendChild(header);
+
+  const list = document.createElement('ul');
+  list.className = 'rule-diagnostics-list';
+  items.forEach((item) => {
+    const li = document.createElement('li');
+    li.className = 'rule-diagnostic-item' + (diagnosticIsBroken(item) ? ' rule-diagnostic-item--warning' : '');
+
+    const top = document.createElement('div');
+    top.className = 'rule-diagnostic-top';
+    const status = document.createElement('span');
+    status.className = 'rule-diagnostic-status';
+    status.textContent = (diagnosticIsBroken(item) ? 'Warning: ' : '') + diagnosticStatusLabel(item.status);
+    top.appendChild(status);
+
+    const name = document.createElement('span');
+    name.className = 'rule-diagnostic-name';
+    name.textContent = item.ruleTitle || item.stream || 'rules';
+    top.appendChild(name);
+    li.appendChild(top);
+
+    const meta = document.createElement('div');
+    meta.className = 'rule-diagnostic-meta';
+    meta.textContent = `${item.eventsEvaluated || 0} events, ${item.matchCount || 0} matches`;
+    li.appendChild(meta);
+
+    if (Array.isArray(item.skipReasons) && item.skipReasons.length > 0) {
+      const reasons = document.createElement('ul');
+      reasons.className = 'rule-diagnostic-reasons';
+      item.skipReasons.forEach((reason) => {
+        const reasonEl = document.createElement('li');
+        reasonEl.textContent = `${reason.code}: ${reason.detail} (${reason.count})`;
+        reasons.appendChild(reasonEl);
+      });
+      li.appendChild(reasons);
+    }
+
+    if (item.status === 'no_events') {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'rule-diagnostic-action';
+      btn.textContent = 'Open Connectors';
+      btn.addEventListener('click', () => activateTab('connectors'));
+      li.appendChild(btn);
+    }
+
+    list.appendChild(li);
+  });
+  ruleDiagnosticsEl.appendChild(list);
+}
+
+async function refreshRuleDiagnostics() {
+  if (!activeWorkspace || !ruleDiagnosticsEl) return;
+  const workspaceId = activeWorkspace.id;
+  try {
+    const diagnostics = await getRuleDiagnostics(workspaceId);
+    if (!activeWorkspace || activeWorkspace.id !== workspaceId) return;
+    renderRuleDiagnostics(diagnostics);
+  } catch (_err) {
+    if (!activeWorkspace || activeWorkspace.id !== workspaceId) return;
+    ruleDiagnosticsEl.hidden = true;
+  }
+}
+
 async function loadSignals() {
   if (!activeWorkspace) return;
 
@@ -3751,6 +3857,7 @@ async function loadSignals() {
   const severity = signalsFilterSeverity.value;
 
   try {
+    refreshRuleDiagnostics();
     const data = await listSignals(activeWorkspace.id, source, severity);
     const items = data.items || [];
     signalListEl.innerHTML = '';

@@ -11,7 +11,7 @@ use crate::{
     error::AppError,
     middleware::session_cookie::SessionId,
     models::WorkspaceLifecycle,
-    repos::{PeerRepo, RoleRepo, WorkspaceRepo},
+    repos::{PeerRepo, RoleRepo, RuleDiagnosticsRepo, WorkspaceRepo},
     state::AppState,
 };
 
@@ -95,6 +95,14 @@ pub struct PatchWorkspaceRequest {
     pub metadata: Value,
 }
 
+#[derive(Deserialize)]
+struct RuleShape {
+    stream: String,
+    when: String,
+    severity: String,
+    title: String,
+}
+
 /// PATCH /api/v1/workspaces/:id
 ///
 /// Shallow-merges the supplied `metadata` object into `workspaces.metadata`,
@@ -113,11 +121,53 @@ pub async fn patch_workspace(
             "metadata must be a JSON object".to_string(),
         ));
     }
+    let updates_rules = req.metadata.get("rules").is_some();
+    if let Some(rules) = req.metadata.get("rules") {
+        let parsed: Vec<RuleShape> = serde_json::from_value(rules.clone()).map_err(|err| {
+            AppError::UnprocessableEntityJson(json!({
+                "error": "invalid_rules",
+                "detail": err.to_string(),
+            }))
+        })?;
+        for (i, rule) in parsed.iter().enumerate() {
+            if rule.stream.trim().is_empty()
+                || rule.when.trim().is_empty()
+                || rule.severity.trim().is_empty()
+                || rule.title.trim().is_empty()
+            {
+                return Err(AppError::UnprocessableEntityJson(json!({
+                    "error": "invalid_rule",
+                    "ruleIndex": i,
+                    "detail": "stream, when, severity, and title are required",
+                })));
+            }
+            if !matches!(rule.severity.as_str(), "routine" | "flagged" | "command") {
+                return Err(AppError::UnprocessableEntityJson(json!({
+                    "error": "invalid_rule",
+                    "ruleIndex": i,
+                    "detail": "severity must be routine, flagged, or command",
+                })));
+            }
+            evalexpr::build_operator_tree(&rule.when).map_err(|err| {
+                AppError::UnprocessableEntityJson(json!({
+                    "error": "invalid_rule_expression",
+                    "ruleIndex": i,
+                    "detail": err.to_string(),
+                }))
+            })?;
+        }
+    }
     let repo = WorkspaceRepo::new(state.pool.clone());
     let ws = repo
         .update_metadata(id, &req.metadata)
         .await
         .map_err(AppError::Internal)?;
+    if updates_rules {
+        RuleDiagnosticsRepo::new(state.pool.clone())
+            .clear(id)
+            .await
+            .map_err(AppError::Internal)?;
+    }
     let mut body = serde_json::to_value(ws).map_err(|e| AppError::Internal(e.into()))?;
     if let Value::Object(map) = &mut body {
         map.insert(

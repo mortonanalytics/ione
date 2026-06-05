@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, TimeZone, Utc};
 use reqwest::StatusCode;
@@ -44,8 +46,18 @@ struct GeoJsonPollConfig {
     max_items: Option<usize>,
     #[serde(default)]
     view_config: Option<Value>,
+    #[serde(default)]
+    field_types: Option<HashMap<String, FieldType>>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldType {
+    Number,
+    String,
+    Boolean,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -320,6 +332,12 @@ impl GeoJsonPollConfig {
         if let Some(view_config) = &self.view_config {
             validate_view_config(view_config).map_err(|err| anyhow!(err))?;
         }
+        if let Some(field_types) = &self.field_types {
+            for pointer in field_types.keys() {
+                validate_json_pointer(pointer)
+                    .context("geojson_poll field_types key is not a valid JSON Pointer")?;
+            }
+        }
         Ok(())
     }
 }
@@ -383,5 +401,32 @@ mod tests {
             .observed_at(&json!({ "properties": { "time": 1779991039445_i64 } }))
             .expect("timestamp");
         assert_eq!(dt.to_rfc3339(), "2026-05-28T17:57:19.445+00:00");
+    }
+
+    #[test]
+    fn geojson_poll_field_types_validate_json_pointers() {
+        let valid = json!({
+            "kind": "geojson_poll",
+            "feed_url": "http://127.0.0.1:1/feed",
+            "stream_name": "earthquakes",
+            "observed_at_format": "none",
+            "field_types": {
+                "/properties/mag": "number",
+                "/properties/code": "string",
+                "/properties/reviewed": "boolean"
+            }
+        });
+        GeoJsonPollConnector::from_config(&valid).expect("valid field_types");
+
+        let invalid = json!({
+            "kind": "geojson_poll",
+            "feed_url": "http://127.0.0.1:1/feed",
+            "stream_name": "earthquakes",
+            "observed_at_format": "none",
+            "field_types": {
+                "properties/mag": "number"
+            }
+        });
+        assert!(GeoJsonPollConnector::from_config(&invalid).is_err());
     }
 }

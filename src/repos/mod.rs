@@ -16,6 +16,7 @@ pub mod pending_peer_tool_call_repo;
 pub mod pipeline_event_repo;
 pub mod role_repo;
 pub mod routing_decision_repo;
+pub mod rule_diagnostics_repo;
 pub mod signal_repo;
 pub mod stream_event_aggregate_repo;
 pub mod stream_event_repo;
@@ -45,6 +46,7 @@ pub use pending_peer_tool_call_repo::{PendingPeerToolCallRepo, PendingPeerToolCa
 pub use pipeline_event_repo::{EventFilter, PipelineEventRepo};
 pub use role_repo::RoleRepo;
 pub use routing_decision_repo::RoutingDecisionRepo;
+pub use rule_diagnostics_repo::RuleDiagnosticsRepo;
 pub use signal_repo::SignalRepo;
 pub use stream_event_aggregate_repo::StreamEventAggregateRepo;
 pub use stream_event_repo::{InsertOutcome, SortTarget, StreamEventRepo, TableQuery};
