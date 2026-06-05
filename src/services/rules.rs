@@ -400,30 +400,32 @@ fn populate_context(
     value: &serde_json::Value,
     declared: &[(String, FieldType)],
 ) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                let key = format!("{}.{}", prefix, k);
-                let child_pointer = format!("{}/{}", pointer, escape_pointer_part(k));
-                populate_context(ctx, &key, &child_pointer, v, declared);
-            }
+    if let serde_json::Value::Object(map) = value {
+        for (k, v) in map {
+            let key = format!("{}.{}", prefix, k);
+            let child_pointer = format!("{}/{}", pointer, escape_pointer_part(k));
+            populate_context(ctx, &key, &child_pointer, v, declared);
         }
+        return;
+    }
+
+    // Scalar leaves: declared fields are set explicitly (with their declared
+    // type) by the caller, so skip them here to avoid a wrong-typed entry.
+    if is_declared_pointer(pointer, declared) {
+        return;
+    }
+
+    match value {
         serde_json::Value::Number(n) => {
-            if !is_declared_pointer(pointer, declared) {
-                if let Some(f) = n.as_f64() {
-                    let _ = ctx.set_value(prefix.to_string(), EvalValue::Float(f));
-                }
+            if let Some(f) = n.as_f64() {
+                let _ = ctx.set_value(prefix.to_string(), EvalValue::Float(f));
             }
         }
         serde_json::Value::String(s) => {
-            if !is_declared_pointer(pointer, declared) {
-                let _ = ctx.set_value(prefix.to_string(), EvalValue::String(s.clone()));
-            }
+            let _ = ctx.set_value(prefix.to_string(), EvalValue::String(s.clone()));
         }
         serde_json::Value::Bool(b) => {
-            if !is_declared_pointer(pointer, declared) {
-                let _ = ctx.set_value(prefix.to_string(), EvalValue::Boolean(*b));
-            }
+            let _ = ctx.set_value(prefix.to_string(), EvalValue::Boolean(*b));
         }
         _ => {}
     }
