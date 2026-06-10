@@ -62,7 +62,7 @@ impl PendingPeerToolCallRepo {
                (workspace_id, peer_id, artifact_id, approval_id, namespaced_tool,
                 arguments_ciphertext, arguments_digest, requested_by, expires_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-             ON CONFLICT (workspace_id, arguments_digest) WHERE status IN ('pending', 'approved')
+             ON CONFLICT (workspace_id, peer_id, arguments_digest) WHERE status IN ('pending', 'approved')
              DO UPDATE SET namespaced_tool = pending_peer_tool_calls.namespaced_tool
              RETURNING id, workspace_id, peer_id, artifact_id, approval_id, namespaced_tool,
                        arguments_ciphertext, arguments_digest, requested_by, status,

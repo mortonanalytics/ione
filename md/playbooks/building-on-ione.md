@@ -93,6 +93,8 @@ A datum lands in a panel **only** if it is either (1) a `stream_event` with a `v
 
 `chart_type ∈ {line, bar, area, scatter, histogram, gauge, qq}` — but note: the **peer `resources/read` path supports all of these today; the artifact `view_config` path natively renders line/aggregate panels only** (gauges and arbitrary specs await `view_config.charts[]`, ONR-005). Choose the peer path if you need a gauge now.
 
+**Rule conditions are NOT JSON Pointers.** RFC 6901 pointers (`/properties/mag`) apply only to `view_config` field mapping above. Rule `when` expressions in `workspace.metadata.rules[]` use **dotted evalexpr keys** — e.g. `payload.properties.mag >= 6.0`, which resolves nested objects at arbitrary depth. Array indices are not reachable in rules because arrays are unmapped when the payload is flattened into evalexpr bindings.
+
 **Hard constraints (do not fight these):**
 - IONe **never proxies** tiles or documents. `tile_url` and `download_url` must be **browser-reachable https**, valid ≥5 min, no IONe-injected auth. Static demos: host overlays as public/presigned URLs (or use static-overlay support, ONR-004, once landed).
 - Tables are server-paginated for the stream path, client-paginated for the peer path.
