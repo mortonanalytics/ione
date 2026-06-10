@@ -264,6 +264,13 @@ fn can_refresh(peer: &Peer) -> bool {
     peer.refresh_token_ciphertext.is_some() && peer.oauth_client_id.is_some()
 }
 
+/// Throttle inbound peer notifications using the peer's governor. Returns false
+/// when the peer has exceeded `max_per_minute` notifications in the trailing
+/// minute, so callers can drop the flood instead of landing it in `stream_events`.
+pub fn protocol_notification_allowed(peer_id: uuid::Uuid, max_per_minute: usize) -> bool {
+    governor_for(peer_id).allow_protocol_notification(max_per_minute)
+}
+
 fn governor_for(peer_id: uuid::Uuid) -> Arc<crate::services::peer_governor::PeerGovernor> {
     PEER_GOVERNORS
         .entry(peer_id)

@@ -379,6 +379,24 @@ pub async fn dispatch_notification(
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let max_per_minute = std::env::var("IONE_PEER_NOTIFICATIONS_PER_MIN")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(120);
+    if !crate::services::peer_tokens::protocol_notification_allowed(peer_id, max_per_minute) {
+        AuditEventRepo::new(state.pool.clone())
+            .insert(
+                None,
+                ActorKind::Peer,
+                &peer_id.to_string(),
+                "peer_notification_throttled",
+                "peer",
+                Some(peer_id),
+                json!({ "method": method, "max_per_minute": max_per_minute }),
+            )
+            .await?;
+        return Ok(());
+    }
     match method {
         "notifications/tools/list_changed" | "tools/list_changed" => {
             refresh_manifest_if_changed(state, peer_id).await?;

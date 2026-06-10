@@ -137,6 +137,17 @@ pub async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
         warn!(error = %e, "pending peer tool-call expiry failed");
     }
 
+    // Evict idle server-side MCP sessions so the in-memory map cannot grow
+    // unbounded from peers that connect but never send session-end.
+    let mcp_session_ttl: i64 = std::env::var("IONE_MCP_SESSION_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3600);
+    let now = chrono::Utc::now();
+    state
+        .mcp_sessions
+        .retain(|_, value| !crate::mcp_server::mcp_session_expired(value, now, mcp_session_ttl));
+
     refresh_active_peer_manifests(state).await;
 
     // List all workspaces

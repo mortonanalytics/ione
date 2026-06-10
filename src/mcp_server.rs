@@ -825,6 +825,7 @@ async fn handle_initialize(
             "protocol": if requested_protocol <= MCP_PROTOCOL { requested_protocol } else { MCP_PROTOCOL },
             "workspace_id": workspace_id,
             "created_at": chrono::Utc::now(),
+            "last_seen": chrono::Utc::now(),
         }),
     );
     JsonRpcResponse::ok(
@@ -1141,10 +1142,37 @@ fn require_mcp_session(state: &AppState, headers: &HeaderMap) -> anyhow::Result<
         .get(MCP_SESSION_ID)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| anyhow::anyhow!("MCP-Session-Id is required after initialize"))?;
-    if !state.mcp_sessions.contains_key(session_id) {
-        anyhow::bail!("MCP session not found");
+    match state.mcp_sessions.get_mut(session_id) {
+        Some(mut entry) => {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("last_seen".to_string(), json!(chrono::Utc::now()));
+            }
+        }
+        None => anyhow::bail!("MCP session not found"),
     }
     Ok(session_id.to_string())
+}
+
+/// True when a stored MCP session value's `last_seen` (falling back to
+/// `created_at`) is older than `ttl_secs`. Pure helper so the scheduler sweep
+/// is unit-testable without a live session map.
+pub fn mcp_session_expired(
+    value: &Value,
+    now: chrono::DateTime<chrono::Utc>,
+    ttl_secs: i64,
+) -> bool {
+    let last = value
+        .get("last_seen")
+        .or_else(|| value.get("created_at"))
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    match last {
+        Some(ts) => now.signed_duration_since(ts).num_seconds() >= ttl_secs,
+        // Missing/unparseable timestamp: treat as expired so malformed entries
+        // cannot leak forever.
+        None => true,
+    }
 }
 
 /// Resolve a workspace_id only from explicit params or session state — never from
