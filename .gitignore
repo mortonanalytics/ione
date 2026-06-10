@@ -8,3 +8,4 @@
 /.playwright-mcp
 /playwright-report
 /.claude/state
+.claude/settings.json

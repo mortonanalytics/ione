@@ -7,6 +7,8 @@ pub struct Config {
     pub ollama_base_url: String,
     pub ollama_model: String,
     pub static_dir: PathBuf,
+    pub allow_private_peers: bool,
+    pub private_peer_allowlist: Vec<String>,
 }
 
 impl Config {
@@ -28,8 +30,22 @@ impl Config {
                 .or_else(|_| std::env::var("STATIC_DIR"))
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("./static")),
+            allow_private_peers: env_bool("IONE_ALLOW_PRIVATE_PEERS"),
+            private_peer_allowlist: std::env::var("IONE_PRIVATE_PEER_ALLOWLIST")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
         }
     }
+}
+
+fn env_bool(key: &str) -> bool {
+    std::env::var(key)
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
 fn validate_static_bearer_mode() {

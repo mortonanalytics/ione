@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Activation tracker UI with demo→real CTA.
 - Connector timeline UI + post-create progress view via SSE.
 - Guided connector wizard UI (provider grid + Test connection).
+- Rule-engine offline reliability: rule-sourced signals now create deterministic survivors, expose rule diagnostics, support declared GeoJSON field types, and validate patched rules.
 
 ### Changed
 
@@ -38,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 0014_funnel_events
 - 0015_oauth
 - 0016_peers_oauth
+- 0035_rule_diagnostics
+- 0036_pipeline_events_rule_diagnostic_stage
 
 ## [0.1.0] — 2026-04-20
 

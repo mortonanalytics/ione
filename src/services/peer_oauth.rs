@@ -50,13 +50,9 @@ pub async fn begin_federation(
     peer_url: &str,
 ) -> Result<BeginResp, AppError> {
     let discovery_url = format!("{peer_url}/.well-known/oauth-authorization-server");
-    let disc_value = crate::util::safe_http::fetch_public_metadata(
-        &discovery_url,
-        64_000,
-        std::time::Duration::from_secs(5),
-    )
-    .await
-    .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
+    let disc_value = fetch_peer_metadata(state, peer_url, &discovery_url)
+        .await
+        .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
     let disc: PeerDiscovery = serde_json::from_value(disc_value)
         .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
     verify_peer_endpoint_hosts(peer_url, &disc)?;
@@ -234,6 +230,37 @@ fn verify_peer_endpoint_hosts(peer_url: &str, disc: &PeerDiscovery) -> Result<()
         }
     }
     Ok(())
+}
+
+pub async fn fetch_peer_metadata(
+    state: &AppState,
+    peer_url: &str,
+    metadata_url: &str,
+) -> Result<serde_json::Value> {
+    match crate::util::safe_http::fetch_public_metadata(
+        metadata_url,
+        64_000,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    {
+        Ok(value) => return Ok(value),
+        Err(public_error) => {
+            crate::services::peer::validate_mcp_url(peer_url)
+                .await
+                .with_context(|| format!("public metadata fetch failed: {public_error}"))?;
+        }
+    }
+
+    let resp = state
+        .http
+        .get(metadata_url)
+        .send()
+        .await
+        .context("peer metadata request failed")?
+        .error_for_status()
+        .context("peer metadata status")?;
+    resp.json().await.context("peer metadata json")
 }
 
 fn generate_opaque(bytes: usize) -> String {

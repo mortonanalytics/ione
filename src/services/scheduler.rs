@@ -12,8 +12,8 @@ use tracing::{info, warn};
 
 use crate::{
     models::{PipelineEventInput, PipelineEventStage},
-    repos::PipelineEventRepo,
     repos::{ConnectorRepo, InsertOutcome, StreamEventRepo, StreamRepo},
+    repos::{PipelineEventRepo, RuleDiagnosticsRepo},
     services::pipeline_bus::PipelineBus,
     state::AppState,
 };
@@ -130,6 +130,14 @@ pub async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
     {
         warn!(error = %e, "webhook dedup cleanup failed");
     }
+    if let Err(e) = crate::repos::PendingPeerToolCallRepo::new(state.pool.clone())
+        .expire_due()
+        .await
+    {
+        warn!(error = %e, "pending peer tool-call expiry failed");
+    }
+
+    refresh_active_peer_manifests(state).await;
 
     // List all workspaces
     let workspaces: Vec<(uuid::Uuid, uuid::Uuid)> =
@@ -158,8 +166,51 @@ pub async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
         }
 
         // (b) Run rules engine
-        let rules = super::rules::evaluate_workspace(&state.pool, workspace_id).await;
-        handle_signal_stage(state, workspace_id, &mut progress, "rules", "rule", rules).await;
+        match super::rules::evaluate_workspace(&state.pool, workspace_id).await {
+            Ok(report) => {
+                let diagnostics_repo = RuleDiagnosticsRepo::new(state.pool.clone());
+                if report.diagnostics.is_empty() {
+                    if let Err(e) = diagnostics_repo.clear(workspace_id).await {
+                        warn!(workspace_id = %workspace_id, error = %e, "failed to clear rule diagnostics");
+                    }
+                } else {
+                    if let Err(e) = diagnostics_repo
+                        .upsert(workspace_id, &report.diagnostics)
+                        .await
+                    {
+                        warn!(workspace_id = %workspace_id, error = %e, "failed to upsert rule diagnostics");
+                    }
+                    emit_stage(
+                        &state.pool,
+                        &state.pipeline_bus,
+                        workspace_id,
+                        None,
+                        None,
+                        PipelineEventStage::RuleDiagnostic,
+                        Some(json!({
+                            "rules": report.diagnostics.len(),
+                            "inserted": report.inserted,
+                        })),
+                    )
+                    .await;
+                }
+                handle_signal_count(state, workspace_id, &mut progress, "rule", report.inserted)
+                    .await;
+            }
+            Err(e) => {
+                emit_error_stage(
+                    &state.pool,
+                    &state.pipeline_bus,
+                    workspace_id,
+                    None,
+                    None,
+                    "rules",
+                    &e,
+                )
+                .await;
+                warn!(workspace_id = %workspace_id, error = %e, stage = "rules", "signal stage error");
+            }
+        }
 
         // (c) Run generator (unless IONE_SKIP_LIVE=1)
         if !skip_live {
@@ -195,6 +246,26 @@ pub async fn run_tick(state: &AppState, skip_live: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn refresh_active_peer_manifests(state: &AppState) {
+    let peers = match crate::repos::PeerRepo::new(state.pool.clone()).list().await {
+        Ok(peers) => peers,
+        Err(e) => {
+            warn!(error = %e, "scheduler peer manifest list failed");
+            return;
+        }
+    };
+    for peer in peers
+        .into_iter()
+        .filter(|peer| peer.status == crate::models::PeerStatus::Active)
+    {
+        match crate::services::federation::refresh_manifest_if_changed(state, peer.id).await {
+            Ok(true) => info!(peer_id = %peer.id, "peer manifest changed"),
+            Ok(false) => {}
+            Err(e) => warn!(peer_id = %peer.id, error = %e, "peer manifest refresh failed"),
+        }
+    }
 }
 
 pub async fn run_delivery_for_workspace(state: &AppState, workspace_id: uuid::Uuid) {
@@ -261,11 +332,7 @@ async fn handle_signal_stage(
     result: anyhow::Result<usize>,
 ) {
     match result {
-        Ok(n) if n > 0 => {
-            info!(workspace_id = %workspace_id, signals = n, source, "signal stage produced signals");
-            emit_first_signal_for_source(state, workspace_id, progress, source, n).await;
-        }
-        Ok(_) => {}
+        Ok(n) => handle_signal_count(state, workspace_id, progress, source, n).await,
         Err(e) => {
             emit_error_stage(
                 &state.pool,
@@ -279,6 +346,19 @@ async fn handle_signal_stage(
             .await;
             warn!(workspace_id = %workspace_id, error = %e, stage = stage_name, "signal stage error");
         }
+    }
+}
+
+async fn handle_signal_count(
+    state: &AppState,
+    workspace_id: uuid::Uuid,
+    progress: &mut PipelineProgress,
+    source: &'static str,
+    inserted_count: usize,
+) {
+    if inserted_count > 0 {
+        info!(workspace_id = %workspace_id, signals = inserted_count, source, "signal stage produced signals");
+        emit_first_signal_for_source(state, workspace_id, progress, source, inserted_count).await;
     }
 }
 

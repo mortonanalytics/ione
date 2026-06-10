@@ -14,6 +14,9 @@ pub enum AppError {
     #[error("unprocessable entity: {0}")]
     UnprocessableEntity(String),
 
+    #[error("unprocessable entity: {0}")]
+    UnprocessableEntityJson(serde_json::Value),
+
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -82,6 +85,9 @@ impl IntoResponse for AppError {
                 })),
             )
                 .into_response(),
+            AppError::UnprocessableEntityJson(value) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, Json(value)).into_response()
+            }
             AppError::NotFound(msg) => (
                 StatusCode::NOT_FOUND,
                 Json(json!({

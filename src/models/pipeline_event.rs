@@ -14,6 +14,7 @@ pub enum PipelineEventStage {
     FirstDecision,
     Stall,
     Error,
+    RuleDiagnostic,
 }
 
 impl PipelineEventStage {
@@ -26,6 +27,7 @@ impl PipelineEventStage {
             PipelineEventStage::FirstDecision => "first_decision",
             PipelineEventStage::Stall => "stall",
             PipelineEventStage::Error => "error",
+            PipelineEventStage::RuleDiagnostic => "rule_diagnostic",
         }
     }
 }

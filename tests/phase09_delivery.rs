@@ -231,14 +231,14 @@ async fn insert_routing_decision(
 
 // ─── 1. artifact_kind_enum_variants ───────────────────────────────────────────
 
-/// Contract § Enums — `artifact_kind` must have exactly 5 variants in order.
+/// Contract § Enums — `artifact_kind` must have exactly 6 variants in order.
 ///
 /// Target:
 ///   - contract § Enums → artifact_kind: briefing | notification_draft |
-///     resource_order | message | report
-///   - plan Phase 9 migration 0009
+///     resource_order | message | report (migration 0009)
+///   - tool_call appended by migration 0034 (MCP federation pending peer tool calls)
 ///
-/// REASON: requires DATABASE_URL and migration 0009 (artifact_kind enum).
+/// REASON: requires DATABASE_URL and migrations 0009 + 0034 (artifact_kind enum).
 #[tokio::test]
 #[ignore]
 async fn artifact_kind_enum_variants() {
@@ -261,8 +261,9 @@ async fn artifact_kind_enum_variants() {
             "resource_order",
             "message",
             "report",
+            "tool_call",
         ],
-        "artifact_kind enum must have exactly 5 variants in declaration order, got {:?}",
+        "artifact_kind enum must have exactly 6 variants in declaration order, got {:?}",
         variants
     );
 }

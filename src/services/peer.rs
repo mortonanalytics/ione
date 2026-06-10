@@ -1,3 +1,5 @@
+use std::{collections::HashSet, net::IpAddr};
+
 use anyhow::Context;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -14,7 +16,7 @@ pub async fn register_peer(
     issuer_id: Uuid,
     sharing_policy: serde_json::Value,
 ) -> anyhow::Result<Peer> {
-    validate_mcp_url(mcp_url)?;
+    validate_mcp_url_syntax(mcp_url)?;
     validate_name(name)?;
 
     let issuer_exists: bool = sqlx::query_scalar(
@@ -30,8 +32,17 @@ pub async fn register_peer(
         anyhow::bail!("issuer_id '{}' not found in caller org", issuer_id);
     }
 
+    validate_mcp_url(mcp_url).await?;
+
     let repo = PeerRepo::new(pool.clone());
-    repo.insert(name, mcp_url, issuer_id, sharing_policy).await
+    let peer = repo
+        .insert(name, mcp_url, issuer_id, sharing_policy)
+        .await?;
+    let prefix = derive_prefix_for_org(pool, org_id, name).await?;
+    repo.set_tool_prefix(peer.id, &prefix).await?;
+    repo.get(peer.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("inserted peer disappeared"))
 }
 
 /// When a workspace wants to consume a peer, create a ConnectorKind::Mcp row in that
@@ -43,16 +54,8 @@ pub async fn auto_create_connector_for_peer(
 ) -> anyhow::Result<Connector> {
     let connector_repo = ConnectorRepo::new(pool.clone());
 
-    let bearer_token = if let Some(ciphertext) = peer.access_token_ciphertext.as_deref() {
-        crate::util::token_crypto::decrypt_token(ciphertext)
-            .context("failed to decrypt peer access token")?
-    } else {
-        std::env::var("IONE_OAUTH_STATIC_BEARER").unwrap_or_default()
-    };
-
     let config = serde_json::json!({
         "mcp_url": peer.mcp_url,
-        "bearer_token": bearer_token,
         "peer_id": peer.id,
         "workspace_id": workspace_id,
     });
@@ -116,7 +119,22 @@ pub enum PolicyDecision {
     Blocked(String),
 }
 
-fn validate_mcp_url(url: &str) -> anyhow::Result<()> {
+pub async fn validate_mcp_url(url: &str) -> anyhow::Result<()> {
+    validate_mcp_url_syntax(url)?;
+    if private_peers_allowed() && private_peer_allowlisted(url)? {
+        let parsed = crate::util::url_guard::parse_and_validate_url(url, "mcp_url")?;
+        if parsed.host_str().is_some() {
+            return Ok(());
+        }
+    }
+    crate::util::safe_http::ensure_public_url(url)
+        .await
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(())
+}
+
+fn validate_mcp_url_syntax(url: &str) -> anyhow::Result<()> {
     if url.is_empty() {
         anyhow::bail!("mcp_url must not be empty");
     }
@@ -141,4 +159,122 @@ fn validate_name(name: &str) -> anyhow::Result<()> {
 
 pub fn issuer_repo(pool: PgPool) -> TrustIssuerRepo {
     TrustIssuerRepo::new(pool)
+}
+
+fn private_peers_allowed() -> bool {
+    std::env::var("IONE_ALLOW_PRIVATE_PEERS")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+fn private_peer_allowlisted(raw: &str) -> anyhow::Result<bool> {
+    let url = url::Url::parse(raw).context("invalid mcp_url")?;
+    let Some(host) = url.host_str() else {
+        return Ok(false);
+    };
+    let entries: Vec<String> = std::env::var("IONE_PRIVATE_PEER_ALLOWLIST")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if entries.is_empty() {
+        return Ok(false);
+    }
+    let host_lower = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    for entry in entries {
+        if entry == host_lower || (entry.starts_with('.') && host_lower.ends_with(&entry)) {
+            return Ok(true);
+        }
+        if cidr_contains(&entry, &host_lower) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn cidr_contains(cidr: &str, host: &str) -> bool {
+    let Some((network, bits)) = cidr.split_once('/') else {
+        return false;
+    };
+    let Ok(prefix_bits) = bits.parse::<u32>() else {
+        return false;
+    };
+    let Ok(network_ip) = network.parse::<IpAddr>() else {
+        return false;
+    };
+    let Ok(host_ip) = host.parse::<IpAddr>() else {
+        return false;
+    };
+    match (network_ip, host_ip) {
+        (IpAddr::V4(network), IpAddr::V4(host)) if prefix_bits <= 32 => {
+            let mask = if prefix_bits == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix_bits)
+            };
+            (u32::from(network) & mask) == (u32::from(host) & mask)
+        }
+        (IpAddr::V6(network), IpAddr::V6(host)) if prefix_bits <= 128 => {
+            let mask = if prefix_bits == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix_bits)
+            };
+            (u128::from(network) & mask) == (u128::from(host) & mask)
+        }
+        _ => false,
+    }
+}
+
+async fn derive_prefix_for_org(pool: &PgPool, org_id: Uuid, name: &str) -> anyhow::Result<String> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT tool_prefix FROM peers WHERE org_id = $1 AND tool_prefix IS NOT NULL",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to list peer tool prefixes")?;
+    let taken: HashSet<String> = rows.into_iter().collect();
+    Ok(crate::services::federation::derive_prefix(name, &taken))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::OnceLock;
+
+    fn env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn cidr_allowlist_matches_literal_private_ips() {
+        assert!(cidr_contains("10.0.0.0/8", "10.2.3.4"));
+        assert!(!cidr_contains("10.0.0.0/8", "192.168.1.4"));
+        assert!(cidr_contains("fd00::/8", "fd00::1"));
+    }
+
+    #[tokio::test]
+    async fn validate_mcp_url_rejects_link_local_even_when_private_peers_allowed() {
+        let _guard = env_lock().lock().await;
+        let old_allow = std::env::var("IONE_ALLOW_PRIVATE_PEERS").ok();
+        let old_list = std::env::var("IONE_PRIVATE_PEER_ALLOWLIST").ok();
+        std::env::set_var("IONE_ALLOW_PRIVATE_PEERS", "1");
+        std::env::set_var("IONE_PRIVATE_PEER_ALLOWLIST", "169.254.0.0/16");
+        let result = validate_mcp_url("http://169.254.169.254/mcp").await;
+        if let Some(value) = old_allow {
+            std::env::set_var("IONE_ALLOW_PRIVATE_PEERS", value);
+        } else {
+            std::env::remove_var("IONE_ALLOW_PRIVATE_PEERS");
+        }
+        if let Some(value) = old_list {
+            std::env::set_var("IONE_PRIVATE_PEER_ALLOWLIST", value);
+        } else {
+            std::env::remove_var("IONE_PRIVATE_PEER_ALLOWLIST");
+        }
+        assert!(result.is_err());
+    }
 }

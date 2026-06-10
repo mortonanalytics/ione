@@ -85,6 +85,7 @@
         <button id="tab-signals" role="tab" aria-selected="false" aria-controls="panel-signals" class="tab tab--ops">Signals</button>
         <button id="tab-survivors" role="tab" aria-selected="false" aria-controls="panel-survivors" class="tab tab--ops">Survivors</button>
         <button id="tab-approvals" role="tab" aria-selected="false" aria-controls="panel-approvals" class="tab tab--ops">Approvals <span id="approvals-badge" class="approvals-badge" hidden></span></button>
+        <button id="tab-audit" role="tab" aria-selected="false" aria-controls="panel-audit" class="tab tab--ops">Audit</button>
       </div>
 
       <!-- Chat panel -->
@@ -128,7 +129,13 @@
         </div>
         <div id="map-canvas-container" hidden>
           <div id="map-canvas" role="application" tabindex="0" aria-label="Interactive map"></div>
+          <aside id="map-detail-panel" aria-label="Event details" role="region" hidden>
+            <button type="button" id="map-detail-close" class="map-detail-close" aria-label="Close event details">×</button>
+            <h2 id="map-detail-title">Event</h2>
+            <dl id="map-detail-fields"></dl>
+          </aside>
           <section id="event-layer-legend" aria-label="Event layer legend" hidden></section>
+          <div id="event-feed-freshness" aria-live="polite" hidden></div>
           <div id="map-layer-control" role="region" aria-label="Map layers">
             <button id="map-layer-toggle" type="button" aria-expanded="true" aria-controls="map-layer-list">Layers</button>
             <div id="event-layer-status" aria-live="polite"></div>
@@ -299,6 +306,7 @@
           <button id="signals-refresh-btn" type="button" aria-label="Refresh signals">Refresh</button>
         </div>
         <div id="signals-status" aria-live="polite"></div>
+        <section id="rule-diagnostics" class="rule-diagnostics" aria-live="polite" hidden></section>
         <ul id="signal-list" role="list"></ul>
       </div>
 
@@ -323,7 +331,7 @@
       </div>
 
       <!-- Approvals panel -->
-      <div id="panel-approvals" role="tabpanel" aria-labelledby="tab-approvals" hidden>
+      <div id="panel-approvals" role="tabpanel" aria-labelledby="tab-approvals" tabindex="-1" hidden>
         <div id="approvals-toolbar">
           <select id="approvals-filter-status" aria-label="Filter by status">
             <option value="pending">Pending</option>
@@ -337,6 +345,25 @@
         <ul id="approval-list" role="list"></ul>
       </div>
 
+      <!-- Audit-trail panel -->
+      <div id="panel-audit" role="tabpanel" aria-labelledby="tab-audit" hidden>
+        <div id="audit-toolbar">
+          <button id="audit-refresh-btn" type="button" aria-label="Refresh audit trail">Refresh</button>
+        </div>
+        <div id="audit-status" aria-live="polite"></div>
+        <table id="audit-table">
+          <thead>
+            <tr>
+              <th scope="col">Stage</th>
+              <th scope="col">Artifact</th>
+              <th scope="col">Actor</th>
+              <th scope="col">Timestamp</th>
+            </tr>
+          </thead>
+          <tbody id="audit-rows"></tbody>
+        </table>
+      </div>
+
       <!-- Connectors panel -->
       <div id="panel-connectors" role="tabpanel" aria-labelledby="tab-connectors" hidden>
         <div id="connectors-header">
@@ -345,6 +372,14 @@
         </div>
         <div id="connectors-status" aria-live="polite"></div>
         <ul id="connector-list" role="list"></ul>
+        <section id="peer-browser" class="peer-browser" aria-labelledby="peer-browser-title">
+          <header class="peer-browser-header">
+            <h2 id="peer-browser-title">Peers</h2>
+            <button id="peer-browser-refresh" type="button">Refresh</button>
+          </header>
+          <div id="peer-browser-status" aria-live="polite"></div>
+          <ul id="peer-browser-list" class="peer-browser-list" role="list"></ul>
+        </section>
       </div>
     </div>
   </div>

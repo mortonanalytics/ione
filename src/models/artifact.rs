@@ -11,6 +11,7 @@ pub enum ArtifactKind {
     ResourceOrder,
     Message,
     Report,
+    ToolCall,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]

@@ -44,6 +44,7 @@ pub mod oauth;
 pub mod peers;
 pub mod pipeline_events;
 pub mod public_issuers;
+pub mod rule_diagnostics;
 pub mod signals;
 pub mod survivors;
 pub mod table_data;
@@ -123,7 +124,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces",
             get(workspaces::list_workspaces).post(workspaces::create_workspace),
         )
-        .route("/api/v1/workspaces/:id", get(workspaces::get_workspace))
+        .route(
+            "/api/v1/workspaces/:id",
+            get(workspaces::get_workspace).patch(workspaces::patch_workspace),
+        )
         .route(
             "/api/v1/workspaces/:id/map-layers",
             get(map_layers::list_map_layers),
@@ -183,6 +187,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/workspaces/:id/signals", get(signals::list_signals))
         .route(
+            "/api/v1/workspaces/:id/rule-diagnostics",
+            get(rule_diagnostics::get_diagnostics),
+        )
+        .route(
             "/api/v1/workspaces/:id/survivors",
             get(survivors::list_survivors),
         )
@@ -209,6 +217,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/bindings/:bindingId/refresh",
             post(bindings::refresh_binding),
+        )
+        .route(
+            "/api/v1/workspaces/:id/peers/:peerId/tools",
+            get(workspaces::list_peer_tools),
+        )
+        .route(
+            "/api/v1/workspaces/:id/peers/:peerId/resources",
+            get(workspaces::list_peer_resources),
+        )
+        .route(
+            "/api/v1/workspaces/:id/context-slices",
+            get(workspaces::list_context_slices),
         )
         .route(
             "/api/v1/workspaces/:id/artifacts",
@@ -253,6 +273,15 @@ pub fn router(state: AppState) -> Router {
             get(peers::list_peers).post(peers::create_peer),
         )
         .route("/api/v1/peers/:id/manifest", get(peers::get_manifest))
+        .route(
+            "/api/v1/peers/:id/manifest/refresh",
+            post(peers::refresh_manifest),
+        )
+        .route("/api/v1/peers/:id/session", get(peers::get_session))
+        .route(
+            "/api/v1/peers/:id/session/reconnect",
+            post(peers::reconnect_session),
+        )
         .route(
             "/api/v1/peers/:id/webhook/provision",
             post(webhooks::provision_webhook),
@@ -318,7 +347,13 @@ fn cors_layer_from_env() -> CorsLayer {
     } else {
         CorsLayer::new()
             .allow_origin(parsed)
-            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+            ])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
     }
 }

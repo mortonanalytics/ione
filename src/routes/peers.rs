@@ -149,13 +149,11 @@ pub(crate) async fn callback(
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::BadRequest("peer not found".into()))?;
-    let disc_value = crate::util::safe_http::fetch_public_metadata(
-        &format!("{}/.well-known/oauth-authorization-server", peer.mcp_url),
-        64_000,
-        std::time::Duration::from_secs(5),
-    )
-    .await
-    .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
+    let discovery_url = format!("{}/.well-known/oauth-authorization-server", peer.mcp_url);
+    let disc_value =
+        crate::services::peer_oauth::fetch_peer_metadata(&state, &peer.mcp_url, &discovery_url)
+            .await
+            .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
     let discovery: crate::services::peer_oauth::PeerDiscovery = serde_json::from_value(disc_value)
         .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
     let pending = crate::services::peer_oauth::PendingFederation {
@@ -185,6 +183,54 @@ pub(crate) async fn get_manifest(
         .await
         .map_err(AppError::Internal)?;
     Ok(Json(manifest))
+}
+
+pub(crate) async fn refresh_manifest(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(peer_id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    ensure_peer_in_org(&state, peer_id, ctx.org_id).await?;
+    let manifest = crate::services::federation::force_refresh_manifest(&state, peer_id, &ctx)
+        .await
+        .map_err(AppError::Internal)?;
+    Ok(Json(json!({ "manifest": manifest })))
+}
+
+pub(crate) async fn get_session(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(peer_id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    ensure_peer_in_org(&state, peer_id, ctx.org_id).await?;
+    let peer = PeerRepo::new(state.pool.clone())
+        .get(peer_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound("peer not found".into()))?;
+    let governor = state
+        .peer_governor
+        .get(&peer_id)
+        .map(|entry| entry.value().snapshot())
+        .or_else(|| crate::services::peer_tokens::governor_snapshot(peer_id));
+    Ok(Json(json!({
+        "peerId": peer_id,
+        "sessionStatus": peer.session_status,
+        "lastConnectedAt": peer.last_connected_at,
+        "lastSessionError": peer.last_session_error,
+        "runtimeState": state.peer_sessions.snapshot(peer_id),
+        "breaker": governor,
+    })))
+}
+
+pub(crate) async fn reconnect_session(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(peer_id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    ensure_peer_in_org(&state, peer_id, ctx.org_id).await?;
+    state.peer_sessions.reconnect(state.clone(), peer_id);
+    Ok(Json(json!({ "peerId": peer_id, "status": "connecting" })))
 }
 
 pub(crate) async fn authorize_allowlist(
@@ -406,7 +452,7 @@ async fn fetch_manifest_over_mcp(state: &AppState, peer_id: Uuid) -> anyhow::Res
         &state.pool,
         &state.http,
         &peer,
-        &format!("{endpoint}/mcp"),
+        endpoint,
         &json!({
             "jsonrpc": "2.0",
             "id": 1,

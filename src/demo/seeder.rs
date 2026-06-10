@@ -403,6 +403,7 @@ fn artifact_kind_str(kind: ArtifactKind) -> &'static str {
         ArtifactKind::ResourceOrder => "resource_order",
         ArtifactKind::Message => "message",
         ArtifactKind::Report => "report",
+        ArtifactKind::ToolCall => "tool_call",
     }
 }
 
