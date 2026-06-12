@@ -9,7 +9,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    auth::{require_admin, AuthContext},
+    auth::{require_admin_legacy, AuthContext},
     error::AppError,
     repos::TrustIssuerRepo,
     services::{IdentityAuditWriter, IdentityEvent},
@@ -46,7 +46,7 @@ pub async fn list(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
 ) -> Result<Json<Vec<TrustIssuerResp>>, AppError> {
-    require_admin(&ctx, &state.pool).await?;
+    require_admin_legacy(&ctx, &state.pool).await?;
     crate::routes::mfa_gate(&ctx, &state.pool).await?;
     let rows = TrustIssuerRepo::new(state.pool.clone())
         .list(ctx.org_id)
@@ -60,7 +60,7 @@ pub async fn create(
     Extension(ctx): Extension<AuthContext>,
     Json(body): Json<CreateTrustIssuerBody>,
 ) -> Result<Json<TrustIssuerResp>, AppError> {
-    require_admin(&ctx, &state.pool).await?;
+    require_admin_legacy(&ctx, &state.pool).await?;
     crate::routes::mfa_gate(&ctx, &state.pool).await?;
     if body.idp_type != "oidc" {
         return Err(AppError::BadRequest("idp_type must be oidc".into()));
@@ -118,7 +118,7 @@ pub async fn delete(
     Extension(ctx): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
-    require_admin(&ctx, &state.pool).await?;
+    require_admin_legacy(&ctx, &state.pool).await?;
     crate::routes::mfa_gate(&ctx, &state.pool).await?;
     let rows = TrustIssuerRepo::new(state.pool.clone())
         .delete(ctx.org_id, id)

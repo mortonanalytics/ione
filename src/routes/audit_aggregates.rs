@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::{ensure_workspace_in_org, require_admin, AuthContext},
+    auth::{ensure_workspace_in_org, require_permission, AuthContext},
     error::AppError,
     repos::{AuditEventAggregateRepo, GroupCol, PipelineEventAggregateRepo},
     routes::audit_events::parse_audit_query,
@@ -68,7 +68,7 @@ pub async fn get_audit_aggregates(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<Value>, AppError> {
     ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
-    require_admin(&ctx, &state.pool).await?;
+    require_permission(&ctx, &state.pool, workspace_id, "audit:read").await?;
 
     let raw = raw.as_deref();
     let op = query_param(raw, "op").ok_or_else(|| AppError::BadRequest("op is required".into()))?;
@@ -136,7 +136,7 @@ pub async fn get_pipeline_aggregates(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<Value>, AppError> {
     ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
-    require_admin(&ctx, &state.pool).await?;
+    require_permission(&ctx, &state.pool, workspace_id, "audit:read").await?;
 
     let raw = raw.as_deref();
     let op = query_param(raw, "op").ok_or_else(|| AppError::BadRequest("op is required".into()))?;

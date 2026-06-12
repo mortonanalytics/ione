@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use uuid::Uuid;
 
 use crate::{
-    auth::{ensure_workspace_in_org, require_admin, AuthContext},
+    auth::{ensure_workspace_in_org, require_permission, AuthContext},
     error::AppError,
     repos::AuditEventRepo,
     routes::audit_events::{encode_cursor, parse_audit_query},
@@ -67,7 +67,7 @@ pub async fn get_audit_export(
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
-    require_admin(&ctx, &state.pool).await?;
+    require_permission(&ctx, &state.pool, workspace_id, "audit:read").await?;
 
     let mut params = parse_audit_query(raw.as_deref())?;
     if params.limit.is_some() {

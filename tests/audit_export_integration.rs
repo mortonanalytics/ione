@@ -82,17 +82,17 @@ async fn insert_workspace(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
     .expect("insert workspace")
 }
 
-/// Make the local-mode default user an admin (coc 80) on the given workspace.
-/// resolve_active_role_id picks the most recent membership, so inserting an
-/// admin membership after bootstrap's coc-0 'member' one elevates the user.
+/// Make the local-mode default user an admin on the given workspace. The
+/// `admin` permission short-circuits every workspace-scoped require_permission
+/// check (the audit gates resolve per (user, workspace), not per session).
 async fn elevate_default_user_to_admin(pool: &PgPool, workspace_id: Uuid) {
     let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
         .fetch_one(pool)
         .await
         .expect("default user");
     let role_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO roles (workspace_id, name, coc_level)
-         VALUES ($1, 'admin', 80)
+        "INSERT INTO roles (workspace_id, name, coc_level, permissions)
+         VALUES ($1, 'admin', 80, '[\"admin\"]'::jsonb)
          RETURNING id",
     )
     .bind(workspace_id)

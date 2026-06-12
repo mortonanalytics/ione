@@ -1356,6 +1356,136 @@ async fn phase_1_health_still_public() {
     }
 }
 
+// ─── RBAC Phase 1: workspace-scoped permission resolution ────────────────────
+
+async fn insert_rbac_workspace(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workspaces (org_id, name, domain, lifecycle)
+         VALUES ($1, $2, 'test', 'continuous'::workspace_lifecycle)
+         RETURNING id",
+    )
+    .bind(org_id)
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("insert workspace")
+}
+
+/// Insert a role with an explicit permissions array and a membership for
+/// `user_id` in `workspace_id`.
+async fn insert_role_and_membership(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role_name: &str,
+    coc_level: i32,
+    permissions: Value,
+) {
+    let role_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (workspace_id, name, coc_level, permissions)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(role_name)
+    .bind(coc_level)
+    .bind(permissions)
+    .fetch_one(pool)
+    .await
+    .expect("insert role");
+    sqlx::query("INSERT INTO memberships (user_id, workspace_id, role_id) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(role_id)
+        .execute(pool)
+        .await
+        .expect("insert membership");
+}
+
+fn audit_aggregates_url(base: &str, workspace_id: Uuid) -> String {
+    format!("{base}/api/v1/workspaces/{workspace_id}/audit-aggregates?op=count_by_actor")
+}
+
+/// AC-1 (C-1 fix): a user with an admin-granted role in workspace A and a
+/// no-permission role in workspace B must pass the `audit:read` gate on A and
+/// be denied on B — the gate resolves per (user, workspace), never from a
+/// session-global role.
+#[tokio::test]
+#[ignore]
+async fn rbac_workspace_scoped_admin() {
+    let (base, pool) = spawn_app().await;
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+
+    let ws_a = insert_rbac_workspace(&pool, org_id, "RBAC-A").await;
+    let ws_b = insert_rbac_workspace(&pool, org_id, "RBAC-B").await;
+    insert_role_and_membership(&pool, ws_a, user_id, "admin", 80, json!(["admin"])).await;
+    // Membership in B is created AFTER the admin one so the old session-global
+    // resolver (most-recent membership) would have picked it — and the old
+    // gate would then deny A; the C-1 bug would instead have allowed B if the
+    // order were reversed. Workspace-scoped resolution is order-independent.
+    insert_role_and_membership(&pool, ws_b, user_id, "viewer", 0, json!([])).await;
+
+    let client = reqwest::Client::new();
+    let resp_b = client
+        .get(audit_aggregates_url(&base, ws_b))
+        .send()
+        .await
+        .expect("GET audit-aggregates on B");
+    assert_eq!(
+        resp_b.status(),
+        StatusCode::FORBIDDEN,
+        "audit:read-gated call on workspace B (no-permission role) must 403"
+    );
+
+    let resp_a = client
+        .get(audit_aggregates_url(&base, ws_a))
+        .send()
+        .await
+        .expect("GET audit-aggregates on A");
+    assert_eq!(
+        resp_a.status(),
+        StatusCode::OK,
+        "audit:read-gated call on workspace A (admin role) must 200"
+    );
+}
+
+/// AC-3: a role with an explicitly empty permissions array fails closed.
+#[tokio::test]
+#[ignore]
+async fn rbac_fail_closed_empty_grants() {
+    let (base, pool) = spawn_app().await;
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+
+    let ws = insert_rbac_workspace(&pool, org_id, "RBAC-empty").await;
+    insert_role_and_membership(&pool, ws, user_id, "nobody", 0, json!([])).await;
+
+    let resp = reqwest::Client::new()
+        .get(audit_aggregates_url(&base, ws))
+        .send()
+        .await
+        .expect("GET audit-aggregates");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// AC-4: no membership in the target workspace fails closed.
+#[tokio::test]
+#[ignore]
+async fn rbac_fail_closed_no_membership() {
+    let (base, pool) = spawn_app().await;
+    let org_id = default_org_id(&pool).await;
+
+    let ws = insert_rbac_workspace(&pool, org_id, "RBAC-orphan").await;
+
+    let resp = reqwest::Client::new()
+        .get(audit_aggregates_url(&base, ws))
+        .send()
+        .await
+        .expect("GET audit-aggregates");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
 // ─── Mutation check (documented per contract-red protocol) ───────────────────
 //
 // These tests can't run mutations against an unimplemented codebase, but the

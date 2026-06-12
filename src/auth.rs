@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use axum::{
@@ -15,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     error::AppError,
-    repos::{TrustIssuerRepo, UserSessionRepo, WorkspaceRepo},
+    repos::{OrgMembershipRepo, RoleRepo, TrustIssuerRepo, UserSessionRepo, WorkspaceRepo},
     services::claim_mapper::ClaimMapper,
     state::AppState,
 };
@@ -291,7 +292,76 @@ async fn resolve_active_role_id(pool: &PgPool, user_id: Uuid) -> Option<Uuid> {
     .flatten()
 }
 
-pub async fn require_admin(ctx: &AuthContext, pool: &PgPool) -> Result<(), AppError> {
+/// True when one of `held` grants `needed`: exact string match, or per-`:`-
+/// segment glob — a held segment of `*` matches any needed segment (e.g. held
+/// `tool_invoke:weather:*` grants `tool_invoke:weather:get_forecast`).
+pub fn permission_grants(held: &HashSet<String>, needed: &str) -> bool {
+    if held.contains(needed) {
+        return true;
+    }
+    let needed_segs: Vec<&str> = needed.split(':').collect();
+    held.iter().any(|h| {
+        let held_segs: Vec<&str> = h.split(':').collect();
+        held_segs.len() == needed_segs.len()
+            && held_segs
+                .iter()
+                .zip(&needed_segs)
+                .all(|(h, n)| *h == "*" || h == n)
+    })
+}
+
+/// Workspace-scoped permission gate, resolved at call time from the caller's
+/// memberships in `workspace_id`. Fail-closed: no membership, an empty grant
+/// set, or a missing permission → 403. A held `admin` permission
+/// short-circuits every workspace-scoped check.
+pub async fn require_permission(
+    ctx: &AuthContext,
+    pool: &PgPool,
+    workspace_id: Uuid,
+    permission: &str,
+) -> Result<(), AppError> {
+    let (held, _) = RoleRepo::new(pool.clone())
+        .effective_permissions(ctx.user_id, workspace_id)
+        .await
+        .map_err(AppError::Internal)?;
+    if held.contains("admin") || permission_grants(&held, permission) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+/// Org-scoped permission gate against `org_memberships`. Fail-closed. The
+/// workspace-level `admin` grant does NOT short-circuit org checks — org
+/// operations require an explicit org membership.
+pub async fn require_org_permission(
+    ctx: &AuthContext,
+    pool: &PgPool,
+    permission: &str,
+) -> Result<(), AppError> {
+    let held = OrgMembershipRepo::new(pool.clone())
+        .org_permissions(ctx.user_id, ctx.org_id)
+        .await
+        .map_err(AppError::Internal)?;
+    if permission_grants(&held, permission) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+pub async fn require_admin(
+    ctx: &AuthContext,
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<(), AppError> {
+    require_permission(ctx, pool, workspace_id, "admin").await
+}
+
+/// TEMPORARY shim (deleted in RBAC Phase 2): the pre-RBAC session-global
+/// coc>=80 gate, kept only so the org-scoped trust-issuer sites compile until
+/// they move to `require_org_permission`. Do not add callers.
+pub async fn require_admin_legacy(ctx: &AuthContext, pool: &PgPool) -> Result<(), AppError> {
     let role_id = ctx.active_role_id.ok_or(AppError::Forbidden)?;
     let coc: Option<i32> = sqlx::query_scalar("SELECT coc_level FROM roles WHERE id = $1")
         .bind(role_id)
