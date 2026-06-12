@@ -11,7 +11,7 @@ use crate::{
     error::AppError,
     middleware::session_cookie::SessionId,
     models::WorkspaceLifecycle,
-    repos::{PeerRepo, RoleRepo, RuleDiagnosticsRepo, WorkspaceRepo},
+    repos::{PeerRepo, RuleDiagnosticsRepo, WorkspaceRepo},
     state::AppState,
 };
 
@@ -268,17 +268,6 @@ pub async fn close_workspace(
     Ok(Json(
         serde_json::to_value(ws).map_err(|e| AppError::Internal(e.into()))?,
     ))
-}
-
-pub async fn list_roles(
-    State(state): State<AppState>,
-    Extension(ctx): Extension<AuthContext>,
-    Path(workspace_id): Path<Uuid>,
-) -> Result<Json<Value>, AppError> {
-    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
-    let repo = RoleRepo::new(state.pool.clone());
-    let items = repo.list(workspace_id).await.map_err(AppError::Internal)?;
-    Ok(Json(json!({ "items": items })))
 }
 
 pub async fn list_peer_tools(

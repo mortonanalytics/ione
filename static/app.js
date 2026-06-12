@@ -645,6 +645,9 @@ function setActiveWorkspace(ws) {
 
   // Always update the pending badge count.
   updateApprovalsBadge(ws.id);
+
+  // Roles tab visibility: probe roles:manage for this workspace (cached).
+  probeRolesAccess(ws.id);
   renderActivationTracker(ws);
 }
 
@@ -1059,6 +1062,7 @@ const tabSignals       = document.getElementById('tab-signals');
 const tabSurvivors     = document.getElementById('tab-survivors');
 const tabApprovals     = document.getElementById('tab-approvals');
 const tabAudit         = document.getElementById('tab-audit');
+const tabRoles         = document.getElementById('tab-roles');
 const panelChat        = document.getElementById('panel-chat');
 const panelMap         = document.getElementById('panel-map');
 const panelChart       = document.getElementById('panel-chart');
@@ -1069,6 +1073,7 @@ const panelSignals     = document.getElementById('panel-signals');
 const panelSurvivors   = document.getElementById('panel-survivors');
 const panelApprovals   = document.getElementById('panel-approvals');
 const panelAudit       = document.getElementById('panel-audit');
+const panelRoles       = document.getElementById('panel-roles');
 
 let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'table' | 'document' | 'connectors' | 'signals' | 'survivors' | 'approvals' | 'audit'
 
@@ -1129,6 +1134,10 @@ function switchTab(name) {
   tabAudit.classList.toggle('tab--active', name === 'audit');
   panelAudit.hidden = name !== 'audit';
 
+  tabRoles.setAttribute('aria-selected', String(name === 'roles'));
+  tabRoles.classList.toggle('tab--active', name === 'roles');
+  panelRoles.hidden = name !== 'roles';
+
   if (name === 'connectors' && activeWorkspace) {
     loadConnectors(activeWorkspace.id);
     loadPeerBrowser(activeWorkspace.id);
@@ -1172,6 +1181,10 @@ function switchTab(name) {
     loadAuditStats();
     startAuditPolling();
   }
+
+  if (name === 'roles' && activeWorkspace) {
+    loadRoles();
+  }
 }
 
 // Registry driving adaptive tab visibility + keyboard nav. Data-viz tabs
@@ -1196,6 +1209,10 @@ const TAB_REGISTRY = [
 TAB_REGISTRY.forEach((t) => {
   t.el.addEventListener('click', () => switchTab(t.id));
 });
+
+// Roles tab is outside TAB_REGISTRY: its visibility comes from the
+// roles:manage probe (probeRolesAccess), not from the panels block.
+tabRoles.addEventListener('click', () => switchTab('roles'));
 
 // Apply data-presence visibility from a workspace `panels` block. When panels
 // are unknown (null), nothing is hidden — we never hide a tab we can't disprove.
@@ -4669,6 +4686,203 @@ auditFilterVerb.addEventListener('change', () => loadAuditTrail());
 auditFilterWindow.addEventListener('change', () => loadAuditTrail());
 auditLoadMoreBtn.addEventListener('click', () => loadAuditTrail({ append: true }));
 
+/* ── Roles panel (RBAC role management; probe-and-hide on 403) ── */
+
+const rolesStatusEl       = document.getElementById('roles-status');
+const rolesListEl         = document.getElementById('roles-list');
+const rolesRefreshBtn     = document.getElementById('roles-refresh-btn');
+const rolesMembershipForm = document.getElementById('roles-membership-form');
+const rolesMembershipUser = document.getElementById('roles-membership-user');
+const rolesMembershipRole = document.getElementById('roles-membership-role');
+const rolesRevokeBtn      = document.getElementById('roles-revoke-btn');
+
+/* The closed workspace vocabulary rendered as toggle chips; tool_invoke
+   scopes already on a role are rendered as extra chips. */
+const ROLES_VOCABULARY = [
+  'admin',
+  'audit:read',
+  'roles:manage',
+  'peers:manage',
+  'approvals:decide',
+  'workspace:write',
+  'tool_invoke:*:*',
+];
+
+/* Per-workspace probe result: true = roles:manage held, false = 403 (do not
+   call role endpoints again), undefined = not probed yet. */
+const rolesAccessByWs = new Map();
+
+async function probeRolesAccess(wsId) {
+  if (rolesAccessByWs.has(wsId)) {
+    applyRolesTabVisibility(wsId);
+    return;
+  }
+  try {
+    await apiFetch(`/api/v1/workspaces/${wsId}/roles`, { skipErrorToast: true });
+    rolesAccessByWs.set(wsId, true);
+  } catch (err) {
+    if (err && err.status === 403) {
+      rolesAccessByWs.set(wsId, false);
+    }
+    // Other errors: leave undecided so the next activation retries.
+  }
+  applyRolesTabVisibility(wsId);
+}
+
+function applyRolesTabVisibility(wsId) {
+  if (!activeWorkspace || activeWorkspace.id !== wsId) return;
+  const allowed = rolesAccessByWs.get(wsId) === true;
+  tabRoles.hidden = !allowed;
+  if (!allowed && activeTab === 'roles') switchTab('chat');
+}
+
+async function loadRoles() {
+  if (!activeWorkspace || rolesAccessByWs.get(activeWorkspace.id) === false) return;
+  rolesStatusEl.textContent = 'Loading…';
+  try {
+    const data = await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/roles`,
+      { skipErrorToast: true }
+    );
+    rolesStatusEl.textContent = '';
+    renderRoles(data.items || []);
+  } catch (err) {
+    if (err && err.status === 403) {
+      rolesAccessByWs.set(activeWorkspace.id, false);
+      applyRolesTabVisibility(activeWorkspace.id);
+      return;
+    }
+    rolesStatusEl.textContent = 'Failed to load roles: ' + err.message;
+  }
+}
+
+function renderRoles(items) {
+  rolesListEl.innerHTML = '';
+  const selectedRole = rolesMembershipRole.value;
+  rolesMembershipRole.innerHTML = '';
+  items.forEach((role) => {
+    const opt = document.createElement('option');
+    opt.value = role.id;
+    opt.textContent = `${role.name} (CoC ${role.cocLevel})`;
+    rolesMembershipRole.appendChild(opt);
+
+    const current = Array.isArray(role.permissions) ? role.permissions : [];
+    const chips = new Set(ROLES_VOCABULARY);
+    current.forEach((p) => chips.add(p));
+
+    const li = document.createElement('li');
+    li.className = 'role-card';
+    li.dataset.roleId = role.id;
+
+    const header = document.createElement('div');
+    header.className = 'role-card-header';
+    const title = document.createElement('strong');
+    title.textContent = role.name;
+    header.appendChild(title);
+    const meta = document.createElement('span');
+    meta.className = 'role-card-meta';
+    meta.textContent = `CoC ${role.cocLevel} · ${role.memberCount} member${role.memberCount === 1 ? '' : 's'}`;
+    header.appendChild(meta);
+    li.appendChild(header);
+
+    const chipWrap = document.createElement('div');
+    chipWrap.className = 'permission-chips';
+    const held = new Set(current);
+    [...chips].forEach((perm) => {
+      const label = document.createElement('label');
+      label.className = 'permission-chip' + (held.has(perm) ? ' permission-chip--on' : '');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = held.has(perm);
+      cb.dataset.perm = perm;
+      cb.addEventListener('change', () => {
+        label.classList.toggle('permission-chip--on', cb.checked);
+      });
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(perm));
+      chipWrap.appendChild(label);
+    });
+    li.appendChild(chipWrap);
+
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'role-save-btn';
+    save.textContent = 'Save permissions';
+    save.addEventListener('click', () => saveRolePermissions(role.id, li, save));
+    li.appendChild(save);
+
+    rolesListEl.appendChild(li);
+  });
+  if (selectedRole && items.some((r) => r.id === selectedRole)) {
+    rolesMembershipRole.value = selectedRole;
+  }
+  if (!items.length) {
+    rolesStatusEl.textContent = 'No roles in this workspace.';
+  }
+}
+
+async function saveRolePermissions(roleId, cardEl, saveBtn) {
+  if (!activeWorkspace) return;
+  const permissions = [...cardEl.querySelectorAll('input[type="checkbox"]')]
+    .filter((cb) => cb.checked)
+    .map((cb) => cb.dataset.perm);
+  saveBtn.disabled = true;
+  try {
+    await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/roles/${roleId}/permissions`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ permissions }),
+      }
+    );
+    await loadRoles();
+    rolesStatusEl.textContent = 'Permissions saved.';
+  } catch (_err) {
+    // apiFetch already surfaced invalid_permission / permission_escalation.
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+rolesRefreshBtn.addEventListener('click', loadRoles);
+
+rolesMembershipForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  if (!activeWorkspace) return;
+  const userId = rolesMembershipUser.value.trim();
+  const roleId = rolesMembershipRole.value;
+  if (!userId || !roleId) return;
+  try {
+    await apiFetch(`/api/v1/workspaces/${activeWorkspace.id}/memberships`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, role_id: roleId }),
+    });
+    await loadRoles();
+    rolesStatusEl.textContent = 'Membership granted.';
+  } catch (_err) {
+    // apiFetch already surfaced the error.
+  }
+});
+
+rolesRevokeBtn.addEventListener('click', async () => {
+  if (!activeWorkspace) return;
+  const userId = rolesMembershipUser.value.trim();
+  const roleId = rolesMembershipRole.value;
+  if (!userId || !roleId) return;
+  try {
+    await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/memberships/${encodeURIComponent(userId)}/${encodeURIComponent(roleId)}`,
+      { method: 'DELETE' }
+    );
+    await loadRoles();
+    rolesStatusEl.textContent = 'Membership revoked.';
+  } catch (_err) {
+    // apiFetch already surfaced the error.
+  }
+});
+
 /* ── Init: load workspaces then conversations ── */
 
 (async function init() {
@@ -4703,6 +4917,7 @@ auditLoadMoreBtn.addEventListener('click', () => loadAuditTrail({ append: true }
       updateApprovalsBadge(initial.id);
       startAmbientAlertPolling();
       renderActivationTracker(initial);
+      probeRolesAccess(initial.id);
     } else {
       workspaceNameEl.textContent = 'No workspaces';
     }

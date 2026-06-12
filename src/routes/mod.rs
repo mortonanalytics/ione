@@ -46,6 +46,7 @@ pub mod oauth;
 pub mod peers;
 pub mod pipeline_events;
 pub mod public_issuers;
+pub mod roles;
 pub mod rule_diagnostics;
 pub mod signals;
 pub mod survivors;
@@ -217,7 +218,22 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces/:id/events/stream",
             get(pipeline_events::stream_events),
         )
-        .route("/api/v1/workspaces/:id/roles", get(workspaces::list_roles))
+        .route(
+            "/api/v1/workspaces/:id/roles",
+            get(roles::list_roles_detailed),
+        )
+        .route(
+            "/api/v1/workspaces/:id/roles/:roleId/permissions",
+            put(roles::put_role_permissions),
+        )
+        .route(
+            "/api/v1/workspaces/:id/memberships",
+            post(roles::post_membership),
+        )
+        .route(
+            "/api/v1/workspaces/:id/memberships/:userId/:roleId",
+            delete(roles::delete_membership),
+        )
         .route(
             "/api/v1/workspaces/:id/bindings",
             get(bindings::list_for_workspace).post(bindings::create_binding),

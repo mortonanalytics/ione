@@ -86,6 +86,7 @@
         <button id="tab-survivors" role="tab" aria-selected="false" aria-controls="panel-survivors" class="tab tab--ops">Survivors</button>
         <button id="tab-approvals" role="tab" aria-selected="false" aria-controls="panel-approvals" class="tab tab--ops">Approvals <span id="approvals-badge" class="approvals-badge" hidden></span></button>
         <button id="tab-audit" role="tab" aria-selected="false" aria-controls="panel-audit" class="tab tab--ops">Audit</button>
+        <button id="tab-roles" role="tab" aria-selected="false" aria-controls="panel-roles" class="tab tab--ops" hidden>Roles</button>
       </div>
 
       <!-- Chat panel -->
@@ -386,6 +387,26 @@
           <tbody id="audit-rows"></tbody>
         </table>
         <button id="audit-load-more" type="button" hidden>Load more</button>
+      </div>
+
+      <!-- Roles panel (visible only to roles:manage holders — probe-and-hide) -->
+      <div id="panel-roles" role="tabpanel" aria-labelledby="tab-roles" hidden>
+        <div id="roles-toolbar">
+          <button id="roles-refresh-btn" type="button" aria-label="Refresh roles">Refresh</button>
+        </div>
+        <div id="roles-status" aria-live="polite"></div>
+        <ul id="roles-list" role="list"></ul>
+        <section id="roles-membership" aria-labelledby="roles-membership-title">
+          <h2 id="roles-membership-title">Memberships</h2>
+          <form id="roles-membership-form">
+            <label for="roles-membership-user">User ID</label>
+            <input id="roles-membership-user" type="text" placeholder="user UUID" autocomplete="off" />
+            <label for="roles-membership-role">Role</label>
+            <select id="roles-membership-role"></select>
+            <button type="submit" id="roles-grant-btn">Grant</button>
+            <button type="button" id="roles-revoke-btn">Revoke</button>
+          </form>
+        </section>
       </div>
 
       <!-- Connectors panel -->

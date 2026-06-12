@@ -17,6 +17,12 @@ pub enum AppError {
     #[error("unprocessable entity: {0}")]
     UnprocessableEntityJson(serde_json::Value),
 
+    #[error("bad request: {0}")]
+    BadRequestJson(serde_json::Value),
+
+    #[error("conflict: {0}")]
+    ConflictJson(serde_json::Value),
+
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -91,6 +97,10 @@ impl IntoResponse for AppError {
             AppError::UnprocessableEntityJson(value) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, Json(value)).into_response()
             }
+            AppError::BadRequestJson(value) => {
+                (StatusCode::BAD_REQUEST, Json(value)).into_response()
+            }
+            AppError::ConflictJson(value) => (StatusCode::CONFLICT, Json(value)).into_response(),
             AppError::NotFound(msg) => (
                 StatusCode::NOT_FOUND,
                 Json(json!({
@@ -248,6 +258,8 @@ mod tests {
         let cases: Vec<AppError> = vec![
             AppError::BadRequest("x".into()),
             AppError::UnprocessableEntity("x".into()),
+            AppError::BadRequestJson(json!({"error": "invalid_permission", "message": "x"})),
+            AppError::ConflictJson(json!({"error": "permission_escalation", "message": "x"})),
             AppError::NotFound("y".into()),
             AppError::Unauthorized,
             AppError::WebhookRejected,

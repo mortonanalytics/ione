@@ -77,6 +77,47 @@ impl MembershipRepo {
         .context("failed to upsert federated membership")
     }
 
+    /// Insert a membership; `None` when it already exists.
+    pub async fn grant(
+        &self,
+        user_id: Uuid,
+        workspace_id: Uuid,
+        role_id: Uuid,
+    ) -> anyhow::Result<Option<Uuid>> {
+        sqlx::query_scalar(
+            "INSERT INTO memberships (user_id, workspace_id, role_id)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (user_id, workspace_id, role_id) DO NOTHING
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(role_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to grant membership")
+    }
+
+    /// Delete a membership; `false` when no row matched.
+    pub async fn revoke(
+        &self,
+        user_id: Uuid,
+        workspace_id: Uuid,
+        role_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM memberships
+             WHERE user_id = $1 AND workspace_id = $2 AND role_id = $3",
+        )
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(role_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to revoke membership")?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn list_for_user(&self, user_id: Uuid) -> anyhow::Result<Vec<Membership>> {
         sqlx::query_as::<_, Membership>(
             "SELECT id, user_id, workspace_id, role_id, federated_claim_ref, created_at

@@ -17,6 +17,17 @@ pub const WORKSPACE_ADMIN_GRANTS: &str =
 /// migration-0039 org backfill.
 pub const ORG_ADMIN_GRANTS: &[&str] = &["trust_issuers:manage", "peers:manage"];
 
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleWithMemberCount {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub name: String,
+    pub coc_level: i32,
+    pub permissions: serde_json::Value,
+    pub member_count: i64,
+}
+
 pub struct RoleRepo {
     pub(crate) pool: PgPool,
 }
@@ -122,5 +133,65 @@ impl RoleRepo {
         .fetch_all(&self.pool)
         .await
         .context("failed to list roles for workspace")
+    }
+
+    pub async fn list_with_member_count(
+        &self,
+        workspace_id: Uuid,
+    ) -> anyhow::Result<Vec<RoleWithMemberCount>> {
+        sqlx::query_as::<_, RoleWithMemberCount>(
+            "SELECT r.id, r.workspace_id, r.name, r.coc_level, r.permissions,
+                    COUNT(m.id) AS member_count
+             FROM roles r
+             LEFT JOIN memberships m ON m.role_id = r.id
+             WHERE r.workspace_id = $1
+             GROUP BY r.id
+             ORDER BY r.coc_level ASC, r.name ASC",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list roles with member counts")
+    }
+
+    /// Set a role's permission array (and optionally its coc_level). Returns
+    /// `None` when the role does not exist in this workspace.
+    pub async fn set_permissions(
+        &self,
+        role_id: Uuid,
+        workspace_id: Uuid,
+        permissions: &serde_json::Value,
+        coc_level: Option<i32>,
+    ) -> anyhow::Result<Option<Role>> {
+        sqlx::query_as::<_, Role>(
+            "UPDATE roles
+             SET permissions = $3, coc_level = COALESCE($4, coc_level)
+             WHERE id = $1 AND workspace_id = $2
+             RETURNING id, workspace_id, name, coc_level, permissions",
+        )
+        .bind(role_id)
+        .bind(workspace_id)
+        .bind(permissions)
+        .bind(coc_level)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to set role permissions")
+    }
+
+    pub async fn get_in_workspace(
+        &self,
+        role_id: Uuid,
+        workspace_id: Uuid,
+    ) -> anyhow::Result<Option<Role>> {
+        sqlx::query_as::<_, Role>(
+            "SELECT id, workspace_id, name, coc_level, permissions
+             FROM roles
+             WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(role_id)
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to get role")
     }
 }

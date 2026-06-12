@@ -3535,3 +3535,69 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   background: var(--color-primary, #3367d6);
   border-radius: 2px;
 }
+
+/* Roles panel (RBAC role management) */
+#roles-toolbar {
+  margin-bottom: var(--space-2, 8px);
+}
+
+#roles-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.role-card {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  margin-bottom: var(--space-2, 8px);
+}
+
+.role-card-header {
+  display: flex;
+  gap: var(--space-2, 8px);
+  align-items: baseline;
+  margin-bottom: var(--space-2, 8px);
+}
+
+.role-card-meta {
+  color: #555;
+  font-size: var(--font-size-sm, 0.875rem);
+}
+
+.permission-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: var(--space-2, 8px);
+}
+
+.permission-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: var(--font-size-sm, 0.875rem);
+  cursor: pointer;
+  user-select: none;
+}
+
+.permission-chip--on {
+  background: var(--color-primary, #3367d6);
+  border-color: var(--color-primary, #3367d6);
+  color: #fff;
+}
+
+#roles-membership form {
+  display: flex;
+  gap: var(--space-2, 8px);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+#roles-membership input[type='text'] {
+  min-width: 22em;
+}
