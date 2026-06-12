@@ -126,6 +126,15 @@ async fn approval_decision_and_activation_completion_emit_once() {
     let (base, pool) = spawn_app().await;
     let (user_id, workspace_id) = default_ids(&pool).await;
     seed_real_activation_except_approval(&pool, user_id, workspace_id).await;
+    // RBAC: deciding approvals requires approvals:decide (or admin).
+    sqlx::query(
+        "UPDATE roles SET permissions = '[\"approvals:decide\"]'::jsonb
+         WHERE workspace_id = $1 AND name = 'member'",
+    )
+    .bind(workspace_id)
+    .execute(&pool)
+    .await
+    .expect("grant approvals:decide to member role");
 
     let approvals = [
         create_approval(&pool, workspace_id, "approval 1").await,

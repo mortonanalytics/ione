@@ -11,7 +11,7 @@ Ranked by dual fit: backs a DICE abstract claim *and* is product capability any 
 | # | Item | RFP need | Commercial reuse | Effort |
 |---|------|----------|------------------|--------|
 | 1 | Structured T&E event export (P6) | T&E observability surface — §2.4 monitoring claims | Audit analytics / compliance reporting / agent-ops monitoring for any org | ~1 wk |
-| 2 | RBAC scaffolding (P4) | Committed as scoped Phase 1 extension | Enterprise table stakes; unblocks every multi-team deployment | ~3–5 d |
+| 2 | RBAC scaffolding (P4) | **Partial — pending walkthrough** (`feature/rbac-scaffolding`) | Enterprise table stakes; unblocks every multi-team deployment | ~3–5 d |
 | 3 | Auto-exec policy DSL (P4) | Implicit: human-approval-only cannot scale to 500–100K-agent collectives | Removes the #1 friction for production use (approval fatigue) | ~3–4 d |
 | 4 | Programmatic workspace/peer provisioning (P6) | "One workspace per mission" at scale; any scale demo | API-first onboarding, IaC, multi-env deploys | ~2–3 d |
 | 5 | Cross-app semantic catalog + vector search (P3) | Backs the "surfaced upon relevance" bounded-context claim (§2.4) | Tool/resource discovery as peer count grows — core product value | ~1 wk |
@@ -83,7 +83,7 @@ IONe renders MapLibre tiles and nothing else today. No chart, table, or live-fea
 
 ## P4 — Identity & governance
 
-- **[DICE] RBAC scaffolding (Admin service seed).** The abstract commits RBAC as "a scoped DICE Phase 1 extension" and Fig 3 names an Admin/RBAC service. Build a minimal role model (roles, role→tool/workspace grants, enforcement at the router) so the claim has a demonstrable trajectory before full proposal. Effort: ~3–5 d.
+- **[DICE] RBAC scaffolding (Admin service seed).** **Partial — pending founder walkthrough** (code-complete on `feature/rbac-scaffolding`, 2026-06-12: workspace/org permission resolution fixing the session-global C-1 defect, 8-string vocabulary + access-preserving backfill, H-1/H-2/H-3 mutation gates, `tool_invoke` glob gating at the federation router (DICE §2.4), role-management API + Roles panel; design `md/design/rbac-scaffolding.md`, requirements `md/requirements/active/rbac.md`). The abstract commits RBAC as "a scoped DICE Phase 1 extension" and Fig 3 names an Admin/RBAC service.
 - **SAML 2.0 SP** for enterprise SSO (Keycloak bridges SAML→OIDC for now). Deferred from v0.1. Effort: ~3–5 d.
 - **Auto-exec policy DSL.** Today: human-approval only. Add conditional auto-execution policies for low-risk tools. Effort: ~3–4 d.
 - **Audit the auto-exec bypass guard.** Confirm the router's force-to-draft on `approval_required` (`src/services/router.rs`) is not bypassable. Effort: ~0.5 d review.

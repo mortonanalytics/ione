@@ -123,7 +123,9 @@ async fn peer_manifest_returns_real_tool_list() {
         .mount(&mock)
         .await;
 
-    let peer_id = insert_peer(&pool, &mock.uri(), access_token).await;
+    // peer.mcp_url stores the full MCP endpoint (convention since the
+    // federation layer landed — see fetch_manifest_over_mcp).
+    let peer_id = insert_peer(&pool, &format!("{}/mcp", mock.uri()), access_token).await;
     let resp = reqwest::Client::new()
         .get(format!("{base}/api/v1/peers/{peer_id}/manifest"))
         .send()
