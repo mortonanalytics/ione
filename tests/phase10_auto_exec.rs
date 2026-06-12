@@ -1,7 +1,8 @@
 /// Phase 10 contract tests — rule-authorized auto-execution of commands-down.
 ///
 /// These tests are written against:
-///   - Contract: md/design/ione-v1-contract.md  (workspace.metadata.auto_exec_policies,
+///   - Contract: md/design/ione-v1-contract.md  (auto_exec_policies — now the
+///               0040 table, see md/design/auto-exec-governance.md;
 ///               audit_event verbs: auto_authorized / delivered / auto_exec_error)
 ///   - Plan:     md/plans/ione-v1-plan.md        (Phase 10 scope)
 ///
@@ -245,7 +246,7 @@ async fn make_state(pool: PgPool) -> ione::state::AppState {
 ///
 /// Contract targets:
 ///   - plan Phase 10: "auto_exec::evaluate_and_invoke fires directly; no approval row"
-///   - workspace.metadata.auto_exec_policies trigger match
+///   - auto_exec_policies table row trigger match
 ///
 /// REASON: requires src/services/auto_exec.rs and router integration — not yet implemented.
 #[tokio::test]
@@ -1038,8 +1039,8 @@ async fn auto_exec_policies_must_be_explicitly_configured() {
 
     assert!(
         decision.is_none(),
-        "auto_exec::evaluate must return None when workspace.metadata has no \
-         'auto_exec_policies' key — policies must be explicitly configured. Got: {:?}",
+        "auto_exec::evaluate must return None when the workspace has no \
+         auto_exec_policies rows — policies must be explicitly configured. Got: {:?}",
         decision
     );
 
@@ -1276,15 +1277,19 @@ async fn foreign_connector_not_invoked() {
 //   → caught by auto_exec_rate_limit_blocks_excess
 //     (decision2.is_none() fails; authorized_count assert_eq!(1) fails) ✓
 //
-// - Mutant: panic or return Err on missing connector instead of None
-//   → caught by auto_exec_policy_with_nonexistent_connector_is_skipped_gracefully
+// - Mutant: panic or return Err on unavailable connector instead of None
+//   → caught by auto_exec_policy_with_unavailable_connector_is_skipped_gracefully
 //     (result.is_ok() fails; decision.is_none() fails) ✓
+//
+// - Mutant: resolve connectors with the unscoped get (reopen AEG-C1)
+//   → caught by foreign_connector_not_invoked
+//     (wiremock expect(0) fails; ConnectorMissing match fails) ✓
 //
 // - Mutant: create an approval row even when auto-exec matches
 //   → caught by auto_exec_matching_policy_skips_approval
 //     (approval_count assert_eq!(0) fails) ✓
 //
-// - Mutant: auto-exec when metadata has no auto_exec_policies key
+// - Mutant: auto-exec when the workspace has no auto_exec_policies rows
 //   → caught by auto_exec_policies_must_be_explicitly_configured
 //     (decision.is_none() fails) ✓
 //
