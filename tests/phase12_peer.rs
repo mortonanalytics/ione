@@ -119,6 +119,39 @@ async fn default_workspace_id(pool: &PgPool) -> Uuid {
         .expect("Operations workspace not found")
 }
 
+/// Grant the local-mode default user an admin role on the workspace plus the
+/// org-scoped grant set, so peers:manage-gated routes pass (RBAC phase 3).
+async fn grant_default_user_admin(pool: &PgPool, workspace_id: Uuid) {
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .expect("default user");
+    let role_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (workspace_id, name, coc_level, permissions)
+         VALUES ($1, 'admin', 80, '[\"admin\"]'::jsonb)
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert admin role");
+    sqlx::query("INSERT INTO memberships (user_id, workspace_id, role_id) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(role_id)
+        .execute(pool)
+        .await
+        .expect("insert admin membership");
+    ione::repos::OrgMembershipRepo::new(pool.clone())
+        .grant(
+            user_id,
+            default_org_id(pool).await,
+            &["trust_issuers:manage", "peers:manage"],
+        )
+        .await
+        .expect("grant org permissions");
+}
+
 /// Insert a trust_issuer with an HMAC secret, return (issuer_id, secret_bytes).
 async fn insert_trust_issuer(
     pool: &PgPool,
@@ -371,6 +404,90 @@ async fn create_peer_rejects_cross_org_issuer_id() {
     assert_eq!(count, 0);
 }
 
+// ─── RBAC AC-11 (H-2): peers:manage gates ─────────────────────────────────────
+
+/// A member without `peers:manage` gets 403 from peer create/delete/allowlist/
+/// subscribe, and no peer row is created or mutated.
+#[tokio::test]
+#[ignore]
+async fn peers_manage_gate_403() {
+    let (base, pool) = spawn_app().await;
+    let org_id = default_org_id(&pool).await;
+    let workspace_id = default_workspace_id(&pool).await;
+    // No grant: bootstrap leaves the default user with empty permissions.
+    let (issuer_id, _) = insert_trust_issuer(&pool, org_id, "https://iss-gate.test", "aud").await;
+    let client = reqwest::Client::new();
+
+    // create (org-scoped gate, fires before any row is written)
+    let resp = client
+        .post(format!("{base}/api/v1/peers"))
+        .json(&json!({
+            "name": "Gate Peer",
+            "mcpUrl": "http://127.0.0.1:19998/mcp",
+            "issuerId": issuer_id
+        }))
+        .send()
+        .await
+        .expect("POST /peers");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM peers")
+        .fetch_one(&pool)
+        .await
+        .expect("peer count");
+    assert_eq!(count, 0, "denied create must not insert a peer row");
+
+    // Seed a peer directly; delete, allowlist, and subscribe must all deny
+    // without mutating anything.
+    let peer_id = insert_peer(&pool, "Gate Peer", "http://127.0.0.1:19998/mcp", issuer_id).await;
+
+    let resp = client
+        .delete(format!("{base}/api/v1/peers/{peer_id}"))
+        .send()
+        .await
+        .expect("DELETE /peers/:id");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let status: String = sqlx::query_scalar("SELECT status::text FROM peers WHERE id = $1")
+        .bind(peer_id)
+        .fetch_one(&pool)
+        .await
+        .expect("peer status");
+    assert_ne!(status, "revoked", "denied delete must not revoke the peer");
+
+    let resp = client
+        .post(format!("{base}/api/v1/peers/{peer_id}/authorize"))
+        .json(&json!({ "toolAllowlist": ["evil_tool"] }))
+        .send()
+        .await
+        .expect("POST /peers/:id/authorize");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let allowlist: Value = sqlx::query_scalar("SELECT tool_allowlist FROM peers WHERE id = $1")
+        .bind(peer_id)
+        .fetch_one(&pool)
+        .await
+        .expect("peer allowlist");
+    assert_eq!(
+        allowlist,
+        json!(["propose_artifact"]),
+        "denied allowlist write must leave the allowlist unchanged"
+    );
+
+    let resp = client
+        .post(format!(
+            "{base}/api/v1/workspaces/{workspace_id}/peers/{peer_id}/subscribe"
+        ))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("POST subscribe");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let connectors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connectors WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .fetch_one(&pool)
+        .await
+        .expect("connector count");
+    assert_eq!(connectors, 0, "denied subscribe must not create a connector");
+}
+
 // ─── Test 4: subscribe_creates_mcp_connector_in_workspace ────────────────────
 
 /// After POST subscribe, the workspace has a connector with kind=mcp and correct mcp_url.
@@ -380,6 +497,7 @@ async fn subscribe_creates_mcp_connector_in_workspace() {
     let (base, pool) = spawn_app().await;
     let org_id = default_org_id(&pool).await;
     let workspace_id = default_workspace_id(&pool).await;
+    grant_default_user_admin(&pool, workspace_id).await;
     let (issuer_id, _) = insert_trust_issuer(&pool, org_id, "https://iss-sub.test", "aud").await;
 
     let mcp_url = "http://127.0.0.1:19999/mcp"; // unreachable is fine — just testing DB record
@@ -449,6 +567,7 @@ async fn mcp_client_poll_fetches_survivors_from_peer() {
 
     // Node A: workspace A.
     let ws_a = default_workspace_id(&pool_a).await;
+    grant_default_user_admin(&pool_a, ws_a).await;
 
     // Create a trust issuer on A's pool.
     let (issuer_id, _secret) =

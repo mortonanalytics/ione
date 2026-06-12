@@ -63,6 +63,32 @@ use uuid::Uuid;
 
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
 
+/// Grant the local-mode default user `workspace:write` on the given workspace
+/// (RBAC gates close/patch; creating a workspace grants nothing by itself).
+async fn grant_default_user_write(pool: &PgPool, workspace_id: &str) {
+    let workspace_id = Uuid::parse_str(workspace_id).expect("workspace id");
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .expect("default user");
+    let role_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (workspace_id, name, coc_level, permissions)
+         VALUES ($1, 'writer', 0, '[\"workspace:write\"]'::jsonb)
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert writer role");
+    sqlx::query("INSERT INTO memberships (user_id, workspace_id, role_id) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(role_id)
+        .execute(pool)
+        .await
+        .expect("insert writer membership");
+}
+
 /// Connect, run migrations, truncate in FK-safe order, boot on a random port.
 /// Returns `(base_url, pool)`.
 async fn spawn_app() -> (String, PgPool) {
@@ -467,7 +493,7 @@ async fn create_child_workspace_sets_parent_id() {
 #[tokio::test]
 #[ignore]
 async fn list_workspaces_returns_items_excluding_closed_by_default() {
-    let (base, _pool) = spawn_app().await;
+    let (base, pool) = spawn_app().await;
     let client = reqwest::Client::new();
 
     // Create workspace A (will remain open)
@@ -501,6 +527,7 @@ async fn list_workspaces_returns_items_excluding_closed_by_default() {
         .await
         .expect("WS B body not JSON");
     let ws_b_id = ws_b["id"].as_str().expect("WS B must have id");
+    grant_default_user_write(&pool, ws_b_id).await;
 
     // Close workspace B
     let close_resp = client
@@ -570,6 +597,51 @@ async fn list_workspaces_returns_items_excluding_closed_by_default() {
     );
 }
 
+/// RBAC AC-10 (H-3): a member without `workspace:write` gets 403 from PATCH
+/// and close, and the workspace row is unchanged.
+#[tokio::test]
+#[ignore]
+async fn workspace_write_gate_403() {
+    let (base, pool) = spawn_app().await;
+    let client = reqwest::Client::new();
+
+    // The bootstrap Operations workspace: default user is a permissionless member.
+    let ws_id: Uuid = sqlx::query_scalar("SELECT id FROM workspaces WHERE name = 'Operations'")
+        .fetch_one(&pool)
+        .await
+        .expect("Operations workspace");
+    let before: Value = sqlx::query_scalar("SELECT metadata FROM workspaces WHERE id = $1")
+        .bind(ws_id)
+        .fetch_one(&pool)
+        .await
+        .expect("metadata before");
+
+    let patch_resp = client
+        .patch(format!("{}/api/v1/workspaces/{}", base, ws_id))
+        .json(&json!({ "metadata": { "rbac_gate_test": true } }))
+        .send()
+        .await
+        .expect("PATCH workspace");
+    assert_eq!(patch_resp.status(), StatusCode::FORBIDDEN);
+
+    let close_resp = client
+        .post(format!("{}/api/v1/workspaces/{}/close", base, ws_id))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("close workspace");
+    assert_eq!(close_resp.status(), StatusCode::FORBIDDEN);
+
+    let (after, closed_at): (Value, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT metadata, closed_at FROM workspaces WHERE id = $1")
+            .bind(ws_id)
+            .fetch_one(&pool)
+            .await
+            .expect("workspace after");
+    assert_eq!(before, after, "denied PATCH must not change metadata");
+    assert!(closed_at.is_none(), "denied close must not set closed_at");
+}
+
 /// POST /api/v1/workspaces/:id/close sets closedAt; subsequent GET confirms it.
 ///
 /// Contract targets:
@@ -600,6 +672,7 @@ async fn close_workspace_sets_closed_at() {
         .expect("create body not JSON");
 
     let ws_id = ws["id"].as_str().expect("workspace must have id");
+    grant_default_user_write(&pool, ws_id).await;
 
     // closedAt must be null before close
     assert!(

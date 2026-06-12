@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::{ensure_workspace_in_org, AuthContext},
+    auth::{ensure_workspace_in_org, require_permission, AuthContext},
     error::AppError,
     middleware::session_cookie::SessionId,
     models::{ActivationStepKey, ActivationTrack, ActorKind, ApprovalStatus},
@@ -83,6 +83,17 @@ pub async fn decide_approval(
             .map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("failed to resolve workspace: {}", e))
             })?;
+
+    // Gate before any path that can trigger external tool execution or
+    // delivery (H-1). Fail-closed when the artifact (NOT NULL workspace_id)
+    // is missing entirely.
+    match workspace_id {
+        Some(workspace_id) => {
+            ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id).await?;
+            require_permission(&auth, &state.pool, workspace_id, "approvals:decide").await?;
+        }
+        None => return Err(AppError::Forbidden),
+    }
 
     // If the approval is already in a terminal state matching the request, return it
     // as-is after draining any pending peer tool-call side effect that may have

@@ -59,6 +59,18 @@ async fn spawn_app() -> (String, PgPool, AppState) {
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("server error");
     });
+
+    // RBAC: PATCH /workspaces/:id is workspace:write-gated; this suite
+    // patches Operations as the default user throughout.
+    sqlx::query(
+        "UPDATE roles SET permissions = '[\"workspace:write\"]'::jsonb
+         WHERE workspace_id = (SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1)
+           AND name = 'member'",
+    )
+    .execute(&pool)
+    .await
+    .expect("grant workspace:write to member role");
+
     (format!("http://{}", addr), pool, state)
 }
 

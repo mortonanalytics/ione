@@ -46,7 +46,38 @@ async fn spawn_app() -> (String, PgPool) {
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("server error");
     });
+
+    // RBAC: this suite predates the peers:manage gates and exercises
+    // subscribe/revoke as the default user — grant it admin + the org set.
+    grant_default_user_admin(&pool).await;
+
     (format!("http://{}", addr), pool)
+}
+
+/// Give the default user's bootstrap 'member' role the `admin` grant and the
+/// org-scoped grant set (peers:manage gates subscribe/delete since RBAC phase 3).
+async fn grant_default_user_admin(pool: &PgPool) {
+    let ws = default_workspace_id(pool).await;
+    sqlx::query(
+        "UPDATE roles SET permissions = '[\"admin\"]'::jsonb
+         WHERE workspace_id = $1 AND name = 'member'",
+    )
+    .bind(ws)
+    .execute(pool)
+    .await
+    .expect("grant admin to member role");
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .expect("default user");
+    ione::repos::OrgMembershipRepo::new(pool.clone())
+        .grant(
+            user_id,
+            default_org_id(pool).await,
+            &["trust_issuers:manage", "peers:manage"],
+        )
+        .await
+        .expect("grant org permissions");
 }
 
 async fn spawn_second_app() -> (String, PgPool) {

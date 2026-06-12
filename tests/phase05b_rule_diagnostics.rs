@@ -51,6 +51,19 @@ async fn workspace_id(pool: &PgPool) -> Uuid {
         .expect("Operations workspace not found")
 }
 
+/// Give the default user's bootstrap 'member' role `workspace:write` on
+/// Operations (RBAC gates PATCH /workspaces/:id).
+async fn grant_default_user_write(pool: &PgPool, workspace_id: Uuid) {
+    sqlx::query(
+        "UPDATE roles SET permissions = '[\"workspace:write\"]'::jsonb
+         WHERE workspace_id = $1 AND name = 'member'",
+    )
+    .bind(workspace_id)
+    .execute(pool)
+    .await
+    .expect("grant workspace:write to member role");
+}
+
 async fn seed_geojson_stream(pool: &PgPool, workspace_id: Uuid, field_types: Value) -> Uuid {
     let config = json!({
         "kind": "geojson_poll",
@@ -418,6 +431,7 @@ async fn rule_typed_declared_string_and_mismatch_diagnostic() {
 async fn rule_validation_invalid_patch_rejected_and_metadata_unchanged() {
     let (base, pool, _state) = spawn_app().await;
     let workspace_id = workspace_id(&pool).await;
+    grant_default_user_write(&pool, workspace_id).await;
     set_rules(
         &pool,
         workspace_id,

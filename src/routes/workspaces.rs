@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::{ensure_workspace_in_org, AuthContext},
+    auth::{ensure_workspace_in_org, require_permission, AuthContext},
     error::AppError,
     middleware::session_cookie::SessionId,
     models::WorkspaceLifecycle,
@@ -116,6 +116,7 @@ pub async fn patch_workspace(
     Json(req): Json<PatchWorkspaceRequest>,
 ) -> Result<Json<Value>, AppError> {
     ensure_workspace_in_org(&state.pool, id, ctx.org_id).await?;
+    require_permission(&ctx, &state.pool, id, "workspace:write").await?;
     if !req.metadata.is_object() {
         return Err(AppError::BadRequest(
             "metadata must be a JSON object".to_string(),
@@ -255,6 +256,7 @@ pub async fn close_workspace(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
     ensure_workspace_in_org(&state.pool, id, ctx.org_id).await?;
+    require_permission(&ctx, &state.pool, id, "workspace:write").await?;
     let repo = WorkspaceRepo::new(state.pool.clone());
     // Verify workspace exists first
     repo.get(id)

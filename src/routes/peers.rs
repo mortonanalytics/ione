@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthContext,
+    auth::{require_org_permission, require_permission, AuthContext},
     error::AppError,
     repos::{ConnectorRepo, PeerRepo, StreamRepo, WorkspacePeerBindingRepo},
     services::peer::auto_create_connector_for_peer,
@@ -65,6 +65,8 @@ pub async fn create_peer(
     Extension(ctx): Extension<AuthContext>,
     Json(req): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
+    // Peer rows are org-scoped, so peer registration is an org-level grant (H-2).
+    require_org_permission(&ctx, &state.pool, "peers:manage").await?;
     if req.get("peerUrl").is_none() {
         return create_legacy_peer(state, ctx, req).await;
     }
@@ -240,6 +242,7 @@ pub(crate) async fn authorize_allowlist(
     Json(body): Json<AuthorizeAllowlistBody>,
 ) -> Result<Json<Value>, AppError> {
     ensure_peer_in_org(&state, peer_id, ctx.org_id).await?;
+    require_org_permission(&ctx, &state.pool, "peers:manage").await?;
     let allowlist = Value::Array(body.tool_allowlist.into_iter().map(Value::String).collect());
     let peer_repo = PeerRepo::new(state.pool.clone());
     peer_repo
@@ -255,6 +258,7 @@ pub(crate) async fn delete_peer(
     Path(peer_id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
     ensure_peer_in_org(&state, peer_id, ctx.org_id).await?;
+    require_org_permission(&ctx, &state.pool, "peers:manage").await?;
     let peer_repo = PeerRepo::new(state.pool.clone());
     peer_repo
         .set_status(peer_id, "revoked")
@@ -275,6 +279,9 @@ pub async fn subscribe_peer(
     Path((workspace_id, peer_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, AppError> {
     ensure_workspace_and_peer_in_org(&state, workspace_id, peer_id, ctx.org_id).await?;
+    // Binding a peer into a workspace is workspace-scoped peers:manage
+    // (workspace admins pass via the `admin` short-circuit).
+    require_permission(&ctx, &state.pool, workspace_id, "peers:manage").await?;
     let peer_repo = PeerRepo::new(state.pool.clone());
     let peer = peer_repo
         .get(peer_id)

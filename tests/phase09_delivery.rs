@@ -155,6 +155,21 @@ async fn first_role_id(pool: &PgPool, workspace_id: Uuid) -> Uuid {
         .expect("no roles in workspace — bootstrap seed missing (expected failure)")
 }
 
+/// Give the local-mode default user's bootstrap 'member' role the `admin`
+/// grant on Operations, so approvals:decide-gated routes pass (RBAC phase 3).
+/// Updates the existing role in place so `first_role_id` is unaffected.
+async fn grant_default_user_admin(pool: &PgPool) {
+    let ws_id = ops_workspace_id(pool).await;
+    sqlx::query(
+        "UPDATE roles SET permissions = '[\"admin\"]'::jsonb
+         WHERE workspace_id = $1 AND name = 'member'",
+    )
+    .bind(ws_id)
+    .execute(pool)
+    .await
+    .expect("grant admin permission to member role");
+}
+
 /// Insert a signal and return its id.
 async fn insert_signal(pool: &PgPool, workspace_id: Uuid, title: &str, severity: &str) -> Uuid {
     sqlx::query_scalar(
@@ -589,6 +604,7 @@ async fn draft_routing_creates_artifact_and_pending_approval() {
 #[ignore]
 async fn approval_approve_triggers_send() {
     let (base, pool) = spawn_app().await;
+    grant_default_user_admin(&pool).await;
 
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -728,6 +744,7 @@ async fn approval_approve_triggers_send() {
 #[ignore]
 async fn approval_reject_does_not_send() {
     let (base, pool) = spawn_app().await;
+    grant_default_user_admin(&pool).await;
 
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -861,6 +878,7 @@ async fn approval_reject_does_not_send() {
 #[ignore]
 async fn approval_idempotent_on_repeat_approve() {
     let (base, pool) = spawn_app().await;
+    grant_default_user_admin(&pool).await;
 
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -990,6 +1008,7 @@ async fn approval_idempotent_on_repeat_approve() {
 #[ignore]
 async fn audit_event_actor_ref_on_approval_is_user() {
     let (base, pool) = spawn_app().await;
+    grant_default_user_admin(&pool).await;
 
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1198,6 +1217,62 @@ async fn audit_event_actor_ref_on_autonomous_notification_is_system() {
 ///   - plan Phase 9 migration 0009
 ///
 /// REASON: requires migration 0009 with correct FK semantics.
+/// RBAC AC-9 (H-1): a member without `approvals:decide` gets 403 from
+/// POST /api/v1/approvals/:id and the approval row is untouched — no
+/// delivery / pending-tool-call side effect can have run.
+#[tokio::test]
+#[ignore]
+async fn approval_gate_403() {
+    let (base, pool) = spawn_app().await;
+    // No grant: the bootstrap 'member' role has empty permissions.
+    let ws_id = ops_workspace_id(&pool).await;
+
+    let artifact_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO artifacts (workspace_id, kind, content)
+         VALUES ($1, 'notification_draft'::artifact_kind, '{\"text\":\"gate test\"}'::jsonb)
+         RETURNING id",
+    )
+    .bind(ws_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert artifact");
+    let approval_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO approvals (artifact_id, status)
+         VALUES ($1, 'pending'::approval_status)
+         RETURNING id",
+    )
+    .bind(artifact_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert approval");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v1/approvals/{}", base, approval_id))
+        .json(&json!({ "decision": "approved" }))
+        .send()
+        .await
+        .expect("POST /api/v1/approvals/:id");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "member without approvals:decide must get 403"
+    );
+
+    let status: String = sqlx::query_scalar("SELECT status::text FROM approvals WHERE id = $1")
+        .bind(approval_id)
+        .fetch_one(&pool)
+        .await
+        .expect("approval status");
+    assert_eq!(status, "pending", "denied decision must not mutate the approval");
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE verb IN ('approved','rejected')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("audit count");
+    assert_eq!(audit_count, 0, "denied decision must not write an audit row");
+}
+
 #[tokio::test]
 #[ignore]
 async fn artifacts_cascade_on_workspace_delete() {
@@ -1519,6 +1594,7 @@ async fn slack_send_failure_records_error_status_and_preserves_audit() {
 #[ignore]
 async fn smtp_connector_send_is_invoked() {
     let (_base, pool) = spawn_app().await;
+    grant_default_user_admin(&pool).await;
 
     let ws_id = ops_workspace_id(&pool).await;
     let role_id = first_role_id(&pool, ws_id).await;
