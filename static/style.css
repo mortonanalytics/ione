@@ -3494,3 +3494,44 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 }
 
 #audit-table th { font-weight: 600; color: #555; }
+
+/* Admin-only stat strip + counts-by-hour bar list (probe-and-hide) */
+#audit-stats {
+  display: flex;
+  gap: var(--space-3, 12px);
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin-bottom: var(--space-2, 8px);
+  font-size: var(--font-size-sm, 0.875rem);
+}
+
+#audit-stats .audit-stat {
+  font-weight: 600;
+}
+
+#audit-chart {
+  list-style: none;
+  margin: 0 0 var(--space-2, 8px);
+  padding: 0;
+  font-size: var(--font-size-sm, 0.875rem);
+}
+
+#audit-chart li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 1px 0;
+}
+
+#audit-chart .audit-bar-label {
+  flex: 0 0 9em;
+  color: #555;
+  white-space: nowrap;
+}
+
+#audit-chart .audit-bar {
+  display: inline-block;
+  height: 0.75em;
+  background: var(--color-primary, #3367d6);
+  border-radius: 2px;
+}

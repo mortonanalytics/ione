@@ -1169,6 +1169,7 @@ function switchTab(name) {
 
   if (name === 'audit' && activeWorkspace) {
     loadAuditTrail();
+    loadAuditStats();
     startAuditPolling();
   }
 }
@@ -4524,6 +4525,77 @@ function renderAuditTrail(items) {
       });
     auditRowsEl.appendChild(tr);
   });
+}
+
+/* Admin-only stat strip (probe-and-hide, Codex finding 5): /api/v1/me carries
+   no role flag, so the first audit-aggregates fetch doubles as the admin
+   probe. 403 → hide admin-only UI for the session; the server-side
+   require_admin gate remains the actual protection. */
+const auditStatsEl     = document.getElementById('audit-stats');
+const auditStatTotalEl = document.getElementById('audit-stat-total');
+const auditStatRecEl   = document.getElementById('audit-stat-recovery');
+const auditChartEl     = document.getElementById('audit-chart');
+
+let auditAdminDenied = false;
+
+async function loadAuditStats() {
+  if (!activeWorkspace || auditAdminDenied) return;
+  const until = new Date();
+  const since = new Date(until.getTime() - 24 * 3600e3);
+  const windowQ = `since=${encodeURIComponent(since.toISOString())}&until=${encodeURIComponent(until.toISOString())}`;
+  try {
+    const agg = await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/audit-aggregates?op=count_by_bucket&bucket=hour&group_by=actor_kind&${windowQ}`,
+      { skipErrorToast: true }
+    );
+    const pipe = await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/pipeline-aggregates?op=recovery_gap&${windowQ}`,
+      { skipErrorToast: true }
+    );
+    renderAuditStats(agg, pipe);
+  } catch (err) {
+    if (err && err.status === 403) {
+      auditAdminDenied = true;
+    }
+    auditStatsEl.hidden = true;
+    auditChartEl.hidden = true;
+  }
+}
+
+function renderAuditStats(agg, pipe) {
+  const groups = (agg && agg.groups) || [];
+  const total = groups.reduce((sum, g) => sum + (g.count || 0), 0);
+  auditStatTotalEl.textContent = `Interactions (24 h): ${total}`;
+
+  const summary = (pipe && pipe.summary) || {};
+  auditStatRecEl.textContent = summary.count
+    ? `Recovery gap p50/p90: ${Math.round(summary.p50)}s / ${Math.round(summary.p90)}s (${summary.count} faults)`
+    : 'Recovery gap: no faults in window';
+  auditStatsEl.hidden = false;
+
+  // Counts-by-hour bar list (plain HTML/CSS — no new chart type).
+  const byHour = new Map();
+  groups.forEach((g) => {
+    byHour.set(g.bucket_start, (byHour.get(g.bucket_start) || 0) + (g.count || 0));
+  });
+  auditChartEl.innerHTML = '';
+  const maxCount = Math.max(...byHour.values(), 1);
+  [...byHour.keys()].sort().forEach((bucketStart) => {
+    const count = byHour.get(bucketStart);
+    const li = document.createElement('li');
+    const label = document.createElement('span');
+    label.className = 'audit-bar-label';
+    label.textContent = formatDateTime(bucketStart);
+    const bar = document.createElement('span');
+    bar.className = 'audit-bar';
+    bar.style.width = `${Math.max((count / maxCount) * 60, 1)}%`;
+    bar.title = `${count}`;
+    const value = document.createElement('span');
+    value.textContent = String(count);
+    li.append(label, bar, value);
+    auditChartEl.appendChild(li);
+  });
+  auditChartEl.hidden = byHour.size === 0;
 }
 
 function startAuditPolling() {

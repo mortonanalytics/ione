@@ -20,6 +20,7 @@ pub mod activation;
 pub mod admin;
 pub mod approvals;
 pub mod artifacts;
+pub mod audit_aggregates;
 pub mod audit_events;
 pub mod auth_routes;
 pub mod bindings;
@@ -155,6 +156,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/event-aggregates",
             get(event_aggregates::get_event_aggregates),
+        )
+        .route(
+            "/api/v1/workspaces/:id/audit-aggregates",
+            get(audit_aggregates::get_audit_aggregates),
+        )
+        .route(
+            "/api/v1/workspaces/:id/pipeline-aggregates",
+            get(audit_aggregates::get_pipeline_aggregates),
         )
         .route(
             "/api/v1/workspaces/:id/event-table",

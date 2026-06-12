@@ -2,7 +2,7 @@
 //! (md/plans/audit-event-export-plan.md). Phases 1–4 share this file;
 //! tests are named `phase{N}_…` so each phase gate can run its slice.
 //!
-//! Run: cargo test --test phase_audit_export -- --ignored --test-threads=1
+//! Run: cargo test --test audit_export_integration -- --ignored --test-threads=1
 
 use std::net::SocketAddr;
 
@@ -80,6 +80,73 @@ async fn insert_workspace(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
     .fetch_one(pool)
     .await
     .expect("insert workspace")
+}
+
+/// Make the local-mode default user an admin (coc 80) on the given workspace.
+/// resolve_active_role_id picks the most recent membership, so inserting an
+/// admin membership after bootstrap's coc-0 'member' one elevates the user.
+async fn elevate_default_user_to_admin(pool: &PgPool, workspace_id: Uuid) {
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .expect("default user");
+    let role_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (workspace_id, name, coc_level)
+         VALUES ($1, 'admin', 80)
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert admin role");
+    sqlx::query(
+        "INSERT INTO memberships (user_id, workspace_id, role_id, created_at)
+         VALUES ($1, $2, $3, now() + interval '1 second')",
+    )
+    .bind(user_id)
+    .bind(workspace_id)
+    .bind(role_id)
+    .execute(pool)
+    .await
+    .expect("insert admin membership");
+}
+
+async fn insert_connector(pool: &PgPool, workspace_id: Uuid, name: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO connectors (workspace_id, kind, name, config, status)
+         VALUES ($1, 'rust_native'::connector_kind, $2, '{}'::jsonb, 'active'::connector_status)
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("insert connector")
+}
+
+async fn seed_pipeline_event(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    connector_id: Option<Uuid>,
+    stage: &str,
+    occurred_at: DateTime<Utc>,
+) {
+    sqlx::query(
+        "INSERT INTO pipeline_events (workspace_id, connector_id, stage, occurred_at)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(workspace_id)
+    .bind(connector_id)
+    .bind(stage)
+    .bind(occurred_at)
+    .execute(pool)
+    .await
+    .expect("seed pipeline event");
+}
+
+/// Query-string-safe RFC 3339 (Z suffix — `+00:00` would decode as a space).
+fn ts(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn seed_base_time() -> DateTime<Utc> {
@@ -239,6 +306,225 @@ async fn phase2_cross_org_404() {
     let other_ws = insert_workspace(&pool, other_org, "Other Workspace").await;
     let resp = get(&base, &format!("/api/v1/workspaces/{other_ws}/audit_events")).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ─── Phase 3: aggregates ─────────────────────────────────────────────────────
+
+/// AC-2: events spanning 3 hours from two actors; bucket counts sum to the
+/// seeded totals per actor.
+#[tokio::test]
+#[ignore]
+async fn phase3_count_by_bucket_sums() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    elevate_default_user_to_admin(&pool, ws).await;
+    let t0 = seed_base_time();
+
+    // actor-a: 2 + 1 + 3 across three hours; actor-b: 1 + 2 + 0.
+    let seeds = [
+        ("actor-a", 0, 2),
+        ("actor-a", 1, 1),
+        ("actor-a", 2, 3),
+        ("actor-b", 0, 1),
+        ("actor-b", 1, 2),
+    ];
+    for (actor, hour, n) in seeds {
+        for i in 0..n {
+            seed_audit_event(
+                &pool,
+                ws,
+                "peer",
+                actor,
+                "peer_tool_executed",
+                t0 + Duration::hours(hour) + Duration::seconds(i),
+            )
+            .await;
+        }
+    }
+
+    let since = ts(t0);
+    let until = ts(t0 + Duration::hours(3));
+    let resp = get(
+        &base,
+        &format!(
+            "/api/v1/workspaces/{ws}/audit-aggregates?op=count_by_bucket&bucket=hour&group_by=actor_ref&since={since}&until={until}"
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["op"], "count_by_bucket");
+    assert_eq!(body["bucket"], "hour");
+    let groups = body["groups"].as_array().expect("groups");
+    let total_for = |actor: &str| -> i64 {
+        groups
+            .iter()
+            .filter(|g| g["key"] == actor)
+            .map(|g| g["count"].as_i64().unwrap())
+            .sum()
+    };
+    assert_eq!(total_for("actor-a"), 6);
+    assert_eq!(total_for("actor-b"), 3);
+    // 3 hourly buckets for actor-a, 2 for actor-b
+    assert_eq!(groups.len(), 5);
+}
+
+/// AC-3: count_by_actor returns exactly [A:5, B:3] descending; bucket=hour
+/// with this op → 400.
+#[tokio::test]
+#[ignore]
+async fn phase3_count_by_actor() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    elevate_default_user_to_admin(&pool, ws).await;
+    let t0 = seed_base_time();
+
+    for i in 0..5 {
+        seed_audit_event(&pool, ws, "user", "actor-A", "artifact_created", t0 + Duration::seconds(i)).await;
+    }
+    for i in 0..3 {
+        seed_audit_event(&pool, ws, "user", "actor-B", "artifact_created", t0 + Duration::seconds(100 + i)).await;
+    }
+
+    let since = ts(t0);
+    let until = ts(t0 + Duration::days(1));
+    let resp = get(
+        &base,
+        &format!(
+            "/api/v1/workspaces/{ws}/audit-aggregates?op=count_by_actor&since={since}&until={until}"
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["op"], "count_by_actor");
+    let groups = body["groups"].as_array().expect("groups");
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["key"], "actor-A");
+    assert_eq!(groups[0]["count"], 5);
+    assert_eq!(groups[1]["key"], "actor-B");
+    assert_eq!(groups[1]["count"], 3);
+
+    let resp = get(
+        &base,
+        &format!(
+            "/api/v1/workspaces/{ws}/audit-aggregates?op=count_by_actor&bucket=hour&since={since}&until={until}"
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// AC-4: error at T, same connector's publish_started at T+90s ⇒ one gap of
+/// 90s with from_stage=error and occurred_at=T; summary.count == 1.
+#[tokio::test]
+#[ignore]
+async fn phase3_recovery_gap() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    elevate_default_user_to_admin(&pool, ws).await;
+    let t0 = seed_base_time();
+    let conn = insert_connector(&pool, ws, "gap-conn").await;
+
+    seed_pipeline_event(&pool, ws, Some(conn), "error", t0).await;
+    seed_pipeline_event(&pool, ws, Some(conn), "publish_started", t0 + Duration::seconds(90)).await;
+
+    let since = ts(t0 - Duration::hours(1));
+    let until = ts(t0 + Duration::hours(1));
+    let resp = get(
+        &base,
+        &format!(
+            "/api/v1/workspaces/{ws}/pipeline-aggregates?op=recovery_gap&since={since}&until={until}"
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["op"], "recovery_gap");
+    let items = body["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["connector_id"], conn.to_string());
+    assert_eq!(items[0]["gap_seconds"], 90.0);
+    assert_eq!(items[0]["from_stage"], "error");
+    let occurred: DateTime<Utc> =
+        serde_json::from_value(items[0]["occurred_at"].clone()).expect("occurred_at");
+    assert_eq!(occurred, t0);
+    assert_eq!(body["summary"]["count"], 1);
+    assert_eq!(body["summary"]["p50"], 90.0);
+}
+
+/// Codex finding 4 contract: intervening stages are ignored, gaps pair within
+/// their own connector, unrecovered faults emit no row, NULL connectors are
+/// excluded.
+#[tokio::test]
+#[ignore]
+async fn phase3_recovery_gap_interleaved() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    elevate_default_user_to_admin(&pool, ws).await;
+    let t0 = seed_base_time();
+    let conn_a = insert_connector(&pool, ws, "conn-a").await;
+    let conn_b = insert_connector(&pool, ws, "conn-b").await;
+    let conn_c = insert_connector(&pool, ws, "conn-c").await;
+
+    // (a) interleaved first_event must not shorten the gap.
+    seed_pipeline_event(&pool, ws, Some(conn_a), "error", t0).await;
+    seed_pipeline_event(&pool, ws, Some(conn_a), "first_event", t0 + Duration::seconds(30)).await;
+    seed_pipeline_event(&pool, ws, Some(conn_a), "publish_started", t0 + Duration::seconds(90)).await;
+
+    // (b) conn-b's fault window overlaps conn-a's; pairs within its own connector.
+    seed_pipeline_event(&pool, ws, Some(conn_b), "stall", t0 + Duration::seconds(10)).await;
+    seed_pipeline_event(&pool, ws, Some(conn_b), "publish_started", t0 + Duration::seconds(40)).await;
+
+    // (c) unrecovered fault: no later publish_started on conn-c.
+    seed_pipeline_event(&pool, ws, Some(conn_c), "error", t0 + Duration::seconds(20)).await;
+
+    // (d) NULL-connector fault is excluded even though a recovery exists elsewhere.
+    seed_pipeline_event(&pool, ws, None, "error", t0).await;
+
+    let since = ts(t0 - Duration::hours(1));
+    let until = ts(t0 + Duration::hours(1));
+    let resp = get(
+        &base,
+        &format!(
+            "/api/v1/workspaces/{ws}/pipeline-aggregates?op=recovery_gap&since={since}&until={until}"
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.expect("json");
+    let items = body["items"].as_array().expect("items");
+    assert_eq!(items.len(), 2, "{items:?}");
+    // ordered by occurred_at: conn-a's error at t0, conn-b's stall at t0+10
+    assert_eq!(items[0]["connector_id"], conn_a.to_string());
+    assert_eq!(items[0]["gap_seconds"], 90.0);
+    assert_eq!(items[0]["from_stage"], "error");
+    assert_eq!(items[1]["connector_id"], conn_b.to_string());
+    assert_eq!(items[1]["gap_seconds"], 30.0);
+    assert_eq!(items[1]["from_stage"], "stall");
+    assert_eq!(body["summary"]["count"], 2);
+}
+
+/// AC-6 (403 half): a non-admin workspace member gets 403 from both
+/// aggregate endpoints.
+#[tokio::test]
+#[ignore]
+async fn phase3_non_admin_403() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    // No elevation: bootstrap leaves the default user at coc 0.
+    let resp = get(
+        &base,
+        &format!("/api/v1/workspaces/{ws}/audit-aggregates?op=count_by_actor"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let resp = get(
+        &base,
+        &format!("/api/v1/workspaces/{ws}/pipeline-aggregates?op=recovery_gap"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
 /// AC-10: EXPLAIN of the real cursor query shape (id tiebreaker + cursor

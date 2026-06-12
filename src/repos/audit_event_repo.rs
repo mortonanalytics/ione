@@ -27,7 +27,7 @@ const AUDIT_EVENT_COLUMNS: &str = "ae.id, ae.workspace_id, ae.actor_kind, ae.act
 /// Shared FROM/WHERE for all filtered audit queries. Org isolation is a
 /// DB-layer backstop: the workspaces join requires w.org_id = org_id in
 /// addition to the route-layer ensure_workspace_in_org check.
-fn push_filtered_from_where(
+pub(crate) fn push_filtered_from_where(
     qb: &mut QueryBuilder<'_, Postgres>,
     workspace_id: Uuid,
     org_id: Uuid,
