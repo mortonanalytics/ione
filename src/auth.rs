@@ -358,22 +358,6 @@ pub async fn require_admin(
     require_permission(ctx, pool, workspace_id, "admin").await
 }
 
-/// TEMPORARY shim (deleted in RBAC Phase 2): the pre-RBAC session-global
-/// coc>=80 gate, kept only so the org-scoped trust-issuer sites compile until
-/// they move to `require_org_permission`. Do not add callers.
-pub async fn require_admin_legacy(ctx: &AuthContext, pool: &PgPool) -> Result<(), AppError> {
-    let role_id = ctx.active_role_id.ok_or(AppError::Forbidden)?;
-    let coc: Option<i32> = sqlx::query_scalar("SELECT coc_level FROM roles WHERE id = $1")
-        .bind(role_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-    if coc.unwrap_or(0) >= 80 {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden)
-    }
-}
 
 pub async fn ensure_workspace_in_org(
     pool: &PgPool,

@@ -6,6 +6,17 @@ use uuid::Uuid;
 
 use crate::models::Role;
 
+/// The workspace grant set given to admin (coc >= 80) roles, matching the
+/// migration-0039 backfill. peers:manage is org-scoped and lives in
+/// `ORG_ADMIN_GRANTS`; workspace admins pass workspace-scoped checks via the
+/// `admin` short-circuit.
+pub const WORKSPACE_ADMIN_GRANTS: &str =
+    r#"["admin","audit:read","roles:manage","approvals:decide","workspace:write","tool_invoke:*:*"]"#;
+
+/// The org grant set given alongside an admin role, matching the
+/// migration-0039 org backfill.
+pub const ORG_ADMIN_GRANTS: &[&str] = &["trust_issuers:manage", "peers:manage"];
+
 pub struct RoleRepo {
     pub(crate) pool: PgPool,
 }
@@ -21,16 +32,24 @@ impl RoleRepo {
         name: &str,
         coc_level: i32,
     ) -> anyhow::Result<Role> {
+        // Admin roles created after the 0039 backfill get the same workspace
+        // grant set inline; never-set ('{}') permissions on an existing row
+        // are upgraded, manually-edited arrays are left alone.
         sqlx::query_as::<_, Role>(
-            "INSERT INTO roles (workspace_id, name, coc_level)
-             VALUES ($1, $2, $3)
+            "INSERT INTO roles (workspace_id, name, coc_level, permissions)
+             VALUES ($1, $2, $3,
+                     CASE WHEN $3 >= 80 THEN $4::jsonb ELSE '{}'::jsonb END)
              ON CONFLICT (workspace_id, name, coc_level) DO UPDATE
-               SET coc_level = EXCLUDED.coc_level
+               SET coc_level = EXCLUDED.coc_level,
+                   permissions = CASE WHEN roles.permissions = '{}'::jsonb
+                                      THEN EXCLUDED.permissions
+                                      ELSE roles.permissions END
              RETURNING id, workspace_id, name, coc_level, permissions",
         )
         .bind(workspace_id)
         .bind(name)
         .bind(coc_level)
+        .bind(WORKSPACE_ADMIN_GRANTS)
         .fetch_one(&self.pool)
         .await
         .context("failed to upsert role")

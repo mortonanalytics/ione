@@ -40,16 +40,23 @@ impl ClaimMapper {
         let role_name = claims[role_claim].as_str().unwrap_or("member");
         let raw_coc = claims[coc_level_claim].as_i64().unwrap_or(0) as i32;
         let coc_level = raw_coc.clamp(0, trust_issuer.max_coc_level);
+        // IdP-issued admin roles get the workspace grant set inline, matching
+        // RoleRepo::upsert and the migration-0039 backfill.
         let role_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO roles (workspace_id, name, coc_level)
-             VALUES ($1, $2, $3)
+            "INSERT INTO roles (workspace_id, name, coc_level, permissions)
+             VALUES ($1, $2, $3,
+                     CASE WHEN $3 >= 80 THEN $4::jsonb ELSE '{}'::jsonb END)
              ON CONFLICT (workspace_id, name, coc_level) DO UPDATE
-               SET coc_level = EXCLUDED.coc_level
+               SET coc_level = EXCLUDED.coc_level,
+                   permissions = CASE WHEN roles.permissions = '{}'::jsonb
+                                      THEN EXCLUDED.permissions
+                                      ELSE roles.permissions END
              RETURNING id",
         )
         .bind(workspace_id)
         .bind(role_name)
         .bind(coc_level)
+        .bind(crate::repos::role_repo::WORKSPACE_ADMIN_GRANTS)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -134,6 +141,25 @@ impl ClaimMapper {
         .bind(format!("{}@{}", subject, trust_issuer.issuer_url))
         .execute(&mut *tx)
         .await?;
+
+        // An IdP-issued admin role also carries the org-scoped grant set, in
+        // the same transaction so a failed login leaves no partial grant.
+        if coc_level >= 80 {
+            sqlx::query(
+                "INSERT INTO org_memberships (user_id, org_id, permissions)
+                 VALUES ($1, $2, $3::jsonb)
+                 ON CONFLICT (user_id, org_id) DO UPDATE
+                   SET permissions = (
+                     SELECT COALESCE(jsonb_agg(DISTINCT p), '[]'::jsonb)
+                     FROM jsonb_array_elements(org_memberships.permissions || EXCLUDED.permissions) AS p
+                   )",
+            )
+            .bind(user.id)
+            .bind(org_id)
+            .bind(serde_json::json!(crate::repos::role_repo::ORG_ADMIN_GRANTS))
+            .execute(&mut *tx)
+            .await?;
+        }
 
         tx.commit().await?;
         Ok(user)

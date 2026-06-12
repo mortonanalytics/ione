@@ -1486,6 +1486,99 @@ async fn rbac_fail_closed_no_membership() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+// ─── RBAC Phase 2: backfill preserves access; org-scoped trust issuers ───────
+
+/// Replay migration 0039's two backfill statements. The migration itself runs
+/// once (and the suite truncates all tables), so tests seed pre-RBAC state
+/// (coc>=80, permissions='{}') and re-apply the same SQL to validate it.
+async fn replay_0039_backfill(pool: &PgPool) {
+    sqlx::query(
+        r#"UPDATE roles SET permissions =
+           '["admin","audit:read","roles:manage","approvals:decide","workspace:write","tool_invoke:*:*"]'::jsonb
+           WHERE coc_level >= 80 AND permissions = '{}'::jsonb"#,
+    )
+    .execute(pool)
+    .await
+    .expect("replay workspace backfill");
+    sqlx::query(
+        r#"INSERT INTO org_memberships (user_id, org_id, permissions)
+           SELECT DISTINCT m.user_id, w.org_id, '["trust_issuers:manage","peers:manage"]'::jsonb
+           FROM memberships m JOIN roles r ON r.id = m.role_id AND r.coc_level >= 80
+                              JOIN workspaces w ON w.id = m.workspace_id
+           ON CONFLICT (user_id, org_id) DO UPDATE
+             SET permissions = org_memberships.permissions || '["trust_issuers:manage","peers:manage"]'::jsonb"#,
+    )
+    .execute(pool)
+    .await
+    .expect("replay org backfill");
+}
+
+/// AC-2: a pre-RBAC admin (coc=90, permissions never set) returns the same
+/// 2xx on every previously-require_admin endpoint after the backfill.
+#[tokio::test]
+#[ignore]
+async fn rbac_backfill_preserves_access() {
+    let (base, pool) = spawn_app().await;
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+
+    let ws = insert_rbac_workspace(&pool, org_id, "RBAC-backfill").await;
+    // Pre-RBAC shape: high coc, permissions left at the '{}' default.
+    insert_role_and_membership(&pool, ws, user_id, "old-admin", 90, json!({})).await;
+    replay_0039_backfill(&pool).await;
+
+    let client = reqwest::Client::new();
+    let urls = [
+        format!("{base}/api/v1/workspaces/{ws}/audit-aggregates?op=count_by_actor"),
+        format!("{base}/api/v1/workspaces/{ws}/pipeline-aggregates?op=recovery_gap"),
+        format!(
+            "{base}/api/v1/workspaces/{ws}/audit-export?since=2026-06-01T00:00:00Z&until=2026-06-02T00:00:00Z"
+        ),
+        format!("{base}/api/v1/admin/trust-issuers"),
+    ];
+    for url in urls {
+        let resp = client.get(&url).send().await.expect("GET");
+        assert!(
+            resp.status().is_success(),
+            "backfilled coc=90 admin must keep 2xx access to {url}, got {}",
+            resp.status()
+        );
+    }
+}
+
+/// AC-12a: trust-issuer endpoints are org-scoped — a backfilled admin passes,
+/// a workspace-only member is denied.
+#[tokio::test]
+#[ignore]
+async fn rbac_org_scoped_trust_issuers() {
+    let (base, pool) = spawn_app().await;
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+    let client = reqwest::Client::new();
+    let url = format!("{base}/api/v1/admin/trust-issuers");
+
+    // Workspace-only member (bootstrap coc-0 'member', no org_memberships row).
+    let resp = client.get(&url).send().await.expect("GET trust-issuers");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "workspace-only member must be denied org-scoped trust-issuer access"
+    );
+
+    // Same user holding a pre-RBAC admin role in some workspace of the org:
+    // the backfill grants the org membership.
+    let ws = insert_rbac_workspace(&pool, org_id, "RBAC-org").await;
+    insert_role_and_membership(&pool, ws, user_id, "old-admin", 85, json!({})).await;
+    replay_0039_backfill(&pool).await;
+
+    let resp = client.get(&url).send().await.expect("GET trust-issuers");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "backfilled admin must pass org-scoped trust-issuer access"
+    );
+}
+
 // ─── Mutation check (documented per contract-red protocol) ───────────────────
 //
 // These tests can't run mutations against an unimplemented codebase, but the
