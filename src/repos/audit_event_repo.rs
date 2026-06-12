@@ -46,9 +46,10 @@ impl AuditEventRepo {
         verb: &str,
         object_kind: &str,
         object_id: Option<Uuid>,
-        payload: serde_json::Value,
+        mut payload: serde_json::Value,
         foreign_tenant_id: Option<&str>,
     ) -> anyhow::Result<AuditEvent> {
+        crate::util::redact::scrub_error_fields(&mut payload);
         sqlx::query_as::<_, AuditEvent>(
             "INSERT INTO audit_events
                (workspace_id, actor_kind, actor_ref, verb, object_kind, object_id, payload, foreign_tenant_id)

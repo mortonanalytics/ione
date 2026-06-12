@@ -21,7 +21,10 @@ impl PipelineEventRepo {
         Self { pool }
     }
 
-    pub async fn append(&self, input: PipelineEventInput) -> anyhow::Result<PipelineEvent> {
+    pub async fn append(&self, mut input: PipelineEventInput) -> anyhow::Result<PipelineEvent> {
+        if let Some(detail) = input.detail.as_mut() {
+            crate::util::redact::scrub_error_fields(detail);
+        }
         sqlx::query_as::<_, PipelineEvent>(
             "INSERT INTO pipeline_events (workspace_id, connector_id, stream_id, stage, detail)
              VALUES ($1, $2, $3, $4, $5)
