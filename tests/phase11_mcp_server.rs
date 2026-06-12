@@ -994,6 +994,153 @@ async fn mcp_tools_call_deliver_notification_invokes_connector() {
     );
 }
 
+/// RBAC AC-8 (C-2 / DICE §2.4): a caller holding `tool_invoke:weather:*` can
+/// dispatch `weather:get_forecast`, but `db:run_query` is denied before any
+/// outbound request reaches the db peer (its request log stays empty).
+#[tokio::test]
+#[ignore]
+async fn tool_invoke_gated() {
+    let (pool, state) = spawn_state().await;
+    let org_id = default_org_id(&pool).await;
+    let workspace_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("default workspace not found");
+    let user_id = default_user_id(&pool).await;
+
+    sqlx::query(
+        "UPDATE roles SET permissions = '[\"tool_invoke:weather:*\"]'::jsonb
+         WHERE workspace_id = $1 AND name = 'member'",
+    )
+    .bind(workspace_id)
+    .execute(&pool)
+    .await
+    .expect("grant tool_invoke:weather:* to member role");
+
+    let weather_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "forecast": "sunny" }
+        })))
+        .expect(1)
+        .mount(&weather_server)
+        .await;
+    let db_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "rows": [] }
+        })))
+        .expect(0) // denial must happen before any outbound call
+        .mount(&db_server)
+        .await;
+
+    let issuer_id = insert_trust_issuer(&pool, org_id, "https://tool-gate.issuer.test").await;
+    let mut peer_ids = Vec::new();
+    for (name, uri) in [
+        ("weather", weather_server.uri()),
+        ("db", db_server.uri()),
+    ] {
+        let peer_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO peers
+               (org_id, name, mcp_url, issuer_id, sharing_policy, tool_allowlist, status, tool_prefix)
+             VALUES ($1, $2, $3, $4, '{}'::jsonb, '[]'::jsonb, 'active'::peer_status, $2)
+             RETURNING id",
+        )
+        .bind(org_id)
+        .bind(name)
+        .bind(uri)
+        .bind(issuer_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert peer failed");
+        sqlx::query(
+            "INSERT INTO workspace_peer_bindings
+               (workspace_id, peer_id, foreign_tenant_id, status)
+             VALUES ($1, $2, 'tenant-gate', 'active'::binding_status)",
+        )
+        .bind(workspace_id)
+        .bind(peer_id)
+        .execute(&pool)
+        .await
+        .expect("insert peer binding failed");
+        peer_ids.push(peer_id);
+    }
+    let tool_for = |tool: &str| {
+        json!({
+            "name": tool,
+            "description": "gate test tool",
+            "inputSchema": { "type": "object", "properties": {} },
+            "ione_approval": { "required": false }
+        })
+    };
+    state.peer_manifest_cache.insert(
+        peer_ids[0],
+        PeerManifest {
+            peer_id: peer_ids[0],
+            tools: vec![tool_for("get_forecast")],
+            resources: vec![],
+            fetched_at: Utc::now(),
+            etag: None,
+            stale: false,
+        },
+    );
+    state.peer_manifest_cache.insert(
+        peer_ids[1],
+        PeerManifest {
+            peer_id: peer_ids[1],
+            tools: vec![tool_for("run_query")],
+            resources: vec![],
+            fetched_at: Utc::now(),
+            etag: None,
+            stale: false,
+        },
+    );
+
+    let auth = AuthContext {
+        user_id,
+        org_id,
+        is_oidc: false,
+        is_mcp_peer: false,
+        active_role_id: None,
+        session_id: None,
+        mfa_verified: true,
+    };
+
+    let granted = ione::services::federation::route_tool_call(
+        &state,
+        workspace_id,
+        "weather:get_forecast",
+        json!({}),
+        &auth,
+    )
+    .await
+    .expect("granted tool_invoke must dispatch");
+    assert_eq!(granted["forecast"].as_str(), Some("sunny"));
+
+    let denied = ione::services::federation::route_tool_call(
+        &state,
+        workspace_id,
+        "db:run_query",
+        json!({}),
+        &auth,
+    )
+    .await;
+    let err = denied.expect_err("missing tool_invoke grant must deny");
+    assert!(
+        err.to_string().starts_with("FORBIDDEN:"),
+        "denial must surface as FORBIDDEN (→ -32403 / 403), got: {err}"
+    );
+    // db_server's .expect(0) verifies on drop that no request reached it.
+}
+
 #[tokio::test]
 #[ignore]
 async fn approval_gated_peer_tool_call_executes_once_on_retry() {
@@ -1006,6 +1153,16 @@ async fn approval_gated_peer_tool_call_executes_once_on_retry() {
     .await
     .expect("default workspace not found");
     let user_id = default_user_id(&pool).await;
+
+    // RBAC: route_tool_call requires a matching tool_invoke grant.
+    sqlx::query(
+        "UPDATE roles SET permissions = '[\"tool_invoke:Peer Tools:*\"]'::jsonb
+         WHERE workspace_id = $1 AND name = 'member'",
+    )
+    .bind(workspace_id)
+    .execute(&pool)
+    .await
+    .expect("grant tool_invoke to member role");
 
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))

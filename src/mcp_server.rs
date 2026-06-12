@@ -740,7 +740,8 @@ async fn dispatch_method(
             };
             // Org-wide aggregation is intentionally disallowed: advertising tools from
             // all org workspaces would expose uninvokable cross-workspace tools to callers.
-            // TODO(role-filter): filter federated tools by caller role once RBAC is wired.
+            // Dispatch is tool_invoke-gated in route_tool_call; the advertised list is
+            // not role-filtered, so callers may see tools they cannot invoke.
             let workspace_id = resolve_explicit_workspace(state, headers, req.params.as_ref());
             handle_tools_list(req.id, state, workspace_id, &auth).await
         }
@@ -855,7 +856,8 @@ async fn handle_tools_list(
     // Only aggregate federated tools when a workspace is explicitly scoped.
     // Org-wide aggregation is intentionally disallowed: it would advertise
     // tools from all workspaces that the caller cannot necessarily invoke.
-    // TODO(role-filter): filter federated tools by caller role once RBAC is wired.
+    // Dispatch is tool_invoke-gated in route_tool_call; this list is not
+    // role-filtered, so callers may see tools they cannot invoke.
     if let Some(ws_id) = workspace_id {
         match crate::services::federation::aggregate_tools(state, ws_id, auth).await {
             Ok(peer_tools) => {
@@ -981,7 +983,17 @@ async fn handle_tools_call(
                 id,
                 json!({ "content": [{ "type": "text", "text": result.to_string() }], "isError": false }),
             ),
-            Err(e) => JsonRpcResponse::err(id, -32000, e.to_string(), None),
+            Err(e) => {
+                let msg = e.to_string();
+                // tool_invoke denials surface as the forbidden code, same as
+                // the non-federated branch below.
+                let code = if msg.starts_with("FORBIDDEN:") {
+                    -32403
+                } else {
+                    -32000
+                };
+                JsonRpcResponse::err(id, code, msg, None)
+            }
         };
     }
 

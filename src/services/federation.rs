@@ -108,6 +108,19 @@ pub async fn route_tool_call(
         .ok_or_else(|| anyhow::anyhow!("federated tool name must be prefix:name"))?;
     let peer = peer_by_prefix(state, auth.org_id, prefix).await?;
     ensure_peer_bound_to_workspace(state, workspace_id, peer.id, auth.org_id).await?;
+
+    // DICE §2.4 / C-2: the caller must hold a matching tool_invoke grant for
+    // this workspace. Resolved from (user, workspace) directly — MCP bearer
+    // paths carry no role on AuthContext. Denial happens here, before the
+    // manifest fetch or tool invocation can reach the peer.
+    let (held, _) = crate::repos::RoleRepo::new(state.pool.clone())
+        .effective_permissions(auth.user_id, workspace_id)
+        .await?;
+    let needed = format!("tool_invoke:{}:{}", peer.name, raw_tool);
+    if !held.contains("admin") && !crate::auth::permission_grants(&held, &needed) {
+        anyhow::bail!("FORBIDDEN: caller lacks permission '{needed}'");
+    }
+
     let manifest = manifest_for_peer(state, &peer).await?;
     let tool = manifest
         .tools
