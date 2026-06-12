@@ -1263,14 +1263,20 @@ async fn approval_gate_403() {
         .fetch_one(&pool)
         .await
         .expect("approval status");
-    assert_eq!(status, "pending", "denied decision must not mutate the approval");
+    assert_eq!(
+        status, "pending",
+        "denied decision must not mutate the approval"
+    );
     let audit_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM audit_events WHERE verb IN ('approved','rejected')",
     )
     .fetch_one(&pool)
     .await
     .expect("audit count");
-    assert_eq!(audit_count, 0, "denied decision must not write an audit row");
+    assert_eq!(
+        audit_count, 0,
+        "denied decision must not write an audit row"
+    );
 }
 
 #[tokio::test]
@@ -1706,6 +1712,220 @@ async fn smtp_connector_send_is_invoked() {
             delivered_count
         );
     }
+}
+
+// ─── 15. terminal_approval_on_noninvokable_connector_returns_ok ───────────────
+
+/// AC-1 (auto-exec governance Slice 1): approving a notification_draft whose
+/// connector cannot `invoke` (geojson_poll, ingest-only) records the decision,
+/// writes a 'delivered' audit row with payload.terminal=true (not
+/// 'delivery_failed'), and returns 200 — the decision is the outcome.
+#[tokio::test]
+#[ignore]
+async fn terminal_approval_on_noninvokable_connector_returns_ok() {
+    let (base, pool) = spawn_app().await;
+    grant_default_user_admin(&pool).await;
+
+    let ws_id = ops_workspace_id(&pool).await;
+    let role_id = first_role_id(&pool, ws_id).await;
+
+    let signal_id = insert_signal(&pool, ws_id, "Terminal approval signal", "command").await;
+    let survivor_id = insert_survivor(&pool, signal_id).await;
+
+    // Ingest-only connector: geojson_poll has no `invoke` override.
+    let connector_id = insert_connector(
+        &pool,
+        ws_id,
+        "geojson feed",
+        json!({
+            "kind": "geojson_poll",
+            "feed_url": "https://example.com/feed.geojson",
+            "stream_name": "quakes",
+            "observed_at_format": "none"
+        }),
+    )
+    .await;
+
+    let routing_id = insert_routing_decision(
+        &pool,
+        survivor_id,
+        "draft",
+        json!({ "connector_id": connector_id, "role_id": role_id }),
+    )
+    .await;
+
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
+    let state_pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .expect("state pool connect failed");
+    let (_router, state) = ione::app_with_state(state_pool).await;
+
+    ione::services::delivery::process_routing_decision(&state, routing_id)
+        .await
+        .expect("draft creation failed");
+
+    let (approval_id, artifact_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT a.id, a.artifact_id
+         FROM approvals a
+         JOIN artifacts art ON art.id = a.artifact_id
+         WHERE art.workspace_id = $1
+           AND a.status = 'pending'::approval_status
+         LIMIT 1",
+    )
+    .bind(ws_id)
+    .fetch_one(&pool)
+    .await
+    .expect("pending approval not found");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/v1/approvals/{}", base, approval_id))
+        .json(&json!({ "decision": "approved" }))
+        .send()
+        .await
+        .expect("POST /api/v1/approvals/:id failed");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "approval on a non-invokable connector must return 200 (terminal), got {}",
+        resp.status()
+    );
+
+    let body: Value = resp.json().await.expect("response body not JSON");
+    assert_eq!(
+        body["status"], "approved",
+        "approval must be recorded as approved, got: {}",
+        body["status"]
+    );
+
+    // Terminal delivered audit row, tagged terminal=true, carrying the artifact id.
+    let terminal_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events
+         WHERE workspace_id = $1
+           AND verb = 'delivered'
+           AND payload->>'terminal' = 'true'
+           AND payload->>'artifact_id' = $2::text",
+    )
+    .bind(ws_id)
+    .bind(artifact_id)
+    .fetch_one(&pool)
+    .await
+    .expect("terminal delivered audit query failed");
+    assert_eq!(
+        terminal_count, 1,
+        "exactly one 'delivered' audit row with terminal=true must exist, got {}",
+        terminal_count
+    );
+
+    // No delivery_failed row — the old behavior wrote one and returned 500.
+    let failed_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events
+         WHERE workspace_id = $1 AND verb = 'delivery_failed'",
+    )
+    .bind(ws_id)
+    .fetch_one(&pool)
+    .await
+    .expect("delivery_failed audit query failed");
+    assert_eq!(
+        failed_count, 0,
+        "no 'delivery_failed' audit row may be written on a terminal approval, got {}",
+        failed_count
+    );
+}
+
+// ─── 16. resource_order_on_invoke_capable_connector_invokes_once ──────────────
+
+/// AC-2 (auto-exec governance Slice 1): approving a resource_order artifact
+/// whose connector implements `invoke` (slack) still invokes exactly once and
+/// writes a non-terminal 'delivered' audit row — the terminal-on-approval path
+/// must not swallow real deliveries.
+#[tokio::test]
+#[ignore]
+async fn resource_order_on_invoke_capable_connector_invokes_once() {
+    let (base, pool) = spawn_app().await;
+    grant_default_user_admin(&pool).await;
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let ws_id = ops_workspace_id(&pool).await;
+
+    let connector_id = insert_connector(
+        &pool,
+        ws_id,
+        "slack",
+        json!({ "webhook_url": format!("{}/", mock_server.uri()) }),
+    )
+    .await;
+
+    let artifact_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO artifacts (workspace_id, kind, content)
+         VALUES ($1, 'resource_order'::artifact_kind, $2)
+         RETURNING id",
+    )
+    .bind(ws_id)
+    .bind(json!({
+        "title": "Order pumps",
+        "body": "2x portable pumps to sector 4",
+        "target_ref": { "connector_id": connector_id }
+    }))
+    .fetch_one(&pool)
+    .await
+    .expect("insert resource_order artifact failed");
+
+    let approval_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO approvals (artifact_id, status)
+         VALUES ($1, 'pending'::approval_status)
+         RETURNING id",
+    )
+    .bind(artifact_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert pending approval failed");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/v1/approvals/{}", base, approval_id))
+        .json(&json!({ "decision": "approved" }))
+        .send()
+        .await
+        .expect("POST /api/v1/approvals/:id failed");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "approval on an invoke-capable connector must return 200, got {}",
+        resp.status()
+    );
+
+    // Slack must have received exactly one POST.
+    mock_server.verify().await;
+
+    // One delivered audit row, NOT tagged terminal.
+    let delivered_terminal: Option<String> = sqlx::query_scalar(
+        "SELECT payload->>'terminal' FROM audit_events
+         WHERE workspace_id = $1
+           AND verb = 'delivered'
+           AND payload->>'artifact_id' = $2::text",
+    )
+    .bind(ws_id)
+    .bind(artifact_id)
+    .fetch_one(&pool)
+    .await
+    .expect("delivered audit row missing after invoke-capable approval");
+    assert_eq!(
+        delivered_terminal, None,
+        "invoke-capable delivery must not be tagged terminal, got {:?}",
+        delivered_terminal
+    );
 }
 
 // ─── Mutation check ───────────────────────────────────────────────────────────

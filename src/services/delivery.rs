@@ -430,46 +430,63 @@ pub async fn deliver_artifact(
 
     match build_result {
         Ok(impl_) => {
-            match impl_
-                .invoke("send", serde_json::json!({ "text": text }))
-                .await
-            {
-                Ok(_) => {
-                    audit_repo
-                        .insert(
-                            Some(workspace_id),
-                            actor.kind(),
-                            &actor.actor_ref(),
-                            "delivered",
-                            "connector",
-                            Some(connector_id),
-                            serde_json::json!({ "artifact_id": artifact_id }),
-                        )
-                        .await
-                        .context("failed to write delivered audit event")?;
-                }
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    audit_repo
-                        .insert(
-                            Some(workspace_id),
-                            actor.kind(),
-                            &actor.actor_ref(),
-                            "delivery_failed",
-                            "connector",
-                            Some(connector_id),
-                            serde_json::json!({
-                                "artifact_id": artifact_id,
-                                "error": err_msg,
-                            }),
-                        )
-                        .await
-                        .context("failed to write delivery_failed audit event")?;
-                    connector_repo
-                        .update_status(connector_id, ConnectorStatus::Error, Some(&err_msg))
-                        .await
-                        .context("failed to update connector status")?;
-                    return Err(anyhow::anyhow!("artifact delivery failed: {}", err_msg));
+            if !impl_.supports_invoke() {
+                // Terminal-on-approval: the decision is the outcome; there is
+                // nothing to execute on an ingest-only connector.
+                audit_repo
+                    .insert(
+                        Some(workspace_id),
+                        actor.kind(),
+                        &actor.actor_ref(),
+                        "delivered",
+                        "connector",
+                        Some(connector_id),
+                        serde_json::json!({ "artifact_id": artifact_id, "terminal": true }),
+                    )
+                    .await
+                    .context("failed to write terminal delivered audit event")?;
+            } else {
+                match impl_
+                    .invoke("send", serde_json::json!({ "text": text }))
+                    .await
+                {
+                    Ok(_) => {
+                        audit_repo
+                            .insert(
+                                Some(workspace_id),
+                                actor.kind(),
+                                &actor.actor_ref(),
+                                "delivered",
+                                "connector",
+                                Some(connector_id),
+                                serde_json::json!({ "artifact_id": artifact_id }),
+                            )
+                            .await
+                            .context("failed to write delivered audit event")?;
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        audit_repo
+                            .insert(
+                                Some(workspace_id),
+                                actor.kind(),
+                                &actor.actor_ref(),
+                                "delivery_failed",
+                                "connector",
+                                Some(connector_id),
+                                serde_json::json!({
+                                    "artifact_id": artifact_id,
+                                    "error": err_msg,
+                                }),
+                            )
+                            .await
+                            .context("failed to write delivery_failed audit event")?;
+                        connector_repo
+                            .update_status(connector_id, ConnectorStatus::Error, Some(&err_msg))
+                            .await
+                            .context("failed to update connector status")?;
+                        return Err(anyhow::anyhow!("artifact delivery failed: {}", err_msg));
+                    }
                 }
             }
         }

@@ -269,6 +269,10 @@ impl ConnectorImpl for McpClientConnector {
         })
     }
 
+    fn supports_invoke(&self) -> bool {
+        true
+    }
+
     async fn invoke(&self, op: &str, args: Value) -> anyhow::Result<Value> {
         self.jsonrpc_call(
             "tools/call",

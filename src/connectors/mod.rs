@@ -56,6 +56,13 @@ pub trait ConnectorImpl: Send + Sync {
     ) -> anyhow::Result<serde_json::Value> {
         anyhow::bail!("invoke not implemented for this connector")
     }
+
+    /// Whether this connector implements `invoke`. Delivery treats approval of
+    /// an artifact on a non-invokable connector as terminal (decision is the
+    /// outcome), not a delivery failure.
+    fn supports_invoke(&self) -> bool {
+        false
+    }
 }
 
 /// Build a boxed connector implementation from a `Connector` DB row.

@@ -83,6 +83,10 @@ impl ConnectorImpl for SmtpConnector {
         })
     }
 
+    fn supports_invoke(&self) -> bool {
+        true
+    }
+
     async fn invoke(&self, op: &str, args: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         if op != "send" {
             anyhow::bail!("SmtpConnector: unsupported op '{}'; expected 'send'", op);

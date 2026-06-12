@@ -43,6 +43,10 @@ impl ConnectorImpl for SlackConnector {
         })
     }
 
+    fn supports_invoke(&self) -> bool {
+        true
+    }
+
     async fn invoke(&self, op: &str, args: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         if op != "send" {
             anyhow::bail!("SlackConnector: unsupported op '{}'; expected 'send'", op);
