@@ -168,7 +168,10 @@ fn policy_from_row(row: crate::models::AutoExecPolicy) -> AutoExecPolicy {
         connector_id: row.connector_id,
         op: row.op,
         args_template: row.args_template,
-        rate_limit_per_min: row.rate_limit_per_min.max(1) as u32,
+        // Defense-in-depth clamp; the table CHECK (1..=1000) is primary.
+        rate_limit_per_min: row
+            .rate_limit_per_min
+            .clamp(1, MAX_RATE_LIMIT_PER_MIN as i32) as u32,
         severity_cap: parse_severity(&row.severity_cap).unwrap_or(Severity::Routine),
     }
 }
@@ -339,13 +342,14 @@ pub async fn evaluate(
             }
         }
 
-        // Connector existence check.
+        // Connector existence check, workspace-scoped (AEG-C1): a foreign
+        // connector_id never resolves, so it can never be invoked.
         let connector = connector_repo
-            .get(policy.connector_id)
+            .get_for_workspace(policy.connector_id, ctx.workspace_id)
             .await
             .context("failed to look up connector for auto_exec policy")?;
         let Some(connector) = connector else {
-            // Connector not found — skip this policy, fall through.
+            // Connector not found in this workspace — skip this policy.
             continue;
         };
         if connector.status != crate::models::ConnectorStatus::Active {
@@ -450,9 +454,10 @@ async fn run_auto_exec(state: &AppState, survivor_id: Uuid) -> anyhow::Result<Au
             }
         }
 
-        // Connector existence.
+        // Connector existence, workspace-scoped (AEG-C1): a foreign or missing
+        // connector is ConnectorMissing, never an invocation.
         let connector = connector_repo
-            .get(policy.connector_id)
+            .get_for_workspace(policy.connector_id, ctx.workspace_id)
             .await
             .context("connector lookup failed")?;
         let connector = match connector {

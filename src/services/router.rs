@@ -39,10 +39,15 @@ pub struct Decision {
 
 // ── Map severity string to a fallback RoutingTarget ─────────────────────────
 
+/// Fallback when classifier output is unusable or the classifier is
+/// unreachable. The router floor (`forced_target`) already forces every
+/// flagged/command/approval_required signal to Draft before any fallback can
+/// run, so the flagged/command arms here are unreachable today; they coerce
+/// to Draft (never Notification) so a future reorder of the guards cannot
+/// silently open the auto-delivery path (auto-exec governance Slice 3).
 fn severity_fallback(severity: &str) -> RoutingTarget {
     match severity {
-        "flagged" => RoutingTarget::Notification,
-        "command" => RoutingTarget::Draft,
+        "flagged" | "command" => RoutingTarget::Draft,
         _ => RoutingTarget::Feed,
     }
 }

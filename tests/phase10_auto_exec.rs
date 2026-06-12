@@ -1148,6 +1148,101 @@ async fn audit_events_record_payload_includes_policy_name() {
     );
 }
 
+// ─── 10. foreign_connector_not_invoked (AC-6, governance Slice 3 / AEG-C1) ────
+
+/// A stored policy whose `connector_id` belongs to a *different* workspace
+/// (inserted via fixture, bypassing the API's Guard B) must never invoke the
+/// foreign connector: the engine resolves connectors workspace-scoped
+/// (`get_for_workspace`), so the outcome is `ConnectorMissing`.
+///
+/// Contract targets:
+///   - md/design/auto-exec-governance.md § Slice 3 / AC-6 (closes AEG-C1)
+#[tokio::test]
+#[ignore]
+async fn foreign_connector_not_invoked() {
+    let (_base, pool) = spawn_app().await;
+
+    // The foreign workspace's connector must NOT be called.
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(0)
+        .mount(&mock_server)
+        .await;
+
+    let ws_id = ops_workspace_id(&pool).await;
+
+    // A second workspace in the same org, holding an active slack connector.
+    let foreign_ws_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (org_id, name, domain, lifecycle)
+         VALUES ((SELECT org_id FROM workspaces WHERE id = $1),
+                 'Foreign', 'test', 'continuous'::workspace_lifecycle)
+         RETURNING id",
+    )
+    .bind(ws_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert foreign workspace failed");
+
+    let foreign_connector_id = insert_connector(
+        &pool,
+        foreign_ws_id,
+        "slack",
+        json!({ "webhook_url": format!("{}/", mock_server.uri()) }),
+    )
+    .await;
+
+    // Policy in the ops workspace pointing at the foreign connector.
+    insert_policy(
+        &pool,
+        ws_id,
+        foreign_connector_id,
+        "cross-tenant-policy",
+        Some("Cross tenant test"),
+        Some("flagged"),
+        json!({ "text": "{{signal.title}}" }),
+        10,
+        "flagged",
+    )
+    .await;
+
+    let signal_id = insert_signal(&pool, ws_id, "Cross tenant test signal", "flagged").await;
+    let survivor_id = insert_survivor(&pool, signal_id).await;
+
+    let state = make_state(pool.clone()).await;
+
+    let outcome = ione::services::auto_exec::evaluate_and_invoke(&state, survivor_id)
+        .await
+        .expect("evaluate_and_invoke must not return Err for a foreign connector");
+
+    match outcome {
+        ione::services::auto_exec::AutoExecOutcome::ConnectorMissing { policy_name } => {
+            assert_eq!(policy_name, "cross-tenant-policy");
+        }
+        other => panic!(
+            "foreign connector must produce ConnectorMissing, never an invocation; got {:?}",
+            other
+        ),
+    }
+
+    // No invocation, no delivery audit.
+    mock_server.verify().await;
+    let delivered_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events
+         WHERE workspace_id = $1 AND verb IN ('auto_authorized', 'delivered')",
+    )
+    .bind(ws_id)
+    .fetch_one(&pool)
+    .await
+    .expect("audit count query failed");
+    assert_eq!(
+        delivered_count, 0,
+        "no auto_authorized/delivered audit rows may exist for a foreign-connector policy, got {}",
+        delivered_count
+    );
+}
+
 // ─── Mutation check ───────────────────────────────────────────────────────────
 //
 // Mutations verified against the assertions above once the implementation exists.

@@ -286,11 +286,16 @@ async fn routing_decisions_cascade_on_survivor_delete() {
 /// `router::parse_response(raw, severity)` with garbage input must fall back to
 /// severity-based routing:
 ///   - severity=routine   → one decision, target_kind=feed
-///   - severity=flagged   → one decision, target_kind=notification
+///   - severity=flagged   → one decision, target_kind=draft
 ///   - severity=command   → one decision, target_kind=draft
+///
+/// flagged originally fell back to notification; auto-exec governance Slice 3
+/// (md/design/auto-exec-governance.md) coerces both floor severities to draft
+/// so a reorder of the router guards can never auto-deliver a flagged signal.
 ///
 /// Targets:
 ///   - plan Phase 7 § Classifier: "Fallback if LLM parse fails: map by severity"
+///   - auto-exec governance § Slice 3: fallback re-asserts the router floor
 ///   - ione::services::router::parse_response (public test-hook)
 ///
 /// REASON: requires src/services/router.rs with a public `parse_response` fn.
@@ -314,7 +319,7 @@ async fn router_parse_fallback_by_severity() {
         decisions[0].target_kind.as_str()
     );
 
-    // flagged → notification
+    // flagged → draft (floor re-assertion, never notification)
     let decisions = ione::services::router::parse_response(garbage, "flagged");
     assert_eq!(
         decisions.len(),
@@ -324,8 +329,8 @@ async fn router_parse_fallback_by_severity() {
     );
     assert_eq!(
         decisions[0].target_kind.as_str(),
-        "notification",
-        "severity=flagged fallback must map to target_kind=notification, got: {}",
+        "draft",
+        "severity=flagged fallback must map to target_kind=draft (router floor), got: {}",
         decisions[0].target_kind.as_str()
     );
 
@@ -897,5 +902,73 @@ async fn feed_ordering_is_newest_first() {
          expected older survivor id {}, got {}",
         surv_old_id,
         second_id
+    );
+}
+
+// ─── 12. Router floor holds under classifier outage (AC-9, governance Slice 3) ─
+
+/// An `approval_required = true`, severity = `flagged` signal routes to Draft
+/// even when the classifier is unreachable: the floor (`forced_target`) fires
+/// before the Ollama call, so no outage can downgrade the decision to
+/// Notification / auto-delivery.
+///
+/// Targets:
+///   - md/design/auto-exec-governance.md § Slice 3 / AC-9
+///   - ione::services::router::classify_survivor floor-before-classifier order
+#[tokio::test]
+#[ignore]
+async fn approval_required_flagged_routes_draft_on_classifier_outage() {
+    let (_base, pool) = spawn_app().await;
+    let ws_id = ops_workspace_id(&pool).await;
+
+    // Signal with the approval flag set (migration 0029).
+    let signal_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO signals
+           (workspace_id, source, title, body, severity, evidence, approval_required)
+         VALUES ($1, 'rule'::signal_source, 'Outage floor test', 'test body',
+                 'flagged'::severity, '[]'::jsonb, true)
+         RETURNING id",
+    )
+    .bind(ws_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert approval_required signal failed");
+    let survivor_id = insert_survivor(&pool, signal_id, "survive", chrono::Utc::now()).await;
+
+    // Point the classifier at a dead address: any reach-through to Ollama
+    // would error, and the fallback path would record `<model>:fallback`.
+    std::env::set_var("OLLAMA_BASE_URL", "http://127.0.0.1:1");
+
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://ione:ione@localhost:5433/ione".to_owned());
+    let state_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .expect("state pool connect failed");
+    let (_router, state) = ione::app_with_state(state_pool).await;
+
+    let rows = ione::services::router::classify_survivor(&state, survivor_id)
+        .await
+        .expect("classify_survivor must not error under classifier outage");
+
+    std::env::remove_var("OLLAMA_BASE_URL");
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "floor must produce exactly one routing decision, got {}",
+        rows.len()
+    );
+    assert_eq!(
+        rows[0].target_kind.as_str(),
+        "draft",
+        "approval_required + flagged must route to Draft under classifier outage, got: {}",
+        rows[0].target_kind.as_str()
+    );
+    assert_eq!(
+        rows[0].classifier_model, "policy:forced",
+        "the decision must come from the policy floor, not the outage fallback; got model: {}",
+        rows[0].classifier_model
     );
 }
