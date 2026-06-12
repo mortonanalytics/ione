@@ -18,7 +18,7 @@ Write-time error-string scrub (no API surface) ships in Phase 1 and applies to e
 | Endpoint | Method | Request schema | Response schema | Error codes | Auth |
 |---|---|---|---|---|---|
 | `/api/v1/workspaces/:id/audit_events` | GET | `?actor_kind=enum(user,system,peer)&actor_ref=string&verb=string(repeatable)&object_kind=string&object_id=UUID&foreign_tenant_id=string&since=ISO8601&until=ISO8601&cursor=opaque&limit=int(1..200)` | `{ items: AuditEvent[], next_cursor: string\|null }` | 400, 401, 403, 404 | Session + workspace-in-org |
-| `/api/v1/workspaces/:id/audit-aggregates` | GET | `?op=enum(count_by_bucket,count_by_actor)&bucket=enum(minute,hour,day,week)&group_by=enum(actor_kind,verb,actor_ref)&verb=string(repeatable)&actor_kind=enum&since=ISO8601&until=ISO8601` — `bucket` and `group_by` **required when** `op=count_by_bucket`, **rejected with 400 when** `op=count_by_actor`; window ≤ 90d; ≤ 1000 buckets; ≤ 200 groups for `count_by_actor` | Per-op shape, see below | 400, 401, 403, 404 | Session + workspace-in-org + admin (coc ≥ 80) |
+| `/api/v1/workspaces/:id/audit-aggregates` | GET | `?op=enum(count_by_bucket,count_by_actor)&bucket=enum(minute,hour,day,week)&group_by=enum(actor_kind,verb,actor_ref)&actor_kind=enum&actor_ref=string&verb=string(repeatable)&object_kind=string&object_id=UUID&foreign_tenant_id=string&since=ISO8601&until=ISO8601` — the full Slice-1 filter set applies to both ops; `bucket` and `group_by` **required when** `op=count_by_bucket`, **rejected with 400 when** `op=count_by_actor`; window ≤ 90d; ≤ 1000 buckets; ≤ 200 groups for `count_by_actor` | Per-op shape, see below | 400, 401, 403, 404 | Session + workspace-in-org + admin (coc ≥ 80) |
 | `/api/v1/workspaces/:id/pipeline-aggregates` | GET | `?op=enum(recovery_gap)&connector_id=UUID?&since=ISO8601&until=ISO8601` (window ≤ 90d; ≤ 10,000 items) | `{ op, items: [{ connector_id, gap_seconds, from_stage, occurred_at }], summary: { count, p50, p90, max } }` | 400, 401, 403, 404 | Session + workspace-in-org + admin (coc ≥ 80) |
 | `/api/v1/workspaces/:id/audit-export` | GET | Slice-1 filters; `since`+`until` **required** (≤ 90d span); `cursor=opaque`; no `limit` param — hard ceiling 10,000 rows/request | NDJSON stream, one `AuditEvent` JSON object per line; `X-Next-Cursor` response header when truncated (no body cursor field) | 400, 401, 403, 404, 429 | Session + workspace-in-org + admin (coc ≥ 80) |
 
@@ -36,7 +36,7 @@ Write-time error-string scrub (no API surface) ships in Phase 1 and applies to e
 ## Authz tiers (pre-RBAC)
 
 - **List endpoint** = workspace member (matches today's exposure).
-- **Aggregates + export** = admin (coc ≥ 80), because bulk retrieval of every member's actions is a materially different exposure than a 200-row recent list. Revisit when RBAC lands (the planned `audit_read` permission).
+- **Aggregates + export** = admin (coc ≥ 80), because bulk retrieval of every member's actions is a materially different exposure than a 200-row recent list. Revisit when RBAC lands (the planned `audit:read` permission — see `md/design/rbac-scaffolding.md`).
 - **Org isolation:** every endpoint enforces workspace→org membership at the route layer (`ensure_workspace_in_org`, cross-org → 404) **and** the repo queries verify org id via a join to `workspaces` — a DB-layer backstop without RLS.
 - **Rate/size limits:** 90-day windows, 10k-row export pages, 1000-bucket aggregate cap, one concurrent export per org (429).
 
@@ -45,3 +45,6 @@ Write-time error-string scrub (no API surface) ships in Phase 1 and applies to e
 - `limit` values outside 1..200 on the list endpoint are clamped, not rejected (plan-specified).
 - Cursor token: `base64url(created_at_rfc3339_micros + "|" + id)`; malformed cursor → 400.
 - `next_cursor` is non-null whenever the page is full (`items.length == limit`), including when the next page would be empty.
+- On `audit-aggregates` and `pipeline-aggregates`, `since`/`until` are optional and default to a trailing 30-day window (`until = now`, `since = until − 30d`); `since > until` → 400 (also on `audit-export`).
+- `audit-aggregates` parses but ignores `cursor`/`limit` (a malformed `cursor` still returns 400, since parsing is shared with the list endpoint).
+- `pipeline-aggregates` `summary.p50/p90/max` are `null` when `count == 0`; percentiles use linear interpolation (`percentile_cont` semantics).
