@@ -30,6 +30,8 @@ pub struct AppState {
     pub mcp_sessions: Arc<dashmap::DashMap<String, serde_json::Value>>,
     /// Per-peer mutex preventing concurrent token refresh (token-overwrite race fix).
     pub peer_refresh_locks: Arc<dashmap::DashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-org single-flight for audit exports: occupied entry = export in progress.
+    pub export_locks: Arc<dashmap::DashMap<Uuid, ()>>,
 }
 
 impl AppState {
@@ -56,6 +58,7 @@ impl AppState {
             peer_governor: Arc::new(dashmap::DashMap::new()),
             mcp_sessions: Arc::new(dashmap::DashMap::new()),
             peer_refresh_locks: Arc::new(dashmap::DashMap::new()),
+            export_locks: Arc::new(dashmap::DashMap::new()),
         }
     }
 }

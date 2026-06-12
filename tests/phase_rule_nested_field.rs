@@ -166,7 +166,10 @@ async fn rule_nested_field_fires_for_m6_2_event() {
     .await
     .expect("survivor");
     assert_eq!(survivor.0, "survive", "deterministic verdict must survive");
-    assert_eq!(survivor.1, "rule-engine", "critic model must be rule-engine");
+    assert_eq!(
+        survivor.1, "rule-engine",
+        "critic model must be rule-engine"
+    );
     assert_eq!(survivor.2, 1.0, "deterministic confidence must be 1.0");
 }
 
@@ -199,5 +202,8 @@ async fn rule_nested_field_does_not_fire_for_m5_1_event() {
         .fetch_one(&pool)
         .await
         .expect("survivor count");
-    assert_eq!(survivor_count, 0, "no survivor may be created below threshold");
+    assert_eq!(
+        survivor_count, 0,
+        "no survivor may be created below threshold"
+    );
 }

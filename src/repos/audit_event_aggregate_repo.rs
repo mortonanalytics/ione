@@ -95,8 +95,7 @@ impl AuditEventAggregateRepo {
         org_id: Uuid,
         filter: &AuditEventFilter,
     ) -> anyhow::Result<Vec<ActorCountRow>> {
-        let mut qb =
-            QueryBuilder::new("SELECT ae.actor_ref AS key, COUNT(*)::bigint AS count");
+        let mut qb = QueryBuilder::new("SELECT ae.actor_ref AS key, COUNT(*)::bigint AS count");
         push_filtered_from_where(&mut qb, workspace_id, org_id, filter);
         qb.push(" GROUP BY key ORDER BY count DESC, key ASC LIMIT 200");
         let rows = qb

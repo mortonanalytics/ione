@@ -22,6 +22,7 @@ pub mod approvals;
 pub mod artifacts;
 pub mod audit_aggregates;
 pub mod audit_events;
+pub mod audit_export;
 pub mod auth_routes;
 pub mod bindings;
 pub mod broker;
@@ -164,6 +165,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/pipeline-aggregates",
             get(audit_aggregates::get_pipeline_aggregates),
+        )
+        .route(
+            "/api/v1/workspaces/:id/audit-export",
+            get(audit_export::get_audit_export),
         )
         .route(
             "/api/v1/workspaces/:id/event-table",

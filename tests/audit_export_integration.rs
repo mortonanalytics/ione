@@ -209,12 +209,11 @@ async fn phase1_repo_write_scrub() {
         .await
         .expect("insert audit event");
 
-    let stored: Value =
-        sqlx::query_scalar("SELECT payload FROM audit_events WHERE id = $1")
-            .bind(inserted.id)
-            .fetch_one(&pool)
-            .await
-            .expect("read back payload");
+    let stored: Value = sqlx::query_scalar("SELECT payload FROM audit_events WHERE id = $1")
+        .bind(inserted.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back payload");
     let error_text = stored["error"].as_str().expect("error field is a string");
     assert!(!error_text.contains("secret"), "{error_text}");
     assert!(!error_text.contains("user:"), "{error_text}");
@@ -236,7 +235,11 @@ async fn phase2_filtered_list_cursor_walk() {
     let t0 = seed_base_time();
 
     for i in 0..350 {
-        let verb = if i < 120 { "peer_tool_executed" } else { "other_verb" };
+        let verb = if i < 120 {
+            "peer_tool_executed"
+        } else {
+            "other_verb"
+        };
         seed_audit_event(
             &pool,
             ws,
@@ -299,12 +302,24 @@ async fn phase2_invalid_cursor_400() {
 async fn phase2_cross_org_404() {
     let (base, pool) = spawn_app().await;
     let ws = default_workspace_id(&pool).await;
-    seed_audit_event(&pool, ws, "peer", "peer-0", "peer_tool_executed", seed_base_time()).await;
+    seed_audit_event(
+        &pool,
+        ws,
+        "peer",
+        "peer-0",
+        "peer_tool_executed",
+        seed_base_time(),
+    )
+    .await;
 
     // Workspace in a different org: the default user's org check must 404.
     let other_org = insert_org(&pool, "Other Org").await;
     let other_ws = insert_workspace(&pool, other_org, "Other Workspace").await;
-    let resp = get(&base, &format!("/api/v1/workspaces/{other_ws}/audit_events")).await;
+    let resp = get(
+        &base,
+        &format!("/api/v1/workspaces/{other_ws}/audit_events"),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -380,10 +395,26 @@ async fn phase3_count_by_actor() {
     let t0 = seed_base_time();
 
     for i in 0..5 {
-        seed_audit_event(&pool, ws, "user", "actor-A", "artifact_created", t0 + Duration::seconds(i)).await;
+        seed_audit_event(
+            &pool,
+            ws,
+            "user",
+            "actor-A",
+            "artifact_created",
+            t0 + Duration::seconds(i),
+        )
+        .await;
     }
     for i in 0..3 {
-        seed_audit_event(&pool, ws, "user", "actor-B", "artifact_created", t0 + Duration::seconds(100 + i)).await;
+        seed_audit_event(
+            &pool,
+            ws,
+            "user",
+            "actor-B",
+            "artifact_created",
+            t0 + Duration::seconds(100 + i),
+        )
+        .await;
     }
 
     let since = ts(t0);
@@ -427,7 +458,14 @@ async fn phase3_recovery_gap() {
     let conn = insert_connector(&pool, ws, "gap-conn").await;
 
     seed_pipeline_event(&pool, ws, Some(conn), "error", t0).await;
-    seed_pipeline_event(&pool, ws, Some(conn), "publish_started", t0 + Duration::seconds(90)).await;
+    seed_pipeline_event(
+        &pool,
+        ws,
+        Some(conn),
+        "publish_started",
+        t0 + Duration::seconds(90),
+    )
+    .await;
 
     let since = ts(t0 - Duration::hours(1));
     let until = ts(t0 + Duration::hours(1));
@@ -469,12 +507,33 @@ async fn phase3_recovery_gap_interleaved() {
 
     // (a) interleaved first_event must not shorten the gap.
     seed_pipeline_event(&pool, ws, Some(conn_a), "error", t0).await;
-    seed_pipeline_event(&pool, ws, Some(conn_a), "first_event", t0 + Duration::seconds(30)).await;
-    seed_pipeline_event(&pool, ws, Some(conn_a), "publish_started", t0 + Duration::seconds(90)).await;
+    seed_pipeline_event(
+        &pool,
+        ws,
+        Some(conn_a),
+        "first_event",
+        t0 + Duration::seconds(30),
+    )
+    .await;
+    seed_pipeline_event(
+        &pool,
+        ws,
+        Some(conn_a),
+        "publish_started",
+        t0 + Duration::seconds(90),
+    )
+    .await;
 
     // (b) conn-b's fault window overlaps conn-a's; pairs within its own connector.
     seed_pipeline_event(&pool, ws, Some(conn_b), "stall", t0 + Duration::seconds(10)).await;
-    seed_pipeline_event(&pool, ws, Some(conn_b), "publish_started", t0 + Duration::seconds(40)).await;
+    seed_pipeline_event(
+        &pool,
+        ws,
+        Some(conn_b),
+        "publish_started",
+        t0 + Duration::seconds(40),
+    )
+    .await;
 
     // (c) unrecovered fault: no later publish_started on conn-c.
     seed_pipeline_event(&pool, ws, Some(conn_c), "error", t0 + Duration::seconds(20)).await;
@@ -527,6 +586,164 @@ async fn phase3_non_admin_403() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+// ─── Phase 4: bulk NDJSON export ─────────────────────────────────────────────
+
+/// Bulk-seed audit events via generate_series (one-by-one INSERTs are too
+/// slow for the 10,500-row AC-5 seed).
+async fn bulk_seed_audit_events(pool: &PgPool, workspace_id: Uuid, n: i64, t0: DateTime<Utc>) {
+    sqlx::query(
+        "INSERT INTO audit_events
+           (workspace_id, actor_kind, actor_ref, verb, object_kind, payload, created_at)
+         SELECT $1, 'peer'::actor_kind, 'peer-1', 'peer_tool_executed', 'test_object',
+                '{}'::jsonb, $2::timestamptz + make_interval(secs => i)
+         FROM generate_series(1, $3) AS i",
+    )
+    .bind(workspace_id)
+    .bind(t0)
+    .bind(n)
+    .execute(pool)
+    .await
+    .expect("bulk seed audit events");
+}
+
+/// AC-5: 10,500 rows in window → exactly 10,000 NDJSON lines + X-Next-Cursor;
+/// the cursor-continued request returns the remaining 500 and no header.
+#[tokio::test]
+#[ignore]
+async fn phase4_export_truncation_cursor() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    elevate_default_user_to_admin(&pool, ws).await;
+    let t0 = seed_base_time();
+    bulk_seed_audit_events(&pool, ws, 10_500, t0).await;
+
+    let since = ts(t0);
+    let until = ts(t0 + Duration::days(7));
+    let resp = get(
+        &base,
+        &format!("/api/v1/workspaces/{ws}/audit-export?since={since}&until={until}"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/x-ndjson"
+    );
+    let cursor = resp
+        .headers()
+        .get("x-next-cursor")
+        .expect("x-next-cursor present")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let body = resp.text().await.expect("body");
+    let lines: Vec<&str> = body.lines().collect();
+    assert_eq!(lines.len(), 10_000);
+    for line in &lines {
+        let parsed: Value = serde_json::from_str(line).expect("NDJSON line parses");
+        assert!(parsed.is_object());
+    }
+
+    let resp = get(
+        &base,
+        &format!(
+            "/api/v1/workspaces/{ws}/audit-export?since={since}&until={until}&cursor={cursor}"
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.headers().get("x-next-cursor").is_none());
+    let body = resp.text().await.expect("body");
+    assert_eq!(body.lines().count(), 500);
+}
+
+/// AC-7: 91-day span → 400; missing since → 400.
+#[tokio::test]
+#[ignore]
+async fn phase4_export_validation() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    elevate_default_user_to_admin(&pool, ws).await;
+    let t0 = seed_base_time();
+
+    let resp = get(
+        &base,
+        &format!(
+            "/api/v1/workspaces/{ws}/audit-export?since={}&until={}",
+            ts(t0),
+            ts(t0 + Duration::days(91))
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["error"], "bad_request");
+
+    let resp = get(
+        &base,
+        &format!("/api/v1/workspaces/{ws}/audit-export?until={}", ts(t0)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// AC-9: while one export stream is open, a second request for the same org
+/// is rejected with 429; dropping the first frees the slot.
+#[tokio::test]
+#[ignore]
+async fn phase4_concurrent_export_429() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    elevate_default_user_to_admin(&pool, ws).await;
+    let t0 = seed_base_time();
+    // Enough bytes that the server can't flush the whole stream into socket
+    // buffers — the first response must still be in flight for the 429 check.
+    bulk_seed_audit_events(&pool, ws, 10_500, t0).await;
+
+    let since = ts(t0);
+    let until = ts(t0 + Duration::days(7));
+    let url = format!("/api/v1/workspaces/{ws}/audit-export?since={since}&until={until}");
+
+    let first = get(&base, &url).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    // Headers received, body unconsumed → permit still held.
+    let second = get(&base, &url).await;
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    drop(first);
+    // The permit frees when the server-side stream is dropped; poll briefly.
+    let mut freed = false;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let retry = get(&base, &url).await;
+        if retry.status() == StatusCode::OK {
+            freed = true;
+            break;
+        }
+        assert_eq!(retry.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+    assert!(freed, "export slot was never released after client drop");
+}
+
+/// AC-6 (export 403 half): non-admin member gets 403.
+#[tokio::test]
+#[ignore]
+async fn phase4_non_admin_403() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let t0 = seed_base_time();
+    let resp = get(
+        &base,
+        &format!(
+            "/api/v1/workspaces/{ws}/audit-export?since={}&until={}",
+            ts(t0),
+            ts(t0 + Duration::days(1))
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
 /// AC-10: EXPLAIN of the real cursor query shape (id tiebreaker + cursor
 /// predicate) uses an index scan — no Seq Scan, no Sort node.
 #[tokio::test]
@@ -536,7 +753,11 @@ async fn phase2_explain_index_scan() {
     let ws = default_workspace_id(&pool).await;
     let t0 = seed_base_time();
     for i in 0..1000 {
-        let verb = if i % 3 == 0 { "peer_tool_executed" } else { "other_verb" };
+        let verb = if i % 3 == 0 {
+            "peer_tool_executed"
+        } else {
+            "other_verb"
+        };
         seed_audit_event(&pool, ws, "peer", "peer-0", verb, t0 + Duration::seconds(i)).await;
     }
     sqlx::query("ANALYZE audit_events")

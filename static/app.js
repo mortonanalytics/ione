@@ -4535,6 +4535,7 @@ const auditStatsEl     = document.getElementById('audit-stats');
 const auditStatTotalEl = document.getElementById('audit-stat-total');
 const auditStatRecEl   = document.getElementById('audit-stat-recovery');
 const auditChartEl     = document.getElementById('audit-chart');
+const auditExportBtn   = document.getElementById('audit-export-btn');
 
 let auditAdminDenied = false;
 
@@ -4553,14 +4554,60 @@ async function loadAuditStats() {
       { skipErrorToast: true }
     );
     renderAuditStats(agg, pipe);
+    auditExportBtn.hidden = false; // probe succeeded → admin
   } catch (err) {
     if (err && err.status === 403) {
       auditAdminDenied = true;
     }
     auditStatsEl.hidden = true;
     auditChartEl.hidden = true;
+    auditExportBtn.hidden = true;
   }
 }
+
+/* Export the current filter view as NDJSON, following X-Next-Cursor pages.
+   since/until are computed once so every page sees the same frozen window. */
+async function exportAuditNdjson() {
+  if (!activeWorkspace) return;
+  auditExportBtn.disabled = true;
+  auditStatusEl.textContent = 'Exporting…';
+  try {
+    const baseParts = auditFilterParts().filter((p) => !p.startsWith('since='));
+    const winMs = AUDIT_WINDOW_MS[auditFilterWindow.value] || 30 * 86400e3;
+    const until = new Date();
+    const since = new Date(until.getTime() - winMs);
+    baseParts.push('since=' + encodeURIComponent(since.toISOString()));
+    baseParts.push('until=' + encodeURIComponent(until.toISOString()));
+
+    const chunks = [];
+    let cursor = null;
+    do {
+      const parts = baseParts.slice();
+      if (cursor) parts.push('cursor=' + encodeURIComponent(cursor));
+      const resp = await fetch(
+        `/api/v1/workspaces/${activeWorkspace.id}/audit-export?` + parts.join('&')
+      );
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      chunks.push(await resp.text());
+      cursor = resp.headers.get('X-Next-Cursor');
+    } while (cursor);
+
+    const blob = new Blob(chunks, { type: 'application/x-ndjson' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `audit-events-${activeWorkspace.id}.ndjson`;
+    a.click();
+    URL.revokeObjectURL(url);
+    auditStatusEl.textContent = '';
+  } catch (err) {
+    auditStatusEl.textContent = 'Export failed: ' + err.message;
+  } finally {
+    auditExportBtn.disabled = false;
+  }
+}
+
+auditExportBtn.addEventListener('click', exportAuditNdjson);
 
 function renderAuditStats(agg, pipe) {
   const groups = (agg && agg.groups) || [];

@@ -71,8 +71,7 @@ pub async fn get_audit_aggregates(
     require_admin(&ctx, &state.pool).await?;
 
     let raw = raw.as_deref();
-    let op = query_param(raw, "op")
-        .ok_or_else(|| AppError::BadRequest("op is required".into()))?;
+    let op = query_param(raw, "op").ok_or_else(|| AppError::BadRequest("op is required".into()))?;
     let bucket = query_param(raw, "bucket");
     let group_by = query_param(raw, "group_by");
 
@@ -84,8 +83,9 @@ pub async fn get_audit_aggregates(
     let repo = AuditEventAggregateRepo::new(state.pool.clone());
     match op.as_str() {
         "count_by_bucket" => {
-            let bucket = bucket
-                .ok_or_else(|| AppError::BadRequest("bucket is required for count_by_bucket".into()))?;
+            let bucket = bucket.ok_or_else(|| {
+                AppError::BadRequest("bucket is required for count_by_bucket".into())
+            })?;
             let bucket_count = ((until - since).num_seconds() as f64
                 / bucket_duration(&bucket)?.num_seconds() as f64)
                 .ceil() as i64;
@@ -139,8 +139,7 @@ pub async fn get_pipeline_aggregates(
     require_admin(&ctx, &state.pool).await?;
 
     let raw = raw.as_deref();
-    let op = query_param(raw, "op")
-        .ok_or_else(|| AppError::BadRequest("op is required".into()))?;
+    let op = query_param(raw, "op").ok_or_else(|| AppError::BadRequest("op is required".into()))?;
     if op != "recovery_gap" {
         return Err(AppError::BadRequest(format!(
             "unsupported aggregate op '{op}'"

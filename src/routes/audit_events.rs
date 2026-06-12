@@ -114,7 +114,13 @@ pub async fn list_audit_events(
 
     let repo = AuditEventRepo::new(state.pool.clone());
     let mut items = repo
-        .list_filtered(workspace_id, ctx.org_id, &params.filter, params.cursor, limit)
+        .list_filtered(
+            workspace_id,
+            ctx.org_id,
+            &params.filter,
+            params.cursor,
+            limit,
+        )
         .await
         .map_err(AppError::Internal)?;
     // Read-time backstop: rows written before the write-time scrub existed.

@@ -53,6 +53,9 @@ pub enum AppError {
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
 
+    #[error("too many requests: {0}")]
+    TooManyRequests(String),
+
     #[error("workspace binding conflict: foreign_tenant_id changed from {old} to {new}")]
     WorkspaceBindingConflict { old: String, new: String },
 
@@ -193,6 +196,14 @@ impl IntoResponse for AppError {
                 })),
             )
                 .into_response(),
+            AppError::TooManyRequests(msg) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "error": "too_many_requests",
+                    "message": msg,
+                })),
+            )
+                .into_response(),
             AppError::WorkspaceBindingConflict { old, new } => (
                 StatusCode::CONFLICT,
                 Json(json!({
@@ -255,6 +266,7 @@ mod tests {
             },
             AppError::ConnectorError("connector failed".into()),
             AppError::PayloadTooLarge("too much".into()),
+            AppError::TooManyRequests("one export at a time".into()),
             AppError::WorkspaceBindingConflict {
                 old: "old".into(),
                 new: "new".into(),

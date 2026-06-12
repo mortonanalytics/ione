@@ -165,6 +165,67 @@ impl AuditEventRepo {
             .context("failed to list filtered audit_events")
     }
 
+    /// Export key query (index-only, cheap): the page of (created_at, id)
+    /// keys that decides both truncation and the continuation cursor.
+    pub async fn keyset_page(
+        &self,
+        workspace_id: Uuid,
+        org_id: Uuid,
+        filter: &AuditEventFilter,
+        cursor: Option<(DateTime<Utc>, Uuid)>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<(DateTime<Utc>, Uuid)>> {
+        let mut qb = QueryBuilder::new("SELECT ae.created_at, ae.id");
+        push_filtered_from_where(&mut qb, workspace_id, org_id, filter);
+        if let Some(cursor) = cursor {
+            push_cursor_predicate(&mut qb, cursor);
+        }
+        qb.push(" ORDER BY ae.created_at DESC, ae.id DESC LIMIT ");
+        qb.push_bind(limit);
+        let rows = qb
+            .build_query_as::<(DateTime<Utc>, Uuid)>()
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to fetch audit_events key page")?;
+        Ok(rows)
+    }
+
+    /// Export row stream: same WHERE as `list_filtered`, bounded inclusively
+    /// by the first/last keys returned from `keyset_page`. The window is
+    /// frozen by those bounds, so this sees exactly the key query's rows.
+    pub fn stream_between_keys(
+        &self,
+        workspace_id: Uuid,
+        org_id: Uuid,
+        filter: &AuditEventFilter,
+        first: (DateTime<Utc>, Uuid),
+        last: (DateTime<Utc>, Uuid),
+    ) -> impl futures_util::Stream<Item = sqlx::Result<AuditEvent>> + Send + 'static {
+        let pool = self.pool.clone();
+        let mut qb: QueryBuilder<'static, Postgres> =
+            QueryBuilder::new(format!("SELECT {AUDIT_EVENT_COLUMNS}"));
+        push_filtered_from_where(&mut qb, workspace_id, org_id, filter);
+        qb.push(" AND (ae.created_at, ae.id) <= (");
+        qb.push_bind(first.0);
+        qb.push(", ");
+        qb.push_bind(first.1);
+        qb.push(")");
+        qb.push(" AND (ae.created_at, ae.id) >= (");
+        qb.push_bind(last.0);
+        qb.push(", ");
+        qb.push_bind(last.1);
+        qb.push(")");
+        qb.push(" ORDER BY ae.created_at DESC, ae.id DESC");
+        async_stream::stream! {
+            use futures_util::StreamExt;
+            let mut qb = qb;
+            let mut rows = qb.build_query_as::<AuditEvent>().fetch(&pool);
+            while let Some(row) = rows.next().await {
+                yield row;
+            }
+        }
+    }
+
     pub async fn list_for_workspace(
         &self,
         workspace_id: Uuid,

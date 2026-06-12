@@ -211,5 +211,4 @@ impl PeerGovernor {
             open: breaker.state == BreakerState::Open,
         }
     }
-
 }

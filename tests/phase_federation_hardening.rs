@@ -9,7 +9,10 @@ fn open_breaker(gov: &PeerGovernor) {
     for _ in 0..5 {
         gov.record_peer_failure();
     }
-    assert!(gov.snapshot().open, "five peer failures should open the breaker");
+    assert!(
+        gov.snapshot().open,
+        "five peer failures should open the breaker"
+    );
 }
 
 #[tokio::test]
@@ -53,7 +56,7 @@ async fn client_error_probe_releases_the_slot() {
     open_breaker(&gov);
 
     assert!(gov.acquire().await.is_ok()); // probe admitted
-    // A 4xx is inconclusive: it must free the probe slot without closing/opening.
+                                          // A 4xx is inconclusive: it must free the probe slot without closing/opening.
     assert!(!gov.record_outcome(CallOutcome::ClientError));
     assert_eq!(gov.snapshot().breaker_state, BreakerState::HalfOpen);
     // ...so the next caller can probe again.
