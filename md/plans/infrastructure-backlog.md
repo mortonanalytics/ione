@@ -1,8 +1,26 @@
 # IONe Infrastructure Backlog
 
-What it would take to move IONe from a v0.1 integration fabric to a more complete substrate for hosting real data apps. Prioritized. Items tagged **[Epicenter]** are needed by the seismic-monitor demo (`../../epicenter`), which is the current demand signal driving this list.
+What it would take to move IONe from a v0.1 integration fabric to a more complete substrate for hosting real data apps. Prioritized. Items tagged **[Epicenter]** are needed by the seismic-monitor demo (`../../epicenter`), which is the current demand signal driving this list. Items tagged **[DICE]** position IONe for the DARPA DICE TA3 bid (`rfp/darpa-dice/abstract-final.md`; abstract due 2026-06-30, full proposal 2026-08-25) — they back specific claims in §2.4/§2.7 of the abstract.
 
 Effort estimates are rough (solo-dev days). File refs point at where the work likely lands.
+
+## Priority sequence — RFP need × commercial reuse
+
+Ranked by dual fit: backs a DICE abstract claim *and* is product capability any enterprise deployment needs (not bid-only artifacts).
+
+| # | Item | RFP need | Commercial reuse | Effort |
+|---|------|----------|------------------|--------|
+| 1 | Structured T&E event export (P6) | T&E observability surface — §2.4 monitoring claims | Audit analytics / compliance reporting / agent-ops monitoring for any org | ~1 wk |
+| 2 | RBAC scaffolding (P4) | Committed as scoped Phase 1 extension | Enterprise table stakes; unblocks every multi-team deployment | ~3–5 d |
+| 3 | Auto-exec policy DSL (P4) | Implicit: human-approval-only cannot scale to 500–100K-agent collectives | Removes the #1 friction for production use (approval fatigue) | ~3–4 d |
+| 4 | Programmatic workspace/peer provisioning (P6) | "One workspace per mission" at scale; any scale demo | API-first onboarding, IaC, multi-env deploys | ~2–3 d |
+| 5 | Cross-app semantic catalog + vector search (P3) | Backs the "surfaced upon relevance" bounded-context claim (§2.4) | Tool/resource discovery as peer count grows — core product value | ~1 wk |
+| 6 | MCP routing throughput benchmark (P6) | §2.7 <5% overhead target needs measured baseline | Perf numbers for sales/marketing; cheap | ~2–3 d |
+| 7 | Adaptor-contract spec (P3) | §2.3 claim de-risk | Protocol neutrality (A2A/ANP) widens market, but speculative pre-award | ~2–3 d |
+
+Deadline-bound regardless of rank: **federation white paper** (P6, due with full proposal 2026-08-25). RFP-only, no commercial reuse — schedule it, don't trade it against the list above.
+
+Single-axis items (commercial only — sequence after the above): SAML 2.0 SP, UI theming hooks, context-slice lazy expansion. The [Epicenter] approval-500 bug stays ad-hoc: demo-blocking and ~0.5 d, fix opportunistically.
 
 ---
 
@@ -56,7 +74,8 @@ IONe renders MapLibre tiles and nothing else today. No chart, table, or live-fea
 
 ## P3 — Federation maturity (from `md/design/`)
 
-- **Tool namespacing in the federation hub.** Single namespace today; two peers exporting `query_data` collide. Effort: ~2–3 d.
+- ✅ **Tool namespacing in the federation hub.** Shipped — per-peer `prefix:tool` namespacing with duplicate detection (`src/services/federation.rs:78`). This item was stale; the DICE abstract correctly cites it as shipped.
+- **[DICE] Protocol-neutral adaptor-contract spec.** Publish the §2.3 contract as a spec doc (message envelope w/ sender, mission scope, payload, signature; agent registry with capability declarations; observation hooks; failure-injection API; scoring-event schema) and add capability declarations to the existing peer registry. DICE funds the A2A/ANP bindings; the spec + registry field pre-award de-risks the claim cheaply. Effort: ~2–3 d.
 - **Context-slice lazy expansion (`slice://`).** Contract is published (apps ship slices) but IONe-side routing/expansion isn't built. Effort: ~3 d.
 - **Cross-app semantic catalog + vector search** over peer resources/tool descriptions (pgvector already present). Effort: ~1 wk.
 
@@ -64,9 +83,12 @@ IONe renders MapLibre tiles and nothing else today. No chart, table, or live-fea
 
 ## P4 — Identity & governance
 
+- **[DICE] RBAC scaffolding (Admin service seed).** The abstract commits RBAC as "a scoped DICE Phase 1 extension" and Fig 3 names an Admin/RBAC service. Build a minimal role model (roles, role→tool/workspace grants, enforcement at the router) so the claim has a demonstrable trajectory before full proposal. Effort: ~3–5 d.
 - **SAML 2.0 SP** for enterprise SSO (Keycloak bridges SAML→OIDC for now). Deferred from v0.1. Effort: ~3–5 d.
 - **Auto-exec policy DSL.** Today: human-approval only. Add conditional auto-execution policies for low-risk tools. Effort: ~3–4 d.
 - **Audit the auto-exec bypass guard.** Confirm the router's force-to-draft on `approval_required` (`src/services/router.rs`) is not bypassable. Effort: ~0.5 d review.
+
+- **[Epicenter] Approving a draft/notification artifact 500s.** Found in the 2026-06-10 Epicenter live-docker walkthrough (`../../epicenter/md/verification/epicenter-walkthrough.md`). `POST /api/v1/approvals/:id {decision:"approved"}` records the decision (status→`approved`, audit row `actorKind:user`) and **then returns HTTP 500**: delivery attempts to `invoke` the routed connector, but the `geojson_poll` connector (the only target for an ingest-only stream) returns `"invoke not implemented for this connector"` (audit `verb:delivery_failed`). For an alert/notification, the **decision is the outcome** — there is nothing to execute. Delivery of an approved draft artifact with no invokable action must record the decision and return 200, not 500. Demo-blocking for Epicenter: the UI's `apiFetch` throws on the 500 and surfaces `Decision failed: …` on the demo's climactic approve action even though the decision persisted. Options: (a) treat a draft/notification artifact as terminal-on-approval (no invoke); (b) make the delivery step tolerate `invoke`-less connectors as a no-op with an audit record. Effort: ~0.5–1 d.
 
 ---
 
@@ -74,6 +96,19 @@ IONe renders MapLibre tiles and nothing else today. No chart, table, or live-fea
 
 - **UI theming hooks.** The static HTML+JS UI is intentionally lightweight. To host product-grade demos (e.g. Epicenter's ops-console theme), define a token/theming layer or commit to a SPA upgrade path. Decide before investing in per-app CSS. Effort: ~2–4 d for a theming layer.
 - **Connector setup + signal/approval timeline polish.** Incremental.
+
+---
+
+## P6 — DICE T&E positioning (evidence for the full proposal, due 2026-08-25)
+
+The abstract makes IONe the agent interface + monitoring layer for DICE-MDO (§2.4) with quantitative platform metrics (§2.7). These items convert design claims into measured evidence before full proposal.
+
+- **[DICE] Structured T&E event export.** The abstract makes IONe's audit trail/session event stream the T&E observability surface: tool-call logs → interaction counts (scalability), session timestamps → time-to-recover (adaptability), per-agent inference-step tracking (resilience). No queryable export of these exists today. Add a structured metrics/event export API over the audit + session tables (filterable by workspace/peer/session, bulk export). Biggest claim-vs-backlog gap. Effort: ~1 wk. **In design:** `md/design/audit-event-export.md` (note: design found per-agent *inference-step* tracking and peer-session duration have no schema support — v1 ships interaction counts + recovery-gap; step tracking stays DICE-funded future work).
+- **[DICE] MCP routing throughput benchmark.** §2.7 targets <5% (stretch <2%) monitoring overhead at matched event rates. Measure baseline now: tool-calls/sec through the federation router, routing latency with/without audit logging enabled. Gives the full proposal hard numbers instead of design assumptions (per the tense/evidence boundary, `adcb6c2`). Effort: ~2–3 d.
+- **[DICE] Programmatic workspace/peer provisioning.** "One workspace per mission" at 500–100K agents implies API-driven setup (create workspace, register peers, attach connectors headlessly), not the manual UI flow. Required before any scale demo. Effort: ~2–3 d.
+- **[DICE] IONe federation-architecture white paper.** Promised in abstract §5 to accompany the full proposal. Hard deadline 2026-08-25. Effort: ~3–4 d writing.
+
+Not here: CMMC / NIST SP 800-171 enclave stand-up (§2.6 commitment) — business-ops, tracked outside this infra backlog.
 
 ---
 
