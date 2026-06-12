@@ -87,6 +87,7 @@
         <button id="tab-approvals" role="tab" aria-selected="false" aria-controls="panel-approvals" class="tab tab--ops">Approvals <span id="approvals-badge" class="approvals-badge" hidden></span></button>
         <button id="tab-audit" role="tab" aria-selected="false" aria-controls="panel-audit" class="tab tab--ops">Audit</button>
         <button id="tab-roles" role="tab" aria-selected="false" aria-controls="panel-roles" class="tab tab--ops" hidden>Roles</button>
+        <button id="tab-policies" role="tab" aria-selected="false" aria-controls="panel-policies" class="tab tab--ops" hidden>Policies</button>
       </div>
 
       <!-- Chat panel -->
@@ -405,6 +406,60 @@
             <select id="roles-membership-role"></select>
             <button type="submit" id="roles-grant-btn">Grant</button>
             <button type="button" id="roles-revoke-btn">Revoke</button>
+          </form>
+        </section>
+      </div>
+
+      <!-- Auto-exec policies panel (visible only to approvals:decide holders — probe-and-hide) -->
+      <div id="panel-policies" role="tabpanel" aria-labelledby="tab-policies" hidden>
+        <div id="policies-toolbar">
+          <button id="policies-refresh-btn" type="button" aria-label="Refresh policies">Refresh</button>
+        </div>
+        <div id="policies-status" aria-live="polite"></div>
+        <ul id="policies-list" role="list"></ul>
+        <section id="policy-editor" aria-labelledby="policy-editor-title">
+          <h2 id="policy-editor-title">New policy</h2>
+          <form id="policy-form">
+            <label for="policy-name">Name <span aria-hidden="true">*</span></label>
+            <input id="policy-name" type="text" required autocomplete="off" />
+
+            <label for="policy-trigger-prefix">Signal title prefix</label>
+            <input id="policy-trigger-prefix" type="text" autocomplete="off" />
+
+            <label for="policy-trigger-severity">Trigger severity at most</label>
+            <select id="policy-trigger-severity">
+              <option value="">(any)</option>
+              <option value="routine">routine</option>
+              <option value="flagged">flagged</option>
+            </select>
+
+            <label for="policy-connector">Connector <span aria-hidden="true">*</span></label>
+            <select id="policy-connector" required></select>
+
+            <label for="policy-op">Op <span aria-hidden="true">*</span></label>
+            <input id="policy-op" type="text" required value="send" autocomplete="off" />
+
+            <label for="policy-args">Args template (JSON)</label>
+            <textarea id="policy-args" rows="3">{ "text": "{{signal.title}}: {{signal.body}}" }</textarea>
+
+            <label for="policy-rate">Rate limit per minute (1–1000)</label>
+            <input id="policy-rate" type="number" min="1" max="1000" value="5" required />
+
+            <label for="policy-cap">Severity cap</label>
+            <select id="policy-cap">
+              <option value="routine">routine</option>
+              <option value="flagged">flagged</option>
+            </select>
+
+            <label for="policy-permission">Authorized by permission <span aria-hidden="true">*</span></label>
+            <input id="policy-permission" type="text" required placeholder="approvals:decide" autocomplete="off" />
+
+            <p id="policy-form-error" class="policy-form-error" hidden></p>
+
+            <div class="policy-form-actions">
+              <button type="submit" id="policy-save-btn">Save policy</button>
+              <button type="button" id="policy-cancel-btn" hidden>Cancel edit</button>
+            </div>
           </form>
         </section>
       </div>

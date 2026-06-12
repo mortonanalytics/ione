@@ -24,6 +24,8 @@ Write-time error-string scrub (no API surface) ships in Phase 1 and applies to e
 
 `AuditEvent` (existing shape, unchanged): id, workspace id, actor kind, actor ref, verb, object kind, object id, payload (JSONB, opaque), foreign tenant id, created-at timestamp.
 
+Auto-exec governance (`md/requirements/active/auto-exec-governance.md`) adds the verbs `auto_exec_policy.created` / `auto_exec_policy.updated` / `auto_exec_policy.deleted` (object_kind `auto_exec_policy`) and the `terminal: true` payload variant of `delivered`; they flow through these endpoints with no contract change.
+
 ### Per-op response shapes for `audit-aggregates`
 
 - `count_by_bucket` → `{ op: "count_by_bucket", bucket: enum, groups: [{ key: string, bucket_start: ISO8601, count: int }] }` — `key` is the value of the requested `group_by` dimension (an `actor_kind` enum value, a `verb` string, or an `actor_ref` string).

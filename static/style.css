@@ -3601,3 +3601,75 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 #roles-membership input[type='text'] {
   min-width: 22em;
 }
+
+/* Auto-exec policies panel (governance) */
+#policies-toolbar {
+  margin-bottom: var(--space-2, 8px);
+}
+
+#policies-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.policy-card {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  margin-bottom: var(--space-2, 8px);
+}
+
+.policy-card--disabled {
+  opacity: 0.6;
+}
+
+.policy-card-header {
+  display: flex;
+  gap: var(--space-2, 8px);
+  align-items: baseline;
+  margin-bottom: var(--space-1, 4px);
+}
+
+.policy-card-meta {
+  color: #555;
+  font-size: var(--font-size-sm, 0.875rem);
+}
+
+.policy-card-detail {
+  color: #555;
+  font-size: var(--font-size-sm, 0.875rem);
+  margin-bottom: var(--space-2, 8px);
+  word-break: break-all;
+}
+
+.policy-card-actions {
+  display: flex;
+  gap: var(--space-2, 8px);
+}
+
+#policy-editor {
+  margin-top: var(--space-3, 12px);
+}
+
+#policy-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 4px);
+  max-width: 32em;
+}
+
+#policy-form textarea {
+  font-family: var(--font-mono, monospace);
+}
+
+.policy-form-error {
+  color: var(--color-danger, #b3261e);
+  font-size: var(--font-size-sm, 0.875rem);
+}
+
+.policy-form-actions {
+  display: flex;
+  gap: var(--space-2, 8px);
+  margin-top: var(--space-2, 8px);
+}

@@ -24,6 +24,7 @@ pub mod audit_aggregates;
 pub mod audit_events;
 pub mod audit_export;
 pub mod auth_routes;
+pub mod auto_exec_policies;
 pub mod bindings;
 pub mod broker;
 pub mod chart_data;
@@ -233,6 +234,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/memberships/:userId/:roleId",
             delete(roles::delete_membership),
+        )
+        .route(
+            "/api/v1/workspaces/:id/auto-exec-policies",
+            get(auto_exec_policies::list_policies).post(auto_exec_policies::create_policy),
+        )
+        .route(
+            "/api/v1/workspaces/:id/auto-exec-policies/:policyId",
+            put(auto_exec_policies::update_policy).delete(auto_exec_policies::delete_policy),
         )
         .route(
             "/api/v1/workspaces/:id/bindings",

@@ -18,18 +18,16 @@
 ///     cargo test --test phase10_auto_exec -- --ignored --test-threads=1
 ///
 /// ──────────────────────────────────────────────────────────────────────────
-/// Contract targets (Phase 10 plan + md/design/ione-v1-contract.md):
+/// Contract targets (Phase 10 plan + md/design/ione-v1-contract.md, policies
+/// promoted from workspace.metadata JSONB to the auto_exec_policies table by
+/// md/design/auto-exec-governance.md Slice 2):
 ///
-///   workspace.metadata.auto_exec_policies (JSONB array):
-///     {
-///       "name": string,
-///       "trigger": { "signal_title_prefix": string, "severity_at_most": string },
-///       "connector_id": UUID string,
-///       "op": string,
-///       "args_template": { "text": string (may contain {{signal.title}}, {{signal.body}}) },
-///       "rate_limit_per_min": u32,
-///       "severity_cap": string  (default "flagged")
-///     }
+///   auto_exec_policies row (migration 0040):
+///     name, trigger_signal_title_prefix, trigger_severity_at_most,
+///     connector_id (FK), op, args_template (may contain {{signal.title}},
+///     {{signal.body}}), rate_limit_per_min (1..=1000),
+///     severity_cap ('routine'|'flagged', default 'routine'),
+///     authorized_by_permission, enabled
 ///
 ///   src/services/auto_exec.rs (to be created):
 ///     pub async fn evaluate(state, survivor_id) -> Option<AutoExecDecision>
@@ -184,18 +182,42 @@ async fn insert_connector(
     .expect("insert connector failed")
 }
 
-/// Set workspace.metadata.auto_exec_policies to the given policies array.
-async fn set_auto_exec_policies(pool: &PgPool, workspace_id: Uuid, policies: serde_json::Value) {
-    sqlx::query(
-        "UPDATE workspaces
-         SET metadata = jsonb_set(metadata, '{auto_exec_policies}', $2, true)
-         WHERE id = $1",
+/// Insert a row into auto_exec_policies (migration 0040) and return its id.
+/// The engine reads enabled policies from this table (auto-exec governance
+/// Slice 2 cut the read path over from workspace-metadata JSONB).
+#[allow(clippy::too_many_arguments)]
+async fn insert_policy(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    connector_id: Uuid,
+    name: &str,
+    title_prefix: Option<&str>,
+    severity_at_most: Option<&str>,
+    args_template: serde_json::Value,
+    rate_limit_per_min: i32,
+    severity_cap: &str,
+) -> Uuid {
+    let created_by = default_user_id(pool).await;
+    sqlx::query_scalar(
+        "INSERT INTO auto_exec_policies
+           (workspace_id, name, trigger_signal_title_prefix, trigger_severity_at_most,
+            connector_id, op, args_template, rate_limit_per_min, severity_cap,
+            authorized_by_permission, created_by)
+         VALUES ($1, $2, $3, $4, $5, 'send', $6, $7, $8, 'approvals:decide', $9)
+         RETURNING id",
     )
     .bind(workspace_id)
-    .bind(policies)
-    .execute(pool)
+    .bind(name)
+    .bind(title_prefix)
+    .bind(severity_at_most)
+    .bind(connector_id)
+    .bind(args_template)
+    .bind(rate_limit_per_min)
+    .bind(severity_cap)
+    .bind(created_by)
+    .fetch_one(pool)
     .await
-    .expect("failed to set auto_exec_policies on workspace");
+    .expect("insert auto_exec policy failed")
 }
 
 /// Build an AppState (pool connection) to call service functions directly.
@@ -249,21 +271,16 @@ async fn auto_exec_matching_policy_skips_approval() {
     .await;
 
     // Install a matching policy.
-    set_auto_exec_policies(
+    insert_policy(
         &pool,
         ws_id,
-        json!([{
-            "name": "auto-file spot weather",
-            "trigger": {
-                "signal_title_prefix": "Spot weather update",
-                "severity_at_most": "flagged"
-            },
-            "connector_id": connector_id.to_string(),
-            "op": "send",
-            "args_template": { "text": "{{signal.title}}: {{signal.body}}" },
-            "rate_limit_per_min": 10,
-            "severity_cap": "flagged"
-        }]),
+        connector_id,
+        "auto-file spot weather",
+        Some("Spot weather update"),
+        Some("flagged"),
+        json!({ "text": "{{signal.title}}: {{signal.body}}" }),
+        10,
+        "flagged",
     )
     .await;
 
@@ -363,21 +380,16 @@ async fn auto_exec_writes_two_audit_rows() {
     .await;
 
     let policy_name = "weather-auto-send";
-    set_auto_exec_policies(
+    insert_policy(
         &pool,
         ws_id,
-        json!([{
-            "name": policy_name,
-            "trigger": {
-                "signal_title_prefix": "Fire weather advisory",
-                "severity_at_most": "flagged"
-            },
-            "connector_id": connector_id.to_string(),
-            "op": "send",
-            "args_template": { "text": "{{signal.title}}: {{signal.body}}" },
-            "rate_limit_per_min": 10,
-            "severity_cap": "flagged"
-        }]),
+        connector_id,
+        policy_name,
+        Some("Fire weather advisory"),
+        Some("flagged"),
+        json!({ "text": "{{signal.title}}: {{signal.body}}" }),
+        10,
+        "flagged",
     )
     .await;
 
@@ -506,22 +518,19 @@ async fn auto_exec_respects_severity_cap() {
     .await;
 
     // Policy with explicit severity_cap='flagged' and a title prefix that
-    // matches the signal below.
-    set_auto_exec_policies(
+    // matches the signal below. The table CHECK (0040) rejects 'command' as a
+    // trigger bound, so the trigger is left unbounded (most permissive) — the
+    // cap alone must block the command-severity signal.
+    insert_policy(
         &pool,
         ws_id,
-        json!([{
-            "name": "capped-policy",
-            "trigger": {
-                "signal_title_prefix": "Mandatory evacuation",
-                "severity_at_most": "command"  // policy is permissive…
-            },
-            "connector_id": connector_id.to_string(),
-            "op": "send",
-            "args_template": { "text": "{{signal.title}}: {{signal.body}}" },
-            "rate_limit_per_min": 10,
-            "severity_cap": "flagged"  // …but cap blocks command
-        }]),
+        connector_id,
+        "capped-policy",
+        Some("Mandatory evacuation"),
+        None, // no trigger severity bound: permissive…
+        json!({ "text": "{{signal.title}}: {{signal.body}}" }),
+        10,
+        "flagged", // …but cap blocks command
     )
     .await;
 
@@ -606,21 +615,16 @@ async fn auto_exec_rate_limit_blocks_excess() {
     )
     .await;
 
-    set_auto_exec_policies(
+    insert_policy(
         &pool,
         ws_id,
-        json!([{
-            "name": "rate-limited-policy",
-            "trigger": {
-                "signal_title_prefix": "Spot weather update",
-                "severity_at_most": "flagged"
-            },
-            "connector_id": connector_id.to_string(),
-            "op": "send",
-            "args_template": { "text": "{{signal.title}}: {{signal.body}}" },
-            "rate_limit_per_min": 1,
-            "severity_cap": "flagged"
-        }]),
+        connector_id,
+        "rate-limited-policy",
+        Some("Spot weather update"),
+        Some("flagged"),
+        json!({ "text": "{{signal.title}}: {{signal.body}}" }),
+        1,
+        "flagged",
     )
     .await;
 
@@ -719,21 +723,16 @@ async fn auto_exec_rate_limit_allows_after_window() {
     )
     .await;
 
-    set_auto_exec_policies(
+    let policy_id = insert_policy(
         &pool,
         ws_id,
-        json!([{
-            "name": policy_name,
-            "trigger": {
-                "signal_title_prefix": "NWS advisory",
-                "severity_at_most": "flagged"
-            },
-            "connector_id": connector_id.to_string(),
-            "op": "send",
-            "args_template": { "text": "{{signal.title}}: {{signal.body}}" },
-            "rate_limit_per_min": 1,
-            "severity_cap": "flagged"
-        }]),
+        connector_id,
+        policy_name,
+        Some("NWS advisory"),
+        Some("flagged"),
+        json!({ "text": "{{signal.title}}: {{signal.body}}" }),
+        1,
+        "flagged",
     )
     .await;
 
@@ -759,8 +758,8 @@ async fn auto_exec_rate_limit_allows_after_window() {
         "second invocation before reset must be blocked (rate_limit_per_min=1)"
     );
 
-    // Reset the rate limit via the test hook.
-    ione::services::auto_exec::test_reset_rate_limit(ws_id, policy_name);
+    // Reset the rate limit via the test hook (bucket key is (workspace, policy id)).
+    ione::services::auto_exec::test_reset_rate_limit(ws_id, policy_id);
 
     // After reset, the same second signal must be allowed.
     let allowed: Option<serde_json::Value> = ione::services::auto_exec::evaluate(&state, surv2_id)
@@ -777,11 +776,16 @@ async fn auto_exec_rate_limit_allows_after_window() {
     );
 }
 
-// ─── 6. auto_exec_policy_with_nonexistent_connector_is_skipped_gracefully ─────
+// ─── 6. auto_exec_policy_with_unavailable_connector_is_skipped_gracefully ─────
 
-/// If the policy references a connector_id that does not exist in the database,
+/// If the policy's connector is not available for invocation (status != active),
 /// auto-exec must NOT panic and must NOT produce a delivery.  The signal falls
 /// through to the approval draft path (or is otherwise handled gracefully).
+///
+/// (Originally this fixture used a nonexistent connector_id; the FK on
+/// auto_exec_policies.connector_id (migration 0040) makes that unrepresentable,
+/// so an inactive connector exercises the same skip path. The foreign-workspace
+/// connector case is covered by foreign_connector_not_invoked.)
 ///
 /// Contract targets:
 ///   - plan Phase 10: "gracefully skip if connector not found"
@@ -790,7 +794,7 @@ async fn auto_exec_rate_limit_allows_after_window() {
 /// REASON: requires auto_exec::evaluate's connector-lookup error handling.
 #[tokio::test]
 #[ignore]
-async fn auto_exec_policy_with_nonexistent_connector_is_skipped_gracefully() {
+async fn auto_exec_policy_with_unavailable_connector_is_skipped_gracefully() {
     let (_base, pool) = spawn_app().await;
 
     // Slack must NOT be called.
@@ -803,23 +807,31 @@ async fn auto_exec_policy_with_nonexistent_connector_is_skipped_gracefully() {
         .await;
 
     let ws_id = ops_workspace_id(&pool).await;
-    let nonexistent_connector_id = Uuid::new_v4(); // random, definitely not in DB
 
-    set_auto_exec_policies(
+    // Connector exists but is paused — not invokable by auto-exec.
+    let paused_connector_id = insert_connector(
         &pool,
         ws_id,
-        json!([{
-            "name": "bad-connector-policy",
-            "trigger": {
-                "signal_title_prefix": "Air quality alert",
-                "severity_at_most": "flagged"
-            },
-            "connector_id": nonexistent_connector_id.to_string(),
-            "op": "send",
-            "args_template": { "text": "{{signal.title}}: {{signal.body}}" },
-            "rate_limit_per_min": 10,
-            "severity_cap": "flagged"
-        }]),
+        "slack",
+        json!({ "webhook_url": format!("{}/", mock_server.uri()) }),
+    )
+    .await;
+    sqlx::query("UPDATE connectors SET status = 'paused'::connector_status WHERE id = $1")
+        .bind(paused_connector_id)
+        .execute(&pool)
+        .await
+        .expect("pause connector");
+
+    insert_policy(
+        &pool,
+        ws_id,
+        paused_connector_id,
+        "bad-connector-policy",
+        Some("Air quality alert"),
+        Some("flagged"),
+        json!({ "text": "{{signal.title}}: {{signal.body}}" }),
+        10,
+        "flagged",
     )
     .await;
 
@@ -905,23 +917,16 @@ async fn auto_exec_policy_with_invalid_args_template_records_defer() {
     .await;
 
     // args_template references an invalid / nonexistent field.
-    set_auto_exec_policies(
+    insert_policy(
         &pool,
         ws_id,
-        json!([{
-            "name": "bad-template-policy",
-            "trigger": {
-                "signal_title_prefix": "Template error test",
-                "severity_at_most": "flagged"
-            },
-            "connector_id": connector_id.to_string(),
-            "op": "send",
-            "args_template": {
-                "text": "{{signal.nonexistent_field_xyz}}: {{signal.another_missing}}"
-            },
-            "rate_limit_per_min": 10,
-            "severity_cap": "flagged"
-        }]),
+        connector_id,
+        "bad-template-policy",
+        Some("Template error test"),
+        Some("flagged"),
+        json!({ "text": "{{signal.nonexistent_field_xyz}}: {{signal.another_missing}}" }),
+        10,
+        "flagged",
     )
     .await;
 
@@ -991,13 +996,13 @@ async fn auto_exec_policy_with_invalid_args_template_records_defer() {
 
 // ─── 8. auto_exec_policies_must_be_explicitly_configured ──────────────────────
 
-/// A workspace whose `metadata` has no `auto_exec_policies` key never
-/// auto-executes: `evaluate` returns None for any signal.
+/// A workspace with no rows in `auto_exec_policies` never auto-executes:
+/// `evaluate` returns None for any signal.
 ///
 /// Contract targets:
-///   - plan Phase 10: "policies off by default; must be explicitly added to metadata"
+///   - plan Phase 10: "policies off by default; must be explicitly configured"
 ///
-/// REASON: requires auto_exec::evaluate to check for the absent key.
+/// REASON: requires auto_exec::evaluate to handle the empty policy set.
 #[tokio::test]
 #[ignore]
 async fn auto_exec_policies_must_be_explicitly_configured() {
@@ -1005,27 +1010,14 @@ async fn auto_exec_policies_must_be_explicitly_configured() {
 
     let ws_id = ops_workspace_id(&pool).await;
 
-    // Confirm the workspace has no auto_exec_policies key.
-    let metadata: serde_json::Value =
-        sqlx::query_scalar("SELECT metadata FROM workspaces WHERE id = $1")
+    // Confirm the workspace has no auto_exec_policies rows.
+    let policy_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM auto_exec_policies WHERE workspace_id = $1")
             .bind(ws_id)
             .fetch_one(&pool)
             .await
-            .expect("workspace metadata query failed");
-
-    // The bootstrap workspace must not have auto_exec_policies.
-    // If it does, remove it so the test is clean.
-    if metadata.get("auto_exec_policies").is_some() {
-        sqlx::query(
-            "UPDATE workspaces
-             SET metadata = metadata - 'auto_exec_policies'
-             WHERE id = $1",
-        )
-        .bind(ws_id)
-        .execute(&pool)
-        .await
-        .expect("failed to remove auto_exec_policies from workspace metadata");
-    }
+            .expect("auto_exec_policies count query failed");
+    assert_eq!(policy_count, 0, "bootstrap workspace must have no policies");
 
     // Insert a signal whose title would match any conceivable prefix.
     let signal_id = insert_signal(
@@ -1103,21 +1095,16 @@ async fn audit_events_record_payload_includes_policy_name() {
     .await;
 
     let expected_policy_name = "precise-payload-policy";
-    set_auto_exec_policies(
+    insert_policy(
         &pool,
         ws_id,
-        json!([{
-            "name": expected_policy_name,
-            "trigger": {
-                "signal_title_prefix": "Payload test signal",
-                "severity_at_most": "flagged"
-            },
-            "connector_id": connector_id.to_string(),
-            "op": "send",
-            "args_template": { "text": "{{signal.title}}: {{signal.body}}" },
-            "rate_limit_per_min": 10,
-            "severity_cap": "flagged"
-        }]),
+        connector_id,
+        expected_policy_name,
+        Some("Payload test signal"),
+        Some("flagged"),
+        json!({ "text": "{{signal.title}}: {{signal.body}}" }),
+        10,
+        "flagged",
     )
     .await;
 

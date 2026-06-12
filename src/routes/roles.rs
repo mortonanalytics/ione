@@ -30,7 +30,7 @@ const WORKSPACE_VOCABULARY: &[&str] = &[
     "workspace:write",
 ];
 
-fn is_valid_workspace_permission(s: &str) -> bool {
+pub(crate) fn is_valid_workspace_permission(s: &str) -> bool {
     if WORKSPACE_VOCABULARY.contains(&s) {
         return true;
     }

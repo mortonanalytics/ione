@@ -648,6 +648,8 @@ function setActiveWorkspace(ws) {
 
   // Roles tab visibility: probe roles:manage for this workspace (cached).
   probeRolesAccess(ws.id);
+  // Policies tab visibility: probe approvals:decide for this workspace (cached).
+  probePoliciesAccess(ws.id);
   renderActivationTracker(ws);
 }
 
@@ -1063,6 +1065,7 @@ const tabSurvivors     = document.getElementById('tab-survivors');
 const tabApprovals     = document.getElementById('tab-approvals');
 const tabAudit         = document.getElementById('tab-audit');
 const tabRoles         = document.getElementById('tab-roles');
+const tabPolicies      = document.getElementById('tab-policies');
 const panelChat        = document.getElementById('panel-chat');
 const panelMap         = document.getElementById('panel-map');
 const panelChart       = document.getElementById('panel-chart');
@@ -1074,6 +1077,7 @@ const panelSurvivors   = document.getElementById('panel-survivors');
 const panelApprovals   = document.getElementById('panel-approvals');
 const panelAudit       = document.getElementById('panel-audit');
 const panelRoles       = document.getElementById('panel-roles');
+const panelPolicies    = document.getElementById('panel-policies');
 
 let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'table' | 'document' | 'connectors' | 'signals' | 'survivors' | 'approvals' | 'audit'
 
@@ -1138,6 +1142,10 @@ function switchTab(name) {
   tabRoles.classList.toggle('tab--active', name === 'roles');
   panelRoles.hidden = name !== 'roles';
 
+  tabPolicies.setAttribute('aria-selected', String(name === 'policies'));
+  tabPolicies.classList.toggle('tab--active', name === 'policies');
+  panelPolicies.hidden = name !== 'policies';
+
   if (name === 'connectors' && activeWorkspace) {
     loadConnectors(activeWorkspace.id);
     loadPeerBrowser(activeWorkspace.id);
@@ -1185,6 +1193,10 @@ function switchTab(name) {
   if (name === 'roles' && activeWorkspace) {
     loadRoles();
   }
+
+  if (name === 'policies' && activeWorkspace) {
+    loadPolicies();
+  }
 }
 
 // Registry driving adaptive tab visibility + keyboard nav. Data-viz tabs
@@ -1213,6 +1225,10 @@ TAB_REGISTRY.forEach((t) => {
 // Roles tab is outside TAB_REGISTRY: its visibility comes from the
 // roles:manage probe (probeRolesAccess), not from the panels block.
 tabRoles.addEventListener('click', () => switchTab('roles'));
+
+// Policies tab likewise: visibility comes from the approvals:decide probe
+// (probePoliciesAccess).
+tabPolicies.addEventListener('click', () => switchTab('policies'));
 
 // Apply data-presence visibility from a workspace `panels` block. When panels
 // are unknown (null), nothing is hidden — we never hide a tab we can't disprove.
@@ -4883,6 +4899,282 @@ rolesRevokeBtn.addEventListener('click', async () => {
   }
 });
 
+/* ── Auto-exec policies panel (approvals:decide holders — probe-and-hide) ── */
+
+const policiesStatusEl     = document.getElementById('policies-status');
+const policiesListEl       = document.getElementById('policies-list');
+const policiesRefreshBtn   = document.getElementById('policies-refresh-btn');
+const policyForm           = document.getElementById('policy-form');
+const policyEditorTitle    = document.getElementById('policy-editor-title');
+const policyNameInput      = document.getElementById('policy-name');
+const policyTriggerPrefix  = document.getElementById('policy-trigger-prefix');
+const policyTriggerSeverity = document.getElementById('policy-trigger-severity');
+const policyConnectorSel   = document.getElementById('policy-connector');
+const policyOpInput        = document.getElementById('policy-op');
+const policyArgsInput      = document.getElementById('policy-args');
+const policyRateInput      = document.getElementById('policy-rate');
+const policyCapSel         = document.getElementById('policy-cap');
+const policyPermissionInput = document.getElementById('policy-permission');
+const policyFormError      = document.getElementById('policy-form-error');
+const policyCancelBtn      = document.getElementById('policy-cancel-btn');
+
+/* Per-workspace probe result: true = approvals:decide held, false = 403 (do
+   not call policy endpoints again), undefined = not probed yet. */
+const policiesAccessByWs = new Map();
+
+/* When set, the form PUTs this policy id instead of POSTing a new one. */
+let editingPolicyId = null;
+
+async function probePoliciesAccess(wsId) {
+  if (policiesAccessByWs.has(wsId)) {
+    applyPoliciesTabVisibility(wsId);
+    return;
+  }
+  try {
+    await apiFetch(`/api/v1/workspaces/${wsId}/auto-exec-policies`, { skipErrorToast: true });
+    policiesAccessByWs.set(wsId, true);
+  } catch (err) {
+    if (err && err.status === 403) {
+      policiesAccessByWs.set(wsId, false);
+    }
+    // Other errors: leave undecided so the next activation retries.
+  }
+  applyPoliciesTabVisibility(wsId);
+}
+
+function applyPoliciesTabVisibility(wsId) {
+  if (!activeWorkspace || activeWorkspace.id !== wsId) return;
+  const allowed = policiesAccessByWs.get(wsId) === true;
+  tabPolicies.hidden = !allowed;
+  if (!allowed && activeTab === 'policies') switchTab('chat');
+}
+
+async function loadPolicies() {
+  if (!activeWorkspace || policiesAccessByWs.get(activeWorkspace.id) === false) return;
+  policiesStatusEl.textContent = 'Loading…';
+  try {
+    const [data] = await Promise.all([
+      apiFetch(`/api/v1/workspaces/${activeWorkspace.id}/auto-exec-policies`, { skipErrorToast: true }),
+      loadPolicyConnectors(),
+    ]);
+    policiesStatusEl.textContent = '';
+    renderPolicies(data.items || []);
+  } catch (err) {
+    if (err && err.status === 403) {
+      policiesAccessByWs.set(activeWorkspace.id, false);
+      applyPoliciesTabVisibility(activeWorkspace.id);
+      return;
+    }
+    policiesStatusEl.textContent = 'Failed to load policies: ' + err.message;
+  }
+}
+
+async function loadPolicyConnectors() {
+  const selected = policyConnectorSel.value;
+  const data = await apiFetch(
+    `/api/v1/workspaces/${activeWorkspace.id}/connectors`,
+    { skipErrorToast: true }
+  );
+  policyConnectorSel.innerHTML = '';
+  (data.items || []).forEach((c) => {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = `${c.name} (${c.status})`;
+    policyConnectorSel.appendChild(opt);
+  });
+  if (selected && [...policyConnectorSel.options].some((o) => o.value === selected)) {
+    policyConnectorSel.value = selected;
+  }
+}
+
+function renderPolicies(items) {
+  policiesListEl.innerHTML = '';
+  items.forEach((p) => {
+    const li = document.createElement('li');
+    li.className = 'policy-card' + (p.enabled ? '' : ' policy-card--disabled');
+    li.dataset.policyId = p.id;
+
+    const header = document.createElement('div');
+    header.className = 'policy-card-header';
+    const title = document.createElement('strong');
+    title.textContent = p.name;
+    header.appendChild(title);
+    const meta = document.createElement('span');
+    meta.className = 'policy-card-meta';
+    const trigger = p.trigger && p.trigger.signal_title_prefix
+      ? `"${p.trigger.signal_title_prefix}…"` : 'any title';
+    const atMost = p.trigger && p.trigger.severity_at_most
+      ? ` ≤ ${p.trigger.severity_at_most}` : '';
+    meta.textContent =
+      `${trigger}${atMost} · cap ${p.severity_cap} · ${p.rate_limit_per_min}/min · ` +
+      `${p.enabled ? 'enabled' : 'disabled'}`;
+    header.appendChild(meta);
+    li.appendChild(header);
+
+    const detail = document.createElement('div');
+    detail.className = 'policy-card-detail';
+    detail.textContent = `connector ${p.connector_id} · op ${p.op} · under ${p.authorized_by_permission}`;
+    li.appendChild(detail);
+
+    const actions = document.createElement('div');
+    actions.className = 'policy-card-actions';
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.textContent = 'Edit';
+    editBtn.addEventListener('click', () => startPolicyEdit(p));
+    actions.appendChild(editBtn);
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.textContent = p.enabled ? 'Disable' : 'Enable';
+    toggleBtn.addEventListener('click', () => togglePolicy(p));
+    actions.appendChild(toggleBtn);
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'policy-delete-btn';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', () => deletePolicy(p.id));
+    actions.appendChild(deleteBtn);
+
+    li.appendChild(actions);
+    policiesListEl.appendChild(li);
+  });
+  if (!items.length) {
+    policiesStatusEl.textContent = 'No auto-exec policies in this workspace.';
+  }
+}
+
+function policyBodyFromCard(p) {
+  return {
+    name: p.name,
+    trigger: {
+      signal_title_prefix: (p.trigger && p.trigger.signal_title_prefix) || null,
+      severity_at_most: (p.trigger && p.trigger.severity_at_most) || null,
+    },
+    connector_id: p.connector_id,
+    op: p.op,
+    args_template: p.args_template,
+    rate_limit_per_min: p.rate_limit_per_min,
+    severity_cap: p.severity_cap,
+    authorized_by_permission: p.authorized_by_permission,
+    enabled: p.enabled,
+  };
+}
+
+function startPolicyEdit(p) {
+  editingPolicyId = p.id;
+  policyEditorTitle.textContent = `Edit policy: ${p.name}`;
+  policyNameInput.value = p.name;
+  policyTriggerPrefix.value = (p.trigger && p.trigger.signal_title_prefix) || '';
+  policyTriggerSeverity.value = (p.trigger && p.trigger.severity_at_most) || '';
+  if ([...policyConnectorSel.options].some((o) => o.value === p.connector_id)) {
+    policyConnectorSel.value = p.connector_id;
+  }
+  policyOpInput.value = p.op;
+  policyArgsInput.value = JSON.stringify(p.args_template);
+  policyRateInput.value = p.rate_limit_per_min;
+  policyCapSel.value = p.severity_cap;
+  policyPermissionInput.value = p.authorized_by_permission;
+  policyCancelBtn.hidden = false;
+  policyFormError.hidden = true;
+}
+
+function resetPolicyForm() {
+  editingPolicyId = null;
+  policyEditorTitle.textContent = 'New policy';
+  policyForm.reset();
+  policyOpInput.value = 'send';
+  policyArgsInput.value = '{ "text": "{{signal.title}}: {{signal.body}}" }';
+  policyRateInput.value = 5;
+  policyCancelBtn.hidden = true;
+  policyFormError.hidden = true;
+}
+
+async function togglePolicy(p) {
+  const body = policyBodyFromCard(p);
+  body.enabled = !p.enabled;
+  try {
+    await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/auto-exec-policies/${p.id}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }
+    );
+    await loadPolicies();
+    policiesStatusEl.textContent = `Policy ${body.enabled ? 'enabled' : 'disabled'}.`;
+  } catch (_err) {
+    // apiFetch already surfaced the error.
+  }
+}
+
+async function deletePolicy(policyId) {
+  try {
+    await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/auto-exec-policies/${policyId}`,
+      { method: 'DELETE' }
+    );
+    if (editingPolicyId === policyId) resetPolicyForm();
+    await loadPolicies();
+    policiesStatusEl.textContent = 'Policy deleted.';
+  } catch (_err) {
+    // apiFetch already surfaced the error.
+  }
+}
+
+policyForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  if (!activeWorkspace) return;
+  policyFormError.hidden = true;
+
+  let argsTemplate;
+  try {
+    argsTemplate = JSON.parse(policyArgsInput.value || '{}');
+  } catch (_err) {
+    policyFormError.textContent = 'Args template must be valid JSON.';
+    policyFormError.hidden = false;
+    return;
+  }
+
+  const body = {
+    name: policyNameInput.value.trim(),
+    trigger: {
+      signal_title_prefix: policyTriggerPrefix.value.trim() || null,
+      severity_at_most: policyTriggerSeverity.value || null,
+    },
+    connector_id: policyConnectorSel.value,
+    op: policyOpInput.value.trim(),
+    args_template: argsTemplate,
+    rate_limit_per_min: Number(policyRateInput.value),
+    severity_cap: policyCapSel.value,
+    authorized_by_permission: policyPermissionInput.value.trim(),
+  };
+
+  const path = editingPolicyId
+    ? `/api/v1/workspaces/${activeWorkspace.id}/auto-exec-policies/${editingPolicyId}`
+    : `/api/v1/workspaces/${activeWorkspace.id}/auto-exec-policies`;
+  try {
+    await apiFetch(path, {
+      method: editingPolicyId ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const savedMsg = editingPolicyId ? 'Policy updated.' : 'Policy created.';
+    resetPolicyForm();
+    await loadPolicies();
+    policiesStatusEl.textContent = savedMsg;
+  } catch (err) {
+    policyFormError.textContent = err.message || 'Failed to save policy.';
+    policyFormError.hidden = false;
+  }
+});
+
+policyCancelBtn.addEventListener('click', resetPolicyForm);
+policiesRefreshBtn.addEventListener('click', loadPolicies);
+
 /* ── Init: load workspaces then conversations ── */
 
 (async function init() {
@@ -4918,6 +5210,7 @@ rolesRevokeBtn.addEventListener('click', async () => {
       startAmbientAlertPolling();
       renderActivationTracker(initial);
       probeRolesAccess(initial.id);
+      probePoliciesAccess(initial.id);
     } else {
       workspaceNameEl.textContent = 'No workspaces';
     }

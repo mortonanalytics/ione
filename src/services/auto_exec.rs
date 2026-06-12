@@ -7,9 +7,13 @@ use uuid::Uuid;
 use crate::{
     connectors::build_from_row,
     models::{ActorKind, ConnectorStatus, Severity},
-    repos::{AuditEventRepo, ConnectorRepo},
+    repos::{AuditEventRepo, AutoExecPolicyRepo, ConnectorRepo},
     state::AppState,
 };
+
+/// Upper bound for `rate_limit_per_min`. The table CHECK (migration 0040) is
+/// the primary enforcement; the write path validates against this constant.
+pub const MAX_RATE_LIMIT_PER_MIN: u32 = 1000;
 
 // ── Policy types ──────────────────────────────────────────────────────────────
 
@@ -21,6 +25,7 @@ pub struct Trigger {
 
 #[derive(Debug, Clone)]
 pub struct AutoExecPolicy {
+    pub id: Uuid,
     pub name: String,
     pub trigger: Trigger,
     pub connector_id: Uuid,
@@ -91,33 +96,33 @@ impl TokenBucket {
 
 // ── Rate-limit registry ───────────────────────────────────────────────────────
 
-static RATE_LIMIT_REGISTRY: std::sync::OnceLock<Mutex<HashMap<(Uuid, String), TokenBucket>>> =
+static RATE_LIMIT_REGISTRY: std::sync::OnceLock<Mutex<HashMap<(Uuid, Uuid), TokenBucket>>> =
     std::sync::OnceLock::new();
 
-fn registry() -> &'static Mutex<HashMap<(Uuid, String), TokenBucket>> {
+fn registry() -> &'static Mutex<HashMap<(Uuid, Uuid), TokenBucket>> {
     RATE_LIMIT_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Peek: returns true if the bucket has tokens available (does not consume).
-fn bucket_peek(workspace_id: Uuid, policy_name: &str, capacity: u32) -> bool {
-    let key = (workspace_id, policy_name.to_owned());
+fn bucket_peek(workspace_id: Uuid, policy_id: Uuid, capacity: u32) -> bool {
+    let key = (workspace_id, policy_id);
     let mut map = registry().lock().expect("rate limit registry poisoned");
     let bucket = map.entry(key).or_insert_with(|| TokenBucket::new(capacity));
     bucket.peek()
 }
 
 /// Consume one token. Returns true if a token was available and consumed.
-fn bucket_consume(workspace_id: Uuid, policy_name: &str, capacity: u32) -> bool {
-    let key = (workspace_id, policy_name.to_owned());
+fn bucket_consume(workspace_id: Uuid, policy_id: Uuid, capacity: u32) -> bool {
+    let key = (workspace_id, policy_id);
     let mut map = registry().lock().expect("rate limit registry poisoned");
     let bucket = map.entry(key).or_insert_with(|| TokenBucket::new(capacity));
     bucket.consume()
 }
 
-/// Reset the bucket for a (workspace_id, policy_name) pair to full capacity.
+/// Reset the bucket for a (workspace_id, policy_id) pair to full capacity.
 /// Used as a test hook to simulate the end of a rate-limit window.
-pub fn test_reset_rate_limit(workspace_id: Uuid, policy_name: &str) {
-    let key = (workspace_id, policy_name.to_owned());
+pub fn test_reset_rate_limit(workspace_id: Uuid, policy_id: Uuid) {
+    let key = (workspace_id, policy_id);
     let mut map = registry().lock().expect("rate limit registry poisoned");
     map.remove(&key);
 }
@@ -136,7 +141,7 @@ fn severity_exceeds_cap(signal_severity: &Severity, cap: &Severity) -> bool {
     severity_rank(signal_severity) > severity_rank(cap)
 }
 
-// ── Policy parsing ────────────────────────────────────────────────────────────
+// ── Policy read path (auto_exec_policies table, migration 0040) ──────────────
 
 fn parse_severity(s: &str) -> Option<Severity> {
     match s {
@@ -147,53 +152,35 @@ fn parse_severity(s: &str) -> Option<Severity> {
     }
 }
 
-fn parse_policies(metadata: &serde_json::Value) -> Vec<AutoExecPolicy> {
-    let arr = match metadata
-        .get("auto_exec_policies")
-        .and_then(|v| v.as_array())
-    {
-        Some(a) => a,
-        None => return vec![],
-    };
-
-    arr.iter().filter_map(parse_single_policy).collect()
+fn policy_from_row(row: crate::models::AutoExecPolicy) -> AutoExecPolicy {
+    AutoExecPolicy {
+        id: row.id,
+        name: row.name,
+        trigger: Trigger {
+            signal_title_prefix: row.trigger_signal_title_prefix,
+            // CHECK constraints limit these to routine/flagged; an unparseable
+            // value falls to the safe floor rather than dropping the field.
+            severity_at_most: row
+                .trigger_severity_at_most
+                .as_deref()
+                .and_then(parse_severity),
+        },
+        connector_id: row.connector_id,
+        op: row.op,
+        args_template: row.args_template,
+        rate_limit_per_min: row.rate_limit_per_min.max(1) as u32,
+        severity_cap: parse_severity(&row.severity_cap).unwrap_or(Severity::Routine),
+    }
 }
 
-fn parse_single_policy(p: &serde_json::Value) -> Option<AutoExecPolicy> {
-    let name = p.get("name")?.as_str()?.to_owned();
-    let connector_id = Uuid::parse_str(p.get("connector_id")?.as_str()?).ok()?;
-    let op = p.get("op")?.as_str()?.to_owned();
-    let args_template = p.get("args_template")?.clone();
-    let rate_limit_per_min = p.get("rate_limit_per_min")?.as_u64()? as u32;
-
-    let severity_cap_str = p
-        .get("severity_cap")
-        .and_then(|v| v.as_str())
-        .unwrap_or("flagged");
-    let severity_cap = parse_severity(severity_cap_str)?;
-
-    let trigger_val = p.get("trigger")?;
-    let signal_title_prefix = trigger_val
-        .get("signal_title_prefix")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
-    let severity_at_most = trigger_val
-        .get("severity_at_most")
-        .and_then(|v| v.as_str())
-        .and_then(parse_severity);
-
-    Some(AutoExecPolicy {
-        name,
-        trigger: Trigger {
-            signal_title_prefix,
-            severity_at_most,
-        },
-        connector_id,
-        op,
-        args_template,
-        rate_limit_per_min,
-        severity_cap,
-    })
+async fn fetch_enabled_policies(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+) -> anyhow::Result<Vec<AutoExecPolicy>> {
+    let rows = AutoExecPolicyRepo::new(pool.clone())
+        .list_enabled_for_workspace(workspace_id)
+        .await?;
+    Ok(rows.into_iter().map(policy_from_row).collect())
 }
 
 // ── Template rendering ────────────────────────────────────────────────────────
@@ -271,22 +258,19 @@ struct SurvivorContext {
     signal_title: String,
     signal_body: String,
     signal_severity: Severity,
-    workspace_metadata: serde_json::Value,
 }
 
 async fn fetch_survivor_context(
     pool: &sqlx::PgPool,
     survivor_id: Uuid,
 ) -> anyhow::Result<Option<SurvivorContext>> {
-    let row: Option<(Uuid, String, String, Severity, serde_json::Value)> = sqlx::query_as(
+    let row: Option<(Uuid, String, String, Severity)> = sqlx::query_as(
         "SELECT sig.workspace_id,
                 sig.title AS signal_title,
                 sig.body AS signal_body,
-                sig.severity AS signal_severity,
-                w.metadata AS workspace_metadata
+                sig.severity AS signal_severity
          FROM survivors sv
          JOIN signals sig ON sig.id = sv.signal_id
-         JOIN workspaces w ON w.id = sig.workspace_id
          WHERE sv.id = $1",
     )
     .bind(survivor_id)
@@ -295,14 +279,11 @@ async fn fetch_survivor_context(
     .context("failed to fetch survivor context")?;
 
     Ok(row.map(
-        |(workspace_id, signal_title, signal_body, signal_severity, workspace_metadata)| {
-            SurvivorContext {
-                workspace_id,
-                signal_title,
-                signal_body,
-                signal_severity,
-                workspace_metadata,
-            }
+        |(workspace_id, signal_title, signal_body, signal_severity)| SurvivorContext {
+            workspace_id,
+            signal_title,
+            signal_body,
+            signal_severity,
         },
     ))
 }
@@ -312,7 +293,7 @@ async fn fetch_survivor_context(
 /// Find the first matching policy for this survivor.
 ///
 /// Returns `None` if:
-/// - workspace has no `auto_exec_policies` key
+/// - workspace has no enabled `auto_exec_policies` rows
 /// - no policy triggers match
 /// - signal severity exceeds the policy's `severity_cap`
 /// - the rate-limit bucket is empty
@@ -328,7 +309,7 @@ pub async fn evaluate(
         None => return Ok(None),
     };
 
-    let policies = parse_policies(&ctx.workspace_metadata);
+    let policies = fetch_enabled_policies(&state.pool, ctx.workspace_id).await?;
     if policies.is_empty() {
         return Ok(None);
     }
@@ -372,7 +353,7 @@ pub async fn evaluate(
         }
 
         // Rate limit: peek (do not consume).
-        if !bucket_peek(ctx.workspace_id, &policy.name, policy.rate_limit_per_min) {
+        if !bucket_peek(ctx.workspace_id, policy.id, policy.rate_limit_per_min) {
             // Bucket exhausted — skip (rate limited).
             continue;
         }
@@ -438,7 +419,7 @@ async fn run_auto_exec(state: &AppState, survivor_id: Uuid) -> anyhow::Result<Au
         None => return Ok(AutoExecOutcome::NoMatch),
     };
 
-    let policies = parse_policies(&ctx.workspace_metadata);
+    let policies = fetch_enabled_policies(&state.pool, ctx.workspace_id).await?;
     if policies.is_empty() {
         return Ok(AutoExecOutcome::NoMatch);
     }
@@ -492,7 +473,7 @@ async fn run_auto_exec(state: &AppState, survivor_id: Uuid) -> anyhow::Result<Au
         };
 
         // Consume rate-limit token.
-        if !bucket_consume(ctx.workspace_id, &policy.name, policy.rate_limit_per_min) {
+        if !bucket_consume(ctx.workspace_id, policy.id, policy.rate_limit_per_min) {
             return Ok(AutoExecOutcome::RateLimited {
                 policy_name: policy.name.clone(),
             });
