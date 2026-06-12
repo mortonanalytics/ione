@@ -349,6 +349,23 @@
       <div id="panel-audit" role="tabpanel" aria-labelledby="tab-audit" hidden>
         <div id="audit-toolbar">
           <button id="audit-refresh-btn" type="button" aria-label="Refresh audit trail">Refresh</button>
+          <label for="audit-filter-actor-kind">Actor</label>
+          <select id="audit-filter-actor-kind">
+            <option value="">All</option>
+            <option value="user">User</option>
+            <option value="system">System</option>
+            <option value="peer">Peer</option>
+          </select>
+          <label for="audit-filter-verb">Verb</label>
+          <input id="audit-filter-verb" type="text" placeholder="e.g. peer_tool_executed" />
+          <label for="audit-filter-window">Window</label>
+          <select id="audit-filter-window">
+            <option value="">All time</option>
+            <option value="1h">Last hour</option>
+            <option value="24h">Last 24 h</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+          </select>
         </div>
         <div id="audit-status" aria-live="polite"></div>
         <table id="audit-table">
@@ -362,6 +379,7 @@
           </thead>
           <tbody id="audit-rows"></tbody>
         </table>
+        <button id="audit-load-more" type="button" hidden>Load more</button>
       </div>
 
       <!-- Connectors panel -->

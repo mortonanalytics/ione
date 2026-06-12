@@ -67,7 +67,8 @@ jobs:
                    phase14_bindings phase_event_layers phase_geojson_poll \
                    phase_map_layers phase_chart_aggregates phase_chart_peer \
                    phase_table phase_table_peer phase_document_panels \
-                   phase_peer_token_refresh phase_push_ingress; do
+                   phase_peer_token_refresh phase_push_ingress \
+                   audit_export_integration; do
             echo "=== $p ==="
             cargo test --test "$p" -- --ignored --test-threads=1
           done

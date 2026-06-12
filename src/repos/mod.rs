@@ -32,7 +32,7 @@ pub mod workspace_repo;
 pub use activation_repo::*;
 pub use approval_repo::ApprovalRepo;
 pub use artifact_repo::ArtifactRepo;
-pub use audit_event_repo::AuditEventRepo;
+pub use audit_event_repo::{AuditEventFilter, AuditEventRepo};
 pub use broker_credential_repo::BrokerCredentialRepo;
 pub use connector_repo::ConnectorRepo;
 pub use conversation_repo::ConversationRepo;

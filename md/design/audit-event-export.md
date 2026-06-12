@@ -163,7 +163,7 @@ Sold as part of the audit-gateway layer in domain-app engagements (GroundPulse e
 
 ## Requirements impact
 
-This project has no `md/requirements/` source-of-truth directory; design docs under `md/design/` are the contract record. This document is the source of truth for the four endpoint contracts above. The infrastructure backlog item "Structured T&E event export" (P6) should be marked in-design referencing this doc.
+This feature seeds the project's requirements source-of-truth: the implementation creates `md/requirements/active/audit-event-export.md` carrying the four endpoint contracts, per-op response shapes, and authz tiers from this design's "API contracts" section. Once that file exists it is the contract record and must be updated in the same PR as any contract change; this design doc remains the rationale record. The infrastructure backlog item "Structured T&E event export" (P6) references this doc.
 
 ---
 

@@ -4457,15 +4457,43 @@ approvalsFilterStatus.addEventListener('change', loadApprovals);
 const auditRefreshBtn = document.getElementById('audit-refresh-btn');
 const auditStatusEl   = document.getElementById('audit-status');
 const auditRowsEl      = document.getElementById('audit-rows');
+const auditFilterActorKind = document.getElementById('audit-filter-actor-kind');
+const auditFilterVerb      = document.getElementById('audit-filter-verb');
+const auditFilterWindow    = document.getElementById('audit-filter-window');
+const auditLoadMoreBtn     = document.getElementById('audit-load-more');
 
 let auditPollTimer = null;
 const AUDIT_POLL_MS = 10000;
 
-async function loadAuditTrail() {
+const AUDIT_WINDOW_MS = { '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3, '30d': 30 * 86400e3 };
+
+let auditNextCursor = null;
+let auditItems = [];
+let auditPaged = false; // true once "Load more" has appended a page
+
+function auditFilterParts() {
+  const parts = [];
+  if (auditFilterActorKind.value) parts.push('actor_kind=' + encodeURIComponent(auditFilterActorKind.value));
+  const verb = auditFilterVerb.value.trim();
+  if (verb) parts.push('verb=' + encodeURIComponent(verb));
+  const winMs = AUDIT_WINDOW_MS[auditFilterWindow.value];
+  if (winMs) parts.push('since=' + encodeURIComponent(new Date(Date.now() - winMs).toISOString()));
+  return parts;
+}
+
+async function loadAuditTrail(opts) {
   if (!activeWorkspace) return;
+  const append = !!(opts && opts.append);
   try {
-    const data = await apiFetch(`/api/v1/workspaces/${activeWorkspace.id}/audit_events`);
-    renderAuditTrail(data.items || []);
+    const parts = auditFilterParts();
+    if (append && auditNextCursor) parts.push('cursor=' + encodeURIComponent(auditNextCursor));
+    const qs = parts.length ? '?' + parts.join('&') : '';
+    const data = await apiFetch(`/api/v1/workspaces/${activeWorkspace.id}/audit_events${qs}`);
+    auditNextCursor = data.next_cursor || null;
+    auditItems = append ? auditItems.concat(data.items || []) : (data.items || []);
+    auditPaged = append;
+    renderAuditTrail(auditItems);
+    auditLoadMoreBtn.hidden = !auditNextCursor;
     auditStatusEl.textContent = '';
   } catch (err) {
     auditStatusEl.textContent = 'Error loading audit trail: ' + err.message;
@@ -4501,7 +4529,9 @@ function renderAuditTrail(items) {
 function startAuditPolling() {
   stopAuditPolling();
   auditPollTimer = setInterval(() => {
-    if (activeTab === 'audit') {
+    // Poll only the unfiltered, unpaged first page — a poll while the user is
+    // filtering or walking pages would clobber what they're looking at.
+    if (activeTab === 'audit' && auditFilterParts().length === 0 && !auditPaged) {
       loadAuditTrail();
     }
   }, AUDIT_POLL_MS);
@@ -4514,7 +4544,11 @@ function stopAuditPolling() {
   }
 }
 
-auditRefreshBtn.addEventListener('click', loadAuditTrail);
+auditRefreshBtn.addEventListener('click', () => loadAuditTrail());
+auditFilterActorKind.addEventListener('change', () => loadAuditTrail());
+auditFilterVerb.addEventListener('change', () => loadAuditTrail());
+auditFilterWindow.addEventListener('change', () => loadAuditTrail());
+auditLoadMoreBtn.addEventListener('click', () => loadAuditTrail({ append: true }));
 
 /* ── Init: load workspaces then conversations ── */
 

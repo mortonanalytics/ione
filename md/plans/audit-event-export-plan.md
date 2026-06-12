@@ -101,7 +101,8 @@ pub async fn list_filtered(
 - `src/routes/mod.rs` — no route change (path unchanged); verify only.
 - `static/index.html` — filter controls inside `panel-audit`: `<select id="audit-filter-actor-kind">` (all/user/system/peer), `<input id="audit-filter-verb">`, `<select id="audit-filter-window">` (1h/24h/7d/30d), `<button id="audit-load-more">`.
 - `static/app.js` — `loadAuditTrail()` (line ~4460): build query string from the filter controls, render `next_cursor`-driven "Load more", keep the existing poll-on-tab behavior for the unfiltered first page.
-- `tests/phase_audit_export.rs` — **create** (shared by Phases 2–4; `spawn_app` copied from `tests/phase_chart_aggregates.rs`). This phase: seed 350 events (120 `peer_tool_executed`), assert AC-1 (filter + two-page cursor walk), AC-6 cross-org 404, and AC-10 `EXPLAIN` assertion:
+- `md/requirements/active/audit-event-export.md` — **create** (seeds the project's requirements source-of-truth directory, which does not exist yet). Content: the four-endpoint API contract table, per-op response shapes, and authz tiers copied from the design doc's "API contracts" section, with a header noting which phase ships each endpoint. Phases 3–4 update this file **only if** an implemented contract deviates from it; the PR must not merge with the requirements doc contradicting shipped behavior.
+- `tests/audit_export_integration.rs` — **create** (shared by Phases 2–4; `spawn_app` copied from `tests/phase_chart_aggregates.rs`; the `_integration` name suffix is the repo-standard pattern the pre-PR coverage gate recognizes — do not name it `phase_*`). This phase: seed 350 events (120 `peer_tool_executed`), assert AC-1 (filter + two-page cursor walk), AC-6 cross-org 404, and AC-10 `EXPLAIN` assertion:
 ```rust
 // AC-10: EXPLAIN the REAL cursor query shape (with id tiebreaker + cursor
 // predicate — Codex finding 3), assert index scan, no Seq Scan and no Sort node.
@@ -117,7 +118,7 @@ assert!(text.contains("Index"), "expected index scan: {text}");
 assert!(!text.contains("Seq Scan"), "unexpected seq scan: {text}");
 ```
 
-**Gate:** `cargo test --test phase_audit_export phase2` (name phase-2 tests with a `phase2_` prefix) — plus `cargo clippy --all-targets -- -D warnings`.
+**Gate:** `cargo test --test audit_export_integration phase2` (name phase-2 tests with a `phase2_` prefix) — plus `cargo clippy --all-targets -- -D warnings`.
 
 **Acceptance:** AC-1, AC-6 (404 half), AC-10 pass as named tests.
 
@@ -168,9 +169,9 @@ pub async fn recovery_gaps(&self, workspace_id: Uuid, org_id: Uuid,
 - `src/routes/mod.rs` — mount `GET /api/v1/workspaces/:id/audit-aggregates` and `GET /api/v1/workspaces/:id/pipeline-aggregates` next to the `event-aggregates` route (line ~156).
 - `static/index.html` — inside `panel-audit`: a stat strip (`<div id="audit-stats">` — total interactions, recovery p50/p90) and a counts-by-hour bar rendered with the existing chart panel path **only if trivially reusable**; otherwise a plain HTML/CSS bar list (design permits "summary stat row"; do not build a new chart type).
 - `static/app.js` — **admin detection (Codex finding 5, resolved):** `/api/v1/me` carries no admin/CoC flag and `loadMe()` retains no role metadata — do **not** extend the API. Use probe-and-hide: on audit-tab activation fetch `audit-aggregates`; on 403 set a module-level `auditAdminDenied = true`, hide the stat strip and (Phase 4) the export button, and skip further admin-only fetches for the session. On 200, render. The server-side `require_admin` gate remains the actual protection.
-- `tests/phase_audit_export.rs` — `phase3_` tests: AC-2 (count_by_bucket sums per actor), AC-3 (count_by_actor 5/3 ordering + `bucket=hour` → 400), AC-4 (seed `error` at T, `publish_started` at T+90s ⇒ `gap_seconds==90`, `from_stage=="error"`, `occurred_at==T`, `summary.count==1`), AC-6 403-half for both endpoints with a non-admin member. Plus interleaved-stage tests (Codex finding 4): (a) `error` at T, `first_event` at T+30s, `publish_started` at T+90s ⇒ still `gap_seconds==90`; (b) two connectors with overlapping fault windows ⇒ each gap pairs within its own connector; (c) fault with no later `publish_started` ⇒ no row emitted; (d) fault row with NULL `connector_id` ⇒ excluded.
+- `tests/audit_export_integration.rs` — `phase3_` tests: AC-2 (count_by_bucket sums per actor), AC-3 (count_by_actor 5/3 ordering + `bucket=hour` → 400), AC-4 (seed `error` at T, `publish_started` at T+90s ⇒ `gap_seconds==90`, `from_stage=="error"`, `occurred_at==T`, `summary.count==1`), AC-6 403-half for both endpoints with a non-admin member. Plus interleaved-stage tests (Codex finding 4): (a) `error` at T, `first_event` at T+30s, `publish_started` at T+90s ⇒ still `gap_seconds==90`; (b) two connectors with overlapping fault windows ⇒ each gap pairs within its own connector; (c) fault with no later `publish_started` ⇒ no row emitted; (d) fault row with NULL `connector_id` ⇒ excluded.
 
-**Gate:** `cargo test --test phase_audit_export phase3` + clippy.
+**Gate:** `cargo test --test audit_export_integration phase3` + clippy.
 
 **Acceptance:** AC-2, AC-3, AC-4, AC-6 (403 half) pass as named tests.
 
@@ -201,9 +202,9 @@ A `COUNT(*)` pre-check is explicitly **not** used — it cannot produce the curs
 - `src/routes/mod.rs` — mount `GET /api/v1/workspaces/:id/audit-export`.
 - `static/index.html` — `<button id="audit-export-btn" hidden>Export NDJSON</button>` in `panel-audit`.
 - `static/app.js` — export click → fetch with current filters, save blob (`URL.createObjectURL`), follow `X-Next-Cursor` until absent; button visibility driven by the Phase 3 `auditAdminDenied` probe flag (hidden until the first aggregates fetch succeeds).
-- `tests/phase_audit_export.rs` — `phase4_` tests: AC-5 (seed 10,500 rows → 10,000 NDJSON lines + header, cursor walk returns 500), AC-7 (91-day span → 400; missing `since` → 400), AC-9 (hold one streaming response open, second request → 429), AC-6 403 for non-admin.
+- `tests/audit_export_integration.rs` — `phase4_` tests: AC-5 (seed 10,500 rows → 10,000 NDJSON lines + header, cursor walk returns 500), AC-7 (91-day span → 400; missing `since` → 400), AC-9 (hold one streaming response open, second request → 429), AC-6 403 for non-admin.
 
-**Gate:** `cargo test --test phase_audit_export phase4` + clippy + full `cargo test --test phase_audit_export` (all phases green together).
+**Gate:** `cargo test --test audit_export_integration phase4` + clippy + full `cargo test --test audit_export_integration` (all phases green together).
 
 **Acceptance:** AC-5, AC-7, AC-9, AC-6 (export 403) pass as named tests.
 
@@ -227,6 +228,8 @@ A `COUNT(*)` pre-check is explicitly **not** used — it cannot produce the curs
 Files cited all exist except those marked **create**. Phases are vertical slices (each ships API+UI+test together; Phase 1 is write-path-only by design). Gates are concrete commands. No parallel agents → no contract file, no manifest.
 
 ## Notes for /code-the-plan
+
+- **If a previous run already created `tests/phase_audit_export.rs`:** rename it (`mv tests/phase_audit_export.rs tests/audit_export_integration.rs`) rather than creating a second file — the `_integration` suffix is what the pre-PR coverage gate recognizes.
 
 - Run integration tests against the dev Postgres (`postgres://ione:ione@localhost:5433/ione` per test default) — **environment preflight: confirm the container is up before Phase 2** (`pg_isready -h localhost -p 5433` or equivalent); if absent, stop and report.
 - `TRUNCATE` list in `spawn_app` must include `pipeline_events` for Phase 3 seeds.
