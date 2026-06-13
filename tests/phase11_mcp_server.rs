@@ -1044,10 +1044,7 @@ async fn tool_invoke_gated() {
 
     let issuer_id = insert_trust_issuer(&pool, org_id, "https://tool-gate.issuer.test").await;
     let mut peer_ids = Vec::new();
-    for (name, uri) in [
-        ("weather", weather_server.uri()),
-        ("db", db_server.uri()),
-    ] {
+    for (name, uri) in [("weather", weather_server.uri()), ("db", db_server.uri())] {
         let peer_id: Uuid = sqlx::query_scalar(
             "INSERT INTO peers
                (org_id, name, mcp_url, issuer_id, sharing_policy, tool_allowlist, status, tool_prefix)

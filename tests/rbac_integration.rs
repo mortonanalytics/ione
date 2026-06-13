@@ -372,7 +372,10 @@ async fn membership_grant_revoke_roundtrip() {
         .expect("POST membership");
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.expect("body");
-    assert!(body["id"].is_string(), "grant must return the membership id");
+    assert!(
+        body["id"].is_string(),
+        "grant must return the membership id"
+    );
 
     // Duplicate grant → 409 membership_exists.
     let resp = client

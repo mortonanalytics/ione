@@ -64,10 +64,11 @@ async fn default_user_and_org(pool: &PgPool) -> (Uuid, Uuid) {
 /// `provisioning:apply` perms the token endpoints require.
 async fn make_default_user_provisioning_admin(pool: &PgPool) {
     let (user_id, org_id) = default_user_and_org(pool).await;
-    let ws_id: Uuid = sqlx::query_scalar("SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .expect("Operations workspace");
+    let ws_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .expect("Operations workspace");
     let role_id: Uuid = sqlx::query_scalar(
         "INSERT INTO roles (workspace_id, name, coc_level, permissions)
          VALUES ($1, 'admin', 80, '[\"admin\"]'::jsonb)
@@ -184,7 +185,12 @@ async fn token_authenticates() {
 
     // AC-1: the token authenticates headlessly against POST /provision and
     // applies a minimal spec.
-    let resp = provision(&base, &token, json!({ "version": "v1", "workspace": { "name": "ac1-ws" } })).await;
+    let resp = provision(
+        &base,
+        &token,
+        json!({ "version": "v1", "workspace": { "name": "ac1-ws" } }),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.expect("json");
     assert!(body["workspaceId"].as_str().is_some(), "{body}");
@@ -222,7 +228,10 @@ async fn token_list_omits_secret() {
         assert!(item.get("token_hash").is_none(), "list leaked hash: {item}");
     }
     let serialized = serde_json::to_string(&body).unwrap();
-    assert!(!serialized.contains(&plaintext), "list body contained plaintext");
+    assert!(
+        !serialized.contains(&plaintext),
+        "list body contained plaintext"
+    );
 }
 
 // ─── AC-3: revocation → 401 ──────────────────────────────────────────────────
@@ -276,11 +285,13 @@ async fn expired_token_401() {
     let token = created["token"].as_str().unwrap().to_owned();
 
     // Backdate the expiry past now.
-    sqlx::query("UPDATE service_account_tokens SET expires_at = now() - interval '1 hour' WHERE id = $1")
-        .bind(id)
-        .execute(&pool)
-        .await
-        .expect("backdate expiry");
+    sqlx::query(
+        "UPDATE service_account_tokens SET expires_at = now() - interval '1 hour' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .expect("backdate expiry");
 
     let resp = client()
         .get(format!("{base}/api/v1/service-account-tokens"))
@@ -299,10 +310,11 @@ async fn expired_token_401() {
 #[ignore]
 async fn connector_unique_constraint_present() {
     let (_base, pool) = spawn_app().await;
-    let ws: Uuid = sqlx::query_scalar("SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1")
-        .fetch_one(&pool)
-        .await
-        .expect("Operations workspace");
+    let ws: Uuid =
+        sqlx::query_scalar("SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("Operations workspace");
 
     let insert = |name: &'static str| {
         let pool = pool.clone();
@@ -319,7 +331,9 @@ async fn connector_unique_constraint_present() {
     };
 
     insert("dup").await.expect("first insert");
-    let err = insert("dup").await.expect_err("duplicate must violate unique constraint");
+    let err = insert("dup")
+        .await
+        .expect_err("duplicate must violate unique constraint");
     let msg = err.to_string();
     assert!(
         msg.contains("connectors_workspace_id_name_key")
@@ -338,7 +352,8 @@ async fn connector_unique_constraint_present() {
 async fn provision_idempotent() {
     let (base, pool) = spawn_app().await;
     let org = default_org_id(&pool).await;
-    let (token, _) = insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 0).await;
+    let (token, _) =
+        insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 0).await;
 
     let spec = json!({
         "version": "v1",
@@ -349,13 +364,21 @@ async fn provision_idempotent() {
     let r1 = provision(&base, &token, spec.clone()).await;
     assert_eq!(r1.status(), StatusCode::OK);
     let b1: Value = r1.json().await.unwrap();
-    let created_kinds: Vec<&str> = b1["created"].as_array().unwrap().iter()
-        .map(|e| e["kind"].as_str().unwrap()).collect();
+    let created_kinds: Vec<&str> = b1["created"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
     assert!(created_kinds.contains(&"workspace"), "{b1}");
     assert!(created_kinds.contains(&"connector"), "{b1}");
 
-    let ws_count_1: i64 = sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE org_id=$1 AND name='idem-ws'")
-        .bind(org).fetch_one(&pool).await.unwrap();
+    let ws_count_1: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE org_id=$1 AND name='idem-ws'")
+            .bind(org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let conn_count_1: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM connectors c JOIN workspaces w ON w.id=c.workspace_id WHERE w.org_id=$1 AND c.name='c1'")
         .bind(org).fetch_one(&pool).await.unwrap();
@@ -363,11 +386,19 @@ async fn provision_idempotent() {
     let r2 = provision(&base, &token, spec).await;
     assert_eq!(r2.status(), StatusCode::OK);
     let b2: Value = r2.json().await.unwrap();
-    assert_eq!(b2["created"].as_array().unwrap().len(), 0, "second apply created rows: {b2}");
+    assert_eq!(
+        b2["created"].as_array().unwrap().len(),
+        0,
+        "second apply created rows: {b2}"
+    );
     assert!(b2["unchangedCount"].as_i64().unwrap() >= 1, "{b2}");
 
-    let ws_count_2: i64 = sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE org_id=$1 AND name='idem-ws'")
-        .bind(org).fetch_one(&pool).await.unwrap();
+    let ws_count_2: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE org_id=$1 AND name='idem-ws'")
+            .bind(org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let conn_count_2: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM connectors c JOIN workspaces w ON w.id=c.workspace_id WHERE w.org_id=$1 AND c.name='c1'")
         .bind(org).fetch_one(&pool).await.unwrap();
@@ -382,21 +413,34 @@ async fn provision_idempotent() {
 async fn connector_upsert_single_row() {
     let (base, pool) = spawn_app().await;
     let org = default_org_id(&pool).await;
-    let (token, _) = insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 0).await;
+    let (token, _) =
+        insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 0).await;
 
-    let mk = |v: i64| json!({
-        "version": "v1",
-        "workspace": { "name": "cfg-ws" },
-        "connectors": [{ "name": "c1", "kind": "rust_native", "config": { "n": v } }]
-    });
+    let mk = |v: i64| {
+        json!({
+            "version": "v1",
+            "workspace": { "name": "cfg-ws" },
+            "connectors": [{ "name": "c1", "kind": "rust_native", "config": { "n": v } }]
+        })
+    };
 
-    assert_eq!(provision(&base, &token, mk(1)).await.status(), StatusCode::OK);
+    assert_eq!(
+        provision(&base, &token, mk(1)).await.status(),
+        StatusCode::OK
+    );
     let r2 = provision(&base, &token, mk(2)).await;
     assert_eq!(r2.status(), StatusCode::OK);
     let b2: Value = r2.json().await.unwrap();
     let updated = b2["updated"].as_array().unwrap();
-    assert!(updated.iter().any(|u| u["kind"] == "connector"
-        && u["changedFields"].as_array().unwrap().iter().any(|f| f == "config")), "{b2}");
+    assert!(
+        updated.iter().any(|u| u["kind"] == "connector"
+            && u["changedFields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == "config")),
+        "{b2}"
+    );
 
     let row_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM connectors c JOIN workspaces w ON w.id=c.workspace_id WHERE w.org_id=$1 AND c.name='c1'")
@@ -415,7 +459,8 @@ async fn connector_upsert_single_row() {
 async fn provision_rolls_back() {
     let (base, pool) = spawn_app().await;
     let org = default_org_id(&pool).await;
-    let (token, _) = insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 0).await;
+    let (token, _) =
+        insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 0).await;
 
     let spec = json!({
         "version": "v1",
@@ -429,14 +474,24 @@ async fn provision_rolls_back() {
     let resp = provision(&base, &token, spec).await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["name"], "bad3", "422 must name the failing connector: {body}");
+    assert_eq!(
+        body["name"], "bad3",
+        "422 must name the failing connector: {body}"
+    );
 
-    let ws_count: i64 = sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE org_id=$1 AND name='rollback-ws'")
-        .bind(org).fetch_one(&pool).await.unwrap();
+    let ws_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workspaces WHERE org_id=$1 AND name='rollback-ws'",
+    )
+    .bind(org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(ws_count, 0, "workspace must not persist after rollback");
-    let conn_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM connectors WHERE name IN ('ok1','ok2','bad3')")
-        .fetch_one(&pool).await.unwrap();
+    let conn_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM connectors WHERE name IN ('ok1','ok2','bad3')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(conn_count, 0, "no connector from the spec may persist");
 }
 
@@ -449,7 +504,8 @@ async fn provision_escalation_409() {
     let org = default_org_id(&pool).await;
 
     // (a) role grants peers:manage which the token does not hold.
-    let (token, _) = insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 80).await;
+    let (token, _) =
+        insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 80).await;
     let spec = json!({
         "version": "v1",
         "workspace": { "name": "esc-ws" },
@@ -461,7 +517,8 @@ async fn provision_escalation_409() {
     assert_eq!(body["error"], "permission_escalation");
 
     // (b) role coc_level above the token's provisionable_max_coc.
-    let (token2, _) = insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 10).await;
+    let (token2, _) =
+        insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 10).await;
     let spec2 = json!({
         "version": "v1",
         "workspace": { "name": "esc-ws2" },
@@ -469,7 +526,10 @@ async fn provision_escalation_409() {
     });
     let resp2 = provision(&base, &token2, spec2).await;
     assert_eq!(resp2.status(), StatusCode::CONFLICT);
-    assert_eq!(resp2.json::<Value>().await.unwrap()["error"], "permission_escalation");
+    assert_eq!(
+        resp2.json::<Value>().await.unwrap()["error"],
+        "permission_escalation"
+    );
 }
 
 /// AC-8: a token holding [provisioning:apply, roles:manage] provisions W, then
@@ -479,11 +539,20 @@ async fn provision_escalation_409() {
 async fn provision_grants_capped_membership() {
     let (base, pool) = spawn_app().await;
     let org = default_org_id(&pool).await;
-    let (token, _) = insert_token_directly(&pool, org, &["provisioning:apply", "roles:manage"], 0).await;
+    let (token, _) =
+        insert_token_directly(&pool, org, &["provisioning:apply", "roles:manage"], 0).await;
 
-    let resp = provision(&base, &token, json!({ "version": "v1", "workspace": { "name": "managed-ws" } })).await;
+    let resp = provision(
+        &base,
+        &token,
+        json!({ "version": "v1", "workspace": { "name": "managed-ws" } }),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let ws_id = resp.json::<Value>().await.unwrap()["workspaceId"].as_str().unwrap().to_owned();
+    let ws_id = resp.json::<Value>().await.unwrap()["workspaceId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     // roles:manage-gated endpoint authorizes for the same token.
     let resp = client()
@@ -502,14 +571,18 @@ async fn provision_grants_capped_membership() {
 async fn provision_audited_no_secrets() {
     let (base, pool) = spawn_app().await;
     let org = default_org_id(&pool).await;
-    let (token, token_id) = insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 0).await;
+    let (token, token_id) =
+        insert_token_directly(&pool, org, &["provisioning:apply", "workspace:write"], 0).await;
 
     let spec = json!({
         "version": "v1",
         "workspace": { "name": "audit-ws" },
         "connectors": [{ "name": "c1", "kind": "rust_native", "config": { "api_key": "SUPERSECRET" } }]
     });
-    assert_eq!(provision(&base, &token, spec).await.status(), StatusCode::OK);
+    assert_eq!(
+        provision(&base, &token, spec).await.status(),
+        StatusCode::OK
+    );
 
     let (actor_ref, payload): (String, Value) = sqlx::query_as(
         "SELECT actor_ref, payload FROM audit_events
@@ -520,7 +593,10 @@ async fn provision_audited_no_secrets() {
     .expect("provisioning.applied row");
     assert_eq!(actor_ref, token_id.to_string());
     let serialized = serde_json::to_string(&payload).unwrap();
-    assert!(!serialized.contains("SUPERSECRET"), "audit payload leaked a secret: {serialized}");
+    assert!(
+        !serialized.contains("SUPERSECRET"),
+        "audit payload leaked a secret: {serialized}"
+    );
 
     let kind: String = sqlx::query_scalar(
         "SELECT actor_kind::text FROM audit_events WHERE verb='provisioning.applied' ORDER BY created_at DESC LIMIT 1")
@@ -537,22 +613,42 @@ async fn provision_cross_org_isolated() {
     let org_a = default_org_id(&pool).await;
     let ws_a: Uuid = sqlx::query_scalar(
         "INSERT INTO workspaces (org_id, name, domain, lifecycle)
-         VALUES ($1, 'mission-1', 'test', 'continuous'::workspace_lifecycle) RETURNING id")
-        .bind(org_a).fetch_one(&pool).await.unwrap();
+         VALUES ($1, 'mission-1', 'test', 'continuous'::workspace_lifecycle) RETURNING id",
+    )
+    .bind(org_a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
-    let org_b: Uuid = sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Org B') RETURNING id")
-        .fetch_one(&pool).await.unwrap();
+    let org_b: Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ('Org B') RETURNING id")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let (token_b, _) = insert_token_directly(&pool, org_b, &["provisioning:apply"], 0).await;
 
-    let resp = provision(&base, &token_b, json!({ "version": "v1", "workspace": { "name": "mission-1" } })).await;
+    let resp = provision(
+        &base,
+        &token_b,
+        json!({ "version": "v1", "workspace": { "name": "mission-1" } }),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
     let ws_b = body["workspaceId"].as_str().unwrap().to_owned();
-    assert_ne!(ws_b, ws_a.to_string(), "must be a distinct workspace from org A's");
+    assert_ne!(
+        ws_b,
+        ws_a.to_string(),
+        "must be a distinct workspace from org A's"
+    );
 
     let total: i64 = sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE name='mission-1'")
-        .fetch_one(&pool).await.unwrap();
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(total, 2);
     // The response never references org A's workspace id.
-    assert!(!serde_json::to_string(&body).unwrap().contains(&ws_a.to_string()));
+    assert!(!serde_json::to_string(&body)
+        .unwrap()
+        .contains(&ws_a.to_string()));
 }

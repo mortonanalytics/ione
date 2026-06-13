@@ -281,7 +281,9 @@ pub async fn apply(
     .await
     .map_err(|e| AppError::Internal(e.into()))?;
 
-    tx.commit().await.map_err(|e| AppError::Internal(e.into()))?;
+    tx.commit()
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
 
     Ok(ProvisionResult {
         workspace_id,

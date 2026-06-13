@@ -71,8 +71,7 @@ pub async fn create_connector(
     }
     // HP-H1: create_connector was the lone composing endpoint missing the
     // workspace:write gate that patch_workspace already enforces.
-    if let Err(err) =
-        require_permission(&auth, &state.pool, workspace_id, "workspace:write").await
+    if let Err(err) = require_permission(&auth, &state.pool, workspace_id, "workspace:write").await
     {
         return err.into_response();
     }

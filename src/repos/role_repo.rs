@@ -10,8 +10,7 @@ use crate::models::Role;
 /// migration-0039 backfill. peers:manage is org-scoped and lives in
 /// `ORG_ADMIN_GRANTS`; workspace admins pass workspace-scoped checks via the
 /// `admin` short-circuit.
-pub const WORKSPACE_ADMIN_GRANTS: &str =
-    r#"["admin","audit:read","roles:manage","approvals:decide","workspace:write","tool_invoke:*:*"]"#;
+pub const WORKSPACE_ADMIN_GRANTS: &str = r#"["admin","audit:read","roles:manage","approvals:decide","workspace:write","tool_invoke:*:*"]"#;
 
 /// The org grant set given alongside an admin role, matching the
 /// migration-0039 org backfill.

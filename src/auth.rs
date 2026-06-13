@@ -448,7 +448,6 @@ pub async fn require_admin(
     require_permission(ctx, pool, workspace_id, "admin").await
 }
 
-
 pub async fn ensure_workspace_in_org(
     pool: &PgPool,
     workspace_id: Uuid,

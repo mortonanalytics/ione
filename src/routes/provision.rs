@@ -19,5 +19,7 @@ pub async fn provision(
     require_org_permission(&ctx, &state.pool, "provisioning:apply").await?;
     crate::routes::mfa_gate(&ctx, &state.pool).await?;
     let result = provisioning::apply(&state, &ctx, spec).await?;
-    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::Internal(e.into()))?))
+    Ok(Json(
+        serde_json::to_value(result).map_err(|e| AppError::Internal(e.into()))?,
+    ))
 }

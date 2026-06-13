@@ -480,12 +480,16 @@ async fn peers_manage_gate_403() {
         .await
         .expect("POST subscribe");
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    let connectors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connectors WHERE workspace_id = $1")
-        .bind(workspace_id)
-        .fetch_one(&pool)
-        .await
-        .expect("connector count");
-    assert_eq!(connectors, 0, "denied subscribe must not create a connector");
+    let connectors: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM connectors WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .fetch_one(&pool)
+            .await
+            .expect("connector count");
+    assert_eq!(
+        connectors, 0,
+        "denied subscribe must not create a connector"
+    );
 }
 
 // ─── Test 4: subscribe_creates_mcp_connector_in_workspace ────────────────────
