@@ -53,6 +53,18 @@ async fn spawn_app() -> (String, PgPool) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("local addr");
     let app = ione::app(pool.clone()).await;
+
+    // create_connector is gated by workspace:write (HP-H1). Grant the bootstrap
+    // 'member' role on Operations so the connector-create tests authorize.
+    sqlx::query(
+        "UPDATE roles SET permissions = '[\"workspace:write\"]'::jsonb
+         WHERE name = 'member'
+           AND workspace_id = (SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("grant member workspace:write");
+
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("server error");
     });

@@ -68,6 +68,7 @@ Every management write emits an `audit_events` row, `actor_kind = user`, `actor_
 | `GET/POST/DELETE /api/v1/admin/trust-issuers*` | org `trust_issuers:manage` |
 | `POST /api/v1/approvals/:id` | workspace `approvals:decide` (resolved from the approval's artifact workspace; missing artifact → 403) |
 | `PATCH /api/v1/workspaces/:id`, `POST …/close` | workspace `workspace:write` |
+| `POST /api/v1/workspaces/:id/connectors` | workspace `workspace:write` (HP-H1: closed the one composing-endpoint gap; was previously org-scoped only) |
 | `POST/DELETE /api/v1/peers*`, `POST …/peers/:id/authorize` | org `peers:manage` |
 | `POST …/workspaces/:id/peers/:peerId/subscribe` | workspace `peers:manage` |
 | MCP `tools/call` on `peer:tool` names (`route_tool_call`) | workspace `tool_invoke:<peer_name>:<tool>` (glob), denied **before** any outbound peer request, surfaced as JSON-RPC `-32403` |

@@ -340,8 +340,8 @@ async fn actor_kind_enum_variants() {
 
     assert_eq!(
         variants,
-        vec!["user", "system", "peer"],
-        "actor_kind enum must have exactly variants [user, system, peer] \
+        vec!["user", "system", "peer", "service_account"],
+        "actor_kind enum must have exactly variants [user, system, peer, service_account] \
          in declaration order, got {:?}",
         variants
     );

@@ -133,3 +133,27 @@ test("issue surfaces the plaintext once in a copy-once modal", async ({ page }) 
   await page.locator("#token-secret-close-btn").click();
   await expect(page.locator("#token-secret-modal")).toBeHidden();
 });
+
+test("revoke wires DELETE and refreshes the list", async ({ page }) => {
+  let deleted: string | null = null;
+  let revoked = false;
+  await page.route("**/api/v1/service-account-tokens/*", (route) => {
+    deleted = route.request().url();
+    revoked = true;
+    route.fulfill({ status: 204, body: "" });
+  });
+  await page.route("**/api/v1/service-account-tokens", (route) => {
+    const body = revoked ? { items: [] } : tokensPayload();
+    route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+  });
+
+  await page.goto("/");
+  await expect(page.locator("#tab-tokens")).toBeVisible();
+  await page.locator("#tab-tokens").click();
+  await expect(page.locator("#tokens-list .token-card")).toHaveCount(1);
+
+  await page.locator(".token-revoke-btn").click();
+  await expect(page.locator("#tokens-status")).toHaveText("Token revoked.");
+  await expect(page.locator("#tokens-list .token-card")).toHaveCount(0);
+  expect(deleted).toContain(`/service-account-tokens/${TOKEN_ID}`);
+});
