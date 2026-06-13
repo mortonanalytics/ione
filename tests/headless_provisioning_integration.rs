@@ -248,3 +248,41 @@ async fn expired_token_401() {
         .expect("authed request failed");
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ─── AC-9 (Phase-2 form): the connector idempotency constraint exists ────────
+// Fully exercised via /provision in Phase 3; here we assert the unique
+// constraint directly so the ON CONFLICT target Slice 3 binds to is present.
+
+#[tokio::test]
+#[ignore]
+async fn connector_unique_constraint_present() {
+    let (_base, pool) = spawn_app().await;
+    let ws: Uuid = sqlx::query_scalar("SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("Operations workspace");
+
+    let insert = |name: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO connectors (workspace_id, kind, name, config, status)
+                 VALUES ($1, 'rust_native'::connector_kind, $2, '{}'::jsonb, 'active'::connector_status)",
+            )
+            .bind(ws)
+            .bind(name)
+            .execute(&pool)
+            .await
+        }
+    };
+
+    insert("dup").await.expect("first insert");
+    let err = insert("dup").await.expect_err("duplicate must violate unique constraint");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("connectors_workspace_id_name_key")
+            || msg.contains("duplicate")
+            || msg.contains("unique"),
+        "expected a unique violation, got: {msg}"
+    );
+}

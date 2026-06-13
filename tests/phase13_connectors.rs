@@ -42,6 +42,20 @@ async fn spawn_app() -> (String, PgPool) {
         .expect("failed to bind");
     let addr: SocketAddr = listener.local_addr().expect("get addr");
     let app = ione::app(pool.clone()).await;
+
+    // create_connector is gated by workspace:write (HP-H1). The bootstrap
+    // 'member' role on Operations (created inside app()) has no permissions;
+    // grant it here so the create-path tests authorize. The dedicated authz
+    // test uses a separate workspace where the default user has no membership.
+    sqlx::query(
+        "UPDATE roles SET permissions = '[\"workspace:write\"]'::jsonb
+         WHERE name = 'member'
+           AND workspace_id = (SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("grant member workspace:write");
+
     tokio::spawn(async move { axum::serve(listener, app).await.expect("server error") });
 
     (format!("http://{}", addr), pool)
@@ -948,4 +962,38 @@ async fn openapi_poll_failure_sets_connector_error_status() {
         "last_error must capture poll failure, got {:?}",
         status_and_error.1
     );
+}
+
+/// HP-H1: a member without workspace:write cannot create a connector.
+/// Uses a workspace in the default org where the default user has no
+/// membership, so the workspace:write gate resolves to an empty grant → 403.
+#[tokio::test]
+#[ignore]
+async fn create_connector_requires_workspace_write() {
+    let (base, pool) = spawn_app().await;
+    let org_id: Uuid = sqlx::query_scalar("SELECT org_id FROM users LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("default user org");
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (org_id, name, domain, lifecycle)
+         VALUES ($1, 'no-write-ws', 'test', 'continuous'::workspace_lifecycle)
+         RETURNING id",
+    )
+    .bind(org_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert workspace");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v1/workspaces/{}/connectors", base, ws))
+        .json(&json!({
+            "kind": "rust_native",
+            "name": "denied",
+            "config": {}
+        }))
+        .send()
+        .await
+        .expect("create connector request");
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
 }

@@ -11,7 +11,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    auth::{ensure_workspace_in_org, AuthContext},
+    auth::{ensure_workspace_in_org, require_permission, AuthContext},
     connectors,
     error::AppError,
     middleware::session_cookie::SessionId,
@@ -67,6 +67,13 @@ pub async fn create_connector(
     Json(req): Json<CreateConnectorRequest>,
 ) -> Response {
     if let Err(err) = ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id).await {
+        return err.into_response();
+    }
+    // HP-H1: create_connector was the lone composing endpoint missing the
+    // workspace:write gate that patch_workspace already enforces.
+    if let Err(err) =
+        require_permission(&auth, &state.pool, workspace_id, "workspace:write").await
+    {
         return err.into_response();
     }
 
