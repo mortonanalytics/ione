@@ -3224,6 +3224,25 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 
   #tab-bar {
     overflow-x: auto;
+    /* Scroll-shadow affordance: a soft shadow appears at whichever edge has
+       more tabs to scroll to, and disappears at the ends. Signals that the
+       ops/admin tabs (Roles/Policies/Tokens) continue off-screen on phone. */
+    background-image:
+      linear-gradient(to right, var(--color-surface), rgba(255, 255, 255, 0)),
+      linear-gradient(to left, var(--color-surface), rgba(255, 255, 255, 0)),
+      radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0)),
+      radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0));
+    background-position: left center, right center, left center, right center;
+    background-repeat: no-repeat;
+    background-size: 28px 100%, 28px 100%, 12px 100%, 12px 100%;
+    background-attachment: local, local, scroll, scroll;
+  }
+
+  /* On phone the tabs scroll, so the desktop right-grouping of ops tabs
+     would leave a dead gap — let them flow continuously instead. */
+  #tab-connectors {
+    margin-left: 0;
+    border-left: none;
   }
 
   .chat-chips {
@@ -3728,6 +3747,26 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .policy-card-actions {
   display: flex;
   gap: var(--space-2, 8px);
+}
+
+/* Admin panels are forms + cards, not full-bleed data views — keep their
+   content in a readable column instead of stretching to the viewport width. */
+#panel-roles,
+#panel-policies,
+#panel-tokens {
+  max-width: 56em;
+}
+
+.form-hint {
+  display: block;
+  color: #666;
+  font-size: var(--font-size-xs, 0.75rem);
+  margin: 2px 0 var(--space-2, 8px);
+}
+
+.form-hint code {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.95em;
 }
 
 #policy-editor {

@@ -453,7 +453,8 @@
             </select>
 
             <label for="policy-permission">Authorized by permission <span aria-hidden="true">*</span></label>
-            <input id="policy-permission" type="text" required placeholder="approvals:decide" autocomplete="off" />
+            <input id="policy-permission" type="text" required placeholder="tool_invoke:slack:send" autocomplete="off" aria-describedby="policy-permission-hint" />
+            <small id="policy-permission-hint" class="form-hint">The permission this policy executes under — must be one you hold (e.g. a <code>tool_invoke:&lt;peer&gt;:&lt;op&gt;</code> grant).</small>
 
             <p id="policy-form-error" class="policy-form-error" hidden></p>
 
