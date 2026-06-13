@@ -46,6 +46,7 @@ pub mod mfa;
 pub mod oauth;
 pub mod peers;
 pub mod pipeline_events;
+pub mod provision;
 pub mod public_issuers;
 pub mod roles;
 pub mod rule_diagnostics;
@@ -345,6 +346,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/service-account-tokens/:tokenId",
             delete(service_account_tokens::revoke),
         )
+        .route("/api/v1/provision", post(provision::provision))
         .route_layer(from_fn_with_state(state.clone(), demo_write_guard))
         .route_layer(from_fn(enforce_auth))
         .route_layer(from_fn_with_state(state.clone(), auth_middleware))

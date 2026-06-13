@@ -107,11 +107,48 @@ async fn spawn_app() -> (String, PgPool) {
 
     let app = ione::app(pool.clone()).await;
 
+    // create_connector is gated by workspace:write (HP-H1). The bootstrap
+    // 'member' role on Operations has no permissions; grant it so the
+    // connector-create tests authorize.
+    sqlx::query(
+        "UPDATE roles SET permissions = '[\"workspace:write\"]'::jsonb
+         WHERE name = 'member'
+           AND workspace_id = (SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("grant member workspace:write");
+
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("server error");
     });
 
     (format!("http://{}", addr), pool)
+}
+
+/// Grant the local-mode default user workspace:write on `ws` (HP-H1: the
+/// connector-create gate now requires it, and create_workspace does not grant
+/// the creator a membership).
+async fn grant_default_user_write(pool: &PgPool, ws: Uuid) {
+    let uid: Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .expect("default user");
+    let role: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (workspace_id, name, coc_level, permissions)
+         VALUES ($1, 'writer', 0, '[\"workspace:write\"]'::jsonb) RETURNING id",
+    )
+    .bind(ws)
+    .fetch_one(pool)
+    .await
+    .expect("insert writer role");
+    sqlx::query("INSERT INTO memberships (user_id, workspace_id, role_id) VALUES ($1, $2, $3)")
+        .bind(uid)
+        .bind(ws)
+        .bind(role)
+        .execute(pool)
+        .await
+        .expect("insert writer membership");
 }
 
 /// Return the id of the seeded "Operations" workspace from the DB.
@@ -441,6 +478,7 @@ async fn list_connectors_returns_items_for_workspace() {
         .expect("workspace B body not JSON");
     let ws_b = Uuid::parse_str(ws_b_body["id"].as_str().expect("ws B must have id"))
         .expect("ws B id must be UUID");
+    grant_default_user_write(&pool, ws_b).await;
 
     // Create 2 connectors in workspace A
     for i in 0..2 {
@@ -1048,6 +1086,7 @@ async fn workspace_cascade_reaches_stream_events() {
 
     let ws_id_str = ws_body["id"].as_str().expect("ws must have id");
     let ws_id = Uuid::parse_str(ws_id_str).expect("ws id must be UUID");
+    grant_default_user_write(&pool, ws_id).await;
 
     // Create 2 connectors in this workspace via API
     let mut stream_ids: Vec<Uuid> = Vec::new();

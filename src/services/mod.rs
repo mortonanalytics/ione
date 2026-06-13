@@ -18,6 +18,7 @@ pub mod peer_governor;
 pub mod peer_oauth;
 pub mod peer_tokens;
 pub mod pipeline_bus;
+pub mod provisioning;
 pub mod router;
 pub mod rules;
 pub mod scheduler;
