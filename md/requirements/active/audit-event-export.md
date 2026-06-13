@@ -26,6 +26,8 @@ Write-time error-string scrub (no API surface) ships in Phase 1 and applies to e
 
 Auto-exec governance (`md/requirements/active/auto-exec-governance.md`) adds the verbs `auto_exec_policy.created` / `auto_exec_policy.updated` / `auto_exec_policy.deleted` (object_kind `auto_exec_policy`) and the `terminal: true` payload variant of `delivered`; they flow through these endpoints with no contract change.
 
+Headless provisioning (`md/requirements/active/headless-provisioning.md`) adds `service_account_token.issued` / `service_account_token.revoked` (object_kind `service_account_token`) and `provisioning.applied` (object_kind `org`, `workspace_id = NULL`, payload carries the created/updated/unchanged diff and never connector secrets), all with `actor_kind = service_account` and `actor_ref` = the token id. Because `provisioning.applied` is org-level with a null `workspace_id`, it does **not** appear in the workspace-scoped list/aggregate endpoints above — an `org_id` column on `audit_events` is the named follow-up for org-level audit filtering.
+
 ### Per-op response shapes for `audit-aggregates`
 
 - `count_by_bucket` → `{ op: "count_by_bucket", bucket: enum, groups: [{ key: string, bucket_start: ISO8601, count: int }] }` — `key` is the value of the requested `group_by` dimension (an `actor_kind` enum value, a `verb` string, or an `actor_ref` string).

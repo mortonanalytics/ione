@@ -4,9 +4,9 @@
 **Plan:** `md/plans/rbac-scaffolding-plan.md`
 **Status:** in implementation on `feature/rbac-scaffolding`
 
-## Permission vocabulary (closed, 8 strings)
+## Permission vocabulary (closed, 10 strings)
 
-Grammar: flat `namespace:verb`, or `tool_invoke:<peer_slug>:<tool_glob>` where `*` matches one `:`-segment. Matching is exact-string or per-segment glob (`permission_grants` in `src/auth.rs`).
+Grammar: flat `namespace:verb`, or `tool_invoke:<peer_slug>:<tool_glob>` where `*` matches one `:`-segment. Matching is exact-string or per-segment glob (`permission_grants` in `src/auth.rs`). Org-scoped permissions are also carried by service-account tokens (`service_account_tokens.permissions`, headless-provisioning).
 
 | Permission | Scope | Held in | Checked by |
 |---|---|---|---|
@@ -18,6 +18,8 @@ Grammar: flat `namespace:verb`, or `tool_invoke:<peer_slug>:<tool_glob>` where `
 | `workspace:write` | workspace | `roles.permissions` | `require_permission` |
 | `tool_invoke:<peer>:<tool>` | workspace | `roles.permissions` | segment-glob matcher in `route_tool_call` |
 | `trust_issuers:manage` | org | `org_memberships.permissions` | `require_org_permission` |
+| `service_accounts:manage` | org | `org_memberships.permissions` / token | `require_org_permission` (mint/list/revoke service-account tokens — headless-provisioning) |
+| `provisioning:apply` | org | `org_memberships.permissions` / token | `require_org_permission` (consolidated grant for `POST /api/v1/provision`; provisions all spec entity types without per-resource permissions — headless-provisioning) |
 
 **Resolution is per `(user, workspace)` at call time** — the union of `permissions` arrays across all the user's roles in that workspace (`RoleRepo::effective_permissions`), never the session-global `active_role_id`. Fail-closed: no membership, empty grants, or missing permission → 403. Org-scoped checks resolve `(user, org)` against `org_memberships`; the workspace `admin` grant does **not** short-circuit org checks.
 
