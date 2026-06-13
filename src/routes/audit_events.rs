@@ -66,8 +66,9 @@ pub fn parse_actor_kind(value: &str) -> Result<ActorKind, AppError> {
         "user" => Ok(ActorKind::User),
         "system" => Ok(ActorKind::System),
         "peer" => Ok(ActorKind::Peer),
+        "service_account" => Ok(ActorKind::ServiceAccount),
         _ => Err(AppError::BadRequest(
-            "actor_kind must be one of user, system, peer".into(),
+            "actor_kind must be one of user, system, peer, service_account".into(),
         )),
     }
 }

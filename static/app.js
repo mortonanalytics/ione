@@ -650,6 +650,8 @@ function setActiveWorkspace(ws) {
   probeRolesAccess(ws.id);
   // Policies tab visibility: probe approvals:decide for this workspace (cached).
   probePoliciesAccess(ws.id);
+  // Tokens tab visibility: org-scoped service_accounts:manage probe (cached).
+  probeTokensAccess();
   renderActivationTracker(ws);
 }
 
@@ -1066,6 +1068,7 @@ const tabApprovals     = document.getElementById('tab-approvals');
 const tabAudit         = document.getElementById('tab-audit');
 const tabRoles         = document.getElementById('tab-roles');
 const tabPolicies      = document.getElementById('tab-policies');
+const tabTokens        = document.getElementById('tab-tokens');
 const panelChat        = document.getElementById('panel-chat');
 const panelMap         = document.getElementById('panel-map');
 const panelChart       = document.getElementById('panel-chart');
@@ -1078,6 +1081,7 @@ const panelApprovals   = document.getElementById('panel-approvals');
 const panelAudit       = document.getElementById('panel-audit');
 const panelRoles       = document.getElementById('panel-roles');
 const panelPolicies    = document.getElementById('panel-policies');
+const panelTokens      = document.getElementById('panel-tokens');
 
 let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'table' | 'document' | 'connectors' | 'signals' | 'survivors' | 'approvals' | 'audit'
 
@@ -1146,6 +1150,10 @@ function switchTab(name) {
   tabPolicies.classList.toggle('tab--active', name === 'policies');
   panelPolicies.hidden = name !== 'policies';
 
+  tabTokens.setAttribute('aria-selected', String(name === 'tokens'));
+  tabTokens.classList.toggle('tab--active', name === 'tokens');
+  panelTokens.hidden = name !== 'tokens';
+
   if (name === 'connectors' && activeWorkspace) {
     loadConnectors(activeWorkspace.id);
     loadPeerBrowser(activeWorkspace.id);
@@ -1197,6 +1205,10 @@ function switchTab(name) {
   if (name === 'policies' && activeWorkspace) {
     loadPolicies();
   }
+
+  if (name === 'tokens') {
+    loadTokens();
+  }
 }
 
 // Registry driving adaptive tab visibility + keyboard nav. Data-viz tabs
@@ -1229,6 +1241,10 @@ tabRoles.addEventListener('click', () => switchTab('roles'));
 // Policies tab likewise: visibility comes from the approvals:decide probe
 // (probePoliciesAccess).
 tabPolicies.addEventListener('click', () => switchTab('policies'));
+
+// Tokens tab: org-scoped, visibility comes from the service_accounts:manage
+// probe (probeTokensAccess).
+tabTokens.addEventListener('click', () => switchTab('tokens'));
 
 // Apply data-presence visibility from a workspace `panels` block. When panels
 // are unknown (null), nothing is hidden — we never hide a tab we can't disprove.
@@ -5175,6 +5191,197 @@ policyForm.addEventListener('submit', async (ev) => {
 policyCancelBtn.addEventListener('click', resetPolicyForm);
 policiesRefreshBtn.addEventListener('click', loadPolicies);
 
+/* ── Service-account tokens panel (org-scoped) ── */
+
+const tokensStatusEl   = document.getElementById('tokens-status');
+const tokensListEl      = document.getElementById('tokens-list');
+const tokensRefreshBtn  = document.getElementById('tokens-refresh-btn');
+const tokenForm         = document.getElementById('token-form');
+const tokenNameEl       = document.getElementById('token-name');
+const tokenPermsFieldset = document.getElementById('token-permissions');
+const tokenMaxCocEl     = document.getElementById('token-max-coc');
+const tokenExpiresEl    = document.getElementById('token-expires');
+const tokenFormError    = document.getElementById('token-form-error');
+const tokenSecretModal  = document.getElementById('token-secret-modal');
+const tokenSecretValue  = document.getElementById('token-secret-value');
+const tokenSecretCopyBtn = document.getElementById('token-secret-copy-btn');
+const tokenSecretCloseBtn = document.getElementById('token-secret-close-btn');
+
+/* Permissions a service-account token may carry, rendered as toggle chips. */
+const TOKEN_VOCABULARY = [
+  'provisioning:apply',
+  'service_accounts:manage',
+  'workspace:write',
+  'roles:manage',
+  'peers:manage',
+  'approvals:decide',
+  'audit:read',
+  'trust_issuers:manage',
+];
+
+TOKEN_VOCABULARY.forEach((perm) => {
+  const label = document.createElement('label');
+  label.className = 'permission-chip';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.dataset.perm = perm;
+  cb.addEventListener('change', () => {
+    label.classList.toggle('permission-chip--on', cb.checked);
+  });
+  label.appendChild(cb);
+  label.appendChild(document.createTextNode(perm));
+  tokenPermsFieldset.appendChild(label);
+});
+
+/* Org-scoped probe result: true = service_accounts:manage held, false = 403
+   (do not call the token endpoint again), undefined = not probed yet. */
+let tokensAccess;
+
+async function probeTokensAccess() {
+  if (tokensAccess !== undefined) {
+    applyTokensTabVisibility();
+    return;
+  }
+  try {
+    await apiFetch('/api/v1/service-account-tokens', { skipErrorToast: true });
+    tokensAccess = true;
+  } catch (err) {
+    if (err && err.status === 403) {
+      tokensAccess = false;
+    }
+    // Other errors: leave undecided so the next activation retries.
+  }
+  applyTokensTabVisibility();
+}
+
+function applyTokensTabVisibility() {
+  const allowed = tokensAccess === true;
+  tabTokens.hidden = !allowed;
+  if (!allowed && activeTab === 'tokens') switchTab('chat');
+}
+
+async function loadTokens() {
+  if (tokensAccess === false) return;
+  tokensStatusEl.textContent = 'Loading…';
+  try {
+    const data = await apiFetch('/api/v1/service-account-tokens', { skipErrorToast: true });
+    tokensStatusEl.textContent = '';
+    renderTokens(data.items || []);
+  } catch (err) {
+    if (err && err.status === 403) {
+      tokensAccess = false;
+      applyTokensTabVisibility();
+      return;
+    }
+    tokensStatusEl.textContent = 'Failed to load tokens: ' + err.message;
+  }
+}
+
+function renderTokens(items) {
+  tokensListEl.innerHTML = '';
+  items.forEach((token) => {
+    const li = document.createElement('li');
+    li.className = 'token-card';
+    li.dataset.tokenId = token.id;
+
+    const header = document.createElement('div');
+    header.className = 'token-card-header';
+    const title = document.createElement('strong');
+    title.textContent = token.name;
+    header.appendChild(title);
+    const meta = document.createElement('span');
+    meta.className = 'token-card-meta';
+    const lastUsed = token.lastUsedAt ? new Date(token.lastUsedAt).toLocaleString() : 'never';
+    const expiry = token.expiresAt ? new Date(token.expiresAt).toLocaleString() : 'no expiry';
+    meta.textContent = `last used ${lastUsed} · ${expiry}`;
+    header.appendChild(meta);
+    li.appendChild(header);
+
+    const perms = document.createElement('div');
+    perms.className = 'token-card-perms';
+    perms.textContent = (Array.isArray(token.permissions) ? token.permissions : []).join(', ');
+    li.appendChild(perms);
+
+    const revoke = document.createElement('button');
+    revoke.type = 'button';
+    revoke.className = 'token-revoke-btn';
+    revoke.textContent = 'Revoke';
+    revoke.addEventListener('click', () => revokeToken(token.id));
+    li.appendChild(revoke);
+
+    tokensListEl.appendChild(li);
+  });
+  if (!items.length) {
+    tokensStatusEl.textContent = 'No active tokens.';
+  }
+}
+
+tokenForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  tokenFormError.hidden = true;
+  const permissions = [...tokenPermsFieldset.querySelectorAll('input[type="checkbox"]')]
+    .filter((cb) => cb.checked)
+    .map((cb) => cb.dataset.perm);
+  const body = {
+    name: tokenNameEl.value.trim(),
+    permissions,
+    provisionableMaxCoc: Number(tokenMaxCocEl.value) || 0,
+  };
+  if (tokenExpiresEl.value) {
+    body.expiresAt = new Date(tokenExpiresEl.value).toISOString();
+  }
+  try {
+    const created = await apiFetch('/api/v1/service-account-tokens', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      skipErrorToast: true,
+    });
+    showTokenSecret(created.token);
+    tokenForm.reset();
+    tokenPermsFieldset.querySelectorAll('.permission-chip--on')
+      .forEach((el) => el.classList.remove('permission-chip--on'));
+    await loadTokens();
+    tokensStatusEl.textContent = 'Token issued.';
+  } catch (err) {
+    tokenFormError.textContent = err.message || 'Failed to issue token.';
+    tokenFormError.hidden = false;
+  }
+});
+
+async function revokeToken(tokenId) {
+  try {
+    await apiFetch(`/api/v1/service-account-tokens/${tokenId}`, { method: 'DELETE' });
+    await loadTokens();
+    tokensStatusEl.textContent = 'Token revoked.';
+  } catch (_err) {
+    // apiFetch already surfaced the error.
+  }
+}
+
+function showTokenSecret(plaintext) {
+  tokenSecretValue.textContent = plaintext;
+  tokenSecretModal.hidden = false;
+  tokenSecretCopyBtn.focus();
+}
+
+tokenSecretCopyBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(tokenSecretValue.textContent);
+    tokenSecretCopyBtn.textContent = 'Copied';
+  } catch (_err) {
+    tokenSecretCopyBtn.textContent = 'Copy failed';
+  }
+});
+
+tokenSecretCloseBtn.addEventListener('click', () => {
+  tokenSecretModal.hidden = true;
+  tokenSecretValue.textContent = '';
+  tokenSecretCopyBtn.textContent = 'Copy';
+});
+
+tokensRefreshBtn.addEventListener('click', loadTokens);
+
 /* ── Init: load workspaces then conversations ── */
 
 (async function init() {
@@ -5211,6 +5418,7 @@ policiesRefreshBtn.addEventListener('click', loadPolicies);
       renderActivationTracker(initial);
       probeRolesAccess(initial.id);
       probePoliciesAccess(initial.id);
+      probeTokensAccess();
     } else {
       workspaceNameEl.textContent = 'No workspaces';
     }

@@ -209,6 +209,9 @@ pub async fn resolve_auth(state: &AppState, headers: &HeaderMap) -> Option<AuthC
                 active_role_id: None,
                 session_id: Some(session.id),
                 mfa_verified: session.mfa_verified,
+                is_service_account: false,
+                service_account_token_id: None,
+                permissions: Vec::new(),
             });
         }
     }
@@ -226,6 +229,9 @@ pub async fn resolve_auth(state: &AppState, headers: &HeaderMap) -> Option<AuthC
             active_role_id: None,
             session_id: None,
             mfa_verified: false,
+            is_service_account: false,
+            service_account_token_id: None,
+            permissions: Vec::new(),
         });
     }
 
@@ -346,6 +352,9 @@ async fn verify_jwt_against_issuer(
         active_role_id: None,
         session_id: None,
         mfa_verified: false,
+        is_service_account: false,
+        service_account_token_id: None,
+        permissions: Vec::new(),
     })
 }
 

@@ -3602,6 +3602,88 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   min-width: 22em;
 }
 
+/* Service-account tokens panel (headless provisioning) */
+#tokens-toolbar {
+  margin-bottom: var(--space-2, 8px);
+}
+
+#tokens-list {
+  list-style: none;
+  margin: 0 0 var(--space-3, 12px);
+  padding: 0;
+}
+
+.token-card {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  margin-bottom: var(--space-2, 8px);
+}
+
+.token-card-header {
+  display: flex;
+  gap: var(--space-2, 8px);
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: var(--space-2, 8px);
+}
+
+.token-card-meta {
+  color: #555;
+  font-size: var(--font-size-sm, 0.875rem);
+}
+
+.token-card-perms {
+  font-size: var(--font-size-sm, 0.875rem);
+  color: #333;
+  margin-bottom: var(--space-2, 8px);
+}
+
+#token-permissions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border: none;
+  padding: 0;
+  margin: var(--space-2, 8px) 0;
+}
+
+.token-form-error {
+  color: var(--color-error, #c0392b);
+}
+
+.token-secret-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.token-secret-modal-content {
+  background: var(--color-surface, #fff);
+  border-radius: 8px;
+  padding: var(--space-4, 16px);
+  max-width: 32em;
+}
+
+#token-secret-value {
+  display: block;
+  word-break: break-all;
+  background: var(--color-bg-muted, #f4f4f4);
+  padding: var(--space-2, 8px);
+  border-radius: 4px;
+  margin: var(--space-2, 8px) 0;
+  font-family: monospace;
+}
+
+.token-secret-actions {
+  display: flex;
+  gap: var(--space-2, 8px);
+}
+
 /* Auto-exec policies panel (governance) */
 #policies-toolbar {
   margin-bottom: var(--space-2, 8px);

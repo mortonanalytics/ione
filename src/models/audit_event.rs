@@ -9,6 +9,9 @@ pub enum ActorKind {
     User,
     System,
     Peer,
+    #[sqlx(rename = "service_account")]
+    #[serde(rename = "service_account")]
+    ServiceAccount,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]

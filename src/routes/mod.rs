@@ -49,6 +49,7 @@ pub mod pipeline_events;
 pub mod public_issuers;
 pub mod roles;
 pub mod rule_diagnostics;
+pub mod service_account_tokens;
 pub mod signals;
 pub mod survivors;
 pub mod table_data;
@@ -336,6 +337,14 @@ pub fn router(state: AppState) -> Router {
             post(peers::subscribe_peer),
         )
         .route("/api/v1/me", get(me::me))
+        .route(
+            "/api/v1/service-account-tokens",
+            get(service_account_tokens::list).post(service_account_tokens::issue),
+        )
+        .route(
+            "/api/v1/service-account-tokens/:tokenId",
+            delete(service_account_tokens::revoke),
+        )
         .route_layer(from_fn_with_state(state.clone(), demo_write_guard))
         .route_layer(from_fn(enforce_auth))
         .route_layer(from_fn_with_state(state.clone(), auth_middleware))
@@ -401,6 +410,11 @@ pub async fn mfa_gate(
     ctx: &AuthContext,
     pool: &sqlx::PgPool,
 ) -> Result<(), crate::error::AppError> {
+    // Service-account principals have no human MFA enrollment; the gate is a
+    // no-op for them (machine clients authenticate by the token alone).
+    if ctx.is_service_account {
+        return Ok(());
+    }
     let enrolled: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM mfa_enrollments WHERE user_id = $1 AND activated_at IS NOT NULL)",
     )

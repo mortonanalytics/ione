@@ -568,6 +568,7 @@ fn actor_kind_str(kind: ActorKind) -> &'static str {
         ActorKind::User => "user",
         ActorKind::System => "system",
         ActorKind::Peer => "peer",
+        ActorKind::ServiceAccount => "service_account",
     }
 }
 

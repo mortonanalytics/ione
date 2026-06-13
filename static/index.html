@@ -88,6 +88,7 @@
         <button id="tab-audit" role="tab" aria-selected="false" aria-controls="panel-audit" class="tab tab--ops">Audit</button>
         <button id="tab-roles" role="tab" aria-selected="false" aria-controls="panel-roles" class="tab tab--ops" hidden>Roles</button>
         <button id="tab-policies" role="tab" aria-selected="false" aria-controls="panel-policies" class="tab tab--ops" hidden>Policies</button>
+        <button id="tab-tokens" role="tab" aria-selected="false" aria-controls="panel-tokens" class="tab tab--ops" hidden>Tokens</button>
       </div>
 
       <!-- Chat panel -->
@@ -462,6 +463,52 @@
             </div>
           </form>
         </section>
+      </div>
+
+      <!-- Service-account tokens panel -->
+      <div id="panel-tokens" role="tabpanel" aria-labelledby="tab-tokens" hidden>
+        <div id="tokens-toolbar">
+          <button id="tokens-refresh-btn" type="button" aria-label="Refresh tokens">Refresh</button>
+        </div>
+        <div id="tokens-status" aria-live="polite"></div>
+        <ul id="tokens-list" role="list"></ul>
+        <section id="token-editor" aria-labelledby="token-editor-title">
+          <h2 id="token-editor-title">Issue token</h2>
+          <form id="token-form">
+            <label for="token-name">Name <span aria-hidden="true">*</span></label>
+            <input id="token-name" type="text" required autocomplete="off" />
+
+            <fieldset id="token-permissions">
+              <legend>Permissions</legend>
+            </fieldset>
+
+            <label for="token-max-coc">Provisionable max CoC (0–100)</label>
+            <input id="token-max-coc" type="number" min="0" max="100" value="0" required />
+
+            <label for="token-expires">Expires at (optional)</label>
+            <input id="token-expires" type="datetime-local" autocomplete="off" />
+
+            <p id="token-form-error" class="token-form-error" hidden></p>
+
+            <div class="token-form-actions">
+              <button type="submit" id="token-issue-btn">Issue token</button>
+            </div>
+          </form>
+        </section>
+
+        <!-- Copy-once modal: the plaintext token is shown exactly once. -->
+        <div id="token-secret-modal" class="token-secret-modal" hidden role="dialog"
+             aria-modal="true" aria-labelledby="token-secret-title">
+          <div class="token-secret-modal-content">
+            <h2 id="token-secret-title">Copy your token now</h2>
+            <p>This is the only time the token is shown. Store it securely.</p>
+            <code id="token-secret-value"></code>
+            <div class="token-secret-actions">
+              <button type="button" id="token-secret-copy-btn">Copy</button>
+              <button type="button" id="token-secret-close-btn">Done</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Connectors panel -->

@@ -15,7 +15,12 @@ pub const WORKSPACE_ADMIN_GRANTS: &str =
 
 /// The org grant set given alongside an admin role, matching the
 /// migration-0039 org backfill.
-pub const ORG_ADMIN_GRANTS: &[&str] = &["trust_issuers:manage", "peers:manage"];
+pub const ORG_ADMIN_GRANTS: &[&str] = &[
+    "trust_issuers:manage",
+    "peers:manage",
+    "service_accounts:manage",
+    "provisioning:apply",
+];
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

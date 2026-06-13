@@ -1112,6 +1112,9 @@ async fn tool_invoke_gated() {
         active_role_id: None,
         session_id: None,
         mfa_verified: true,
+        is_service_account: false,
+        service_account_token_id: None,
+        permissions: Vec::new(),
     };
 
     let granted = ione::services::federation::route_tool_call(
@@ -1226,6 +1229,9 @@ async fn approval_gated_peer_tool_call_executes_once_on_retry() {
         active_role_id: None,
         session_id: None,
         mfa_verified: true,
+        is_service_account: false,
+        service_account_token_id: None,
+        permissions: Vec::new(),
     };
 
     let pending_result = ione::services::federation::route_tool_call(

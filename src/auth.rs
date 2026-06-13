@@ -5,7 +5,7 @@ use axum::{
     extract::State,
     http::{header, Request},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
@@ -24,6 +24,9 @@ use crate::{
 const SESSION_COOKIE_NAME: &str = "ione_session";
 const SESSION_DEFAULT_TTL_SECS: i64 = 86_400; // 24 h
 
+/// Plaintext prefix of a service-account token (`ione_sat_<base64url>`).
+pub const SAT_TOKEN_PREFIX: &str = "ione_sat_";
+
 static SESSION_KEY: OnceLock<[u8; 64]> = OnceLock::new();
 
 /// Resolved authentication context, injected into handlers via Extension.
@@ -38,6 +41,16 @@ pub struct AuthContext {
     pub active_role_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub mfa_verified: bool,
+    /// True when authentication was via a service-account bearer token
+    /// (`Authorization: Bearer ione_sat_…`). Drives the permission-check
+    /// short-circuit and the MFA-gate passthrough.
+    pub is_service_account: bool,
+    /// The service-account token id when `is_service_account`; the `actor_ref`
+    /// for audit rows attributed to the token.
+    pub service_account_token_id: Option<Uuid>,
+    /// Permission strings carried by the service-account token. Empty for
+    /// session/peer/default contexts (they resolve permissions from the DB).
+    pub permissions: Vec<String>,
 }
 
 /// Authentication mode derived from `IONE_AUTH_MODE`.
@@ -203,6 +216,45 @@ pub async fn auth_middleware(
     let mode = mode_from_env();
     let key = session_key_from_env();
 
+    // Service-account bearer path: a machine client presenting
+    // `Authorization: Bearer ione_sat_…` resolves to a synthetic AuthContext
+    // carrying the token's org + permissions. Checked before the session/default
+    // branch. Fail-closed: once an `ione_sat_` bearer is presented, an
+    // unknown/expired/revoked value returns 401 rather than silently falling
+    // back to the default user.
+    if let Some(plaintext) = bearer_sat_token(req.headers()) {
+        let token_hash = sha256_hex(&plaintext);
+        match crate::repos::ServiceAccountTokenRepo::new(state.pool.clone())
+            .verify(&token_hash)
+            .await
+        {
+            Ok(Some(token)) => {
+                let token_id = token.id;
+                let ctx = AuthContext {
+                    user_id: Uuid::nil(),
+                    org_id: token.org_id,
+                    is_oidc: false,
+                    is_mcp_peer: false,
+                    active_role_id: None,
+                    session_id: None,
+                    mfa_verified: true,
+                    is_service_account: true,
+                    service_account_token_id: Some(token_id),
+                    permissions: token.permission_list(),
+                };
+                let pool = state.pool.clone();
+                tokio::spawn(async move {
+                    let _ = crate::repos::ServiceAccountTokenRepo::new(pool)
+                        .touch_last_used(token_id)
+                        .await;
+                });
+                req.extensions_mut().insert(ctx);
+                return next.run(req).await;
+            }
+            _ => return AppError::Unauthorized.into_response(),
+        }
+    }
+
     let session_id_from_cookie = if mode == AuthMode::Oidc {
         req.headers()
             .get(header::COOKIE)
@@ -244,10 +296,30 @@ pub async fn auth_middleware(
         active_role_id,
         session_id,
         mfa_verified,
+        is_service_account: false,
+        service_account_token_id: None,
+        permissions: Vec::new(),
     };
 
     req.extensions_mut().insert(ctx);
     next.run(req).await
+}
+
+/// SHA-256 hex of an input string (token hashing).
+pub fn sha256_hex(input: &str) -> String {
+    hex::encode(Sha256::digest(input.as_bytes()))
+}
+
+/// Extract the plaintext of a service-account bearer token from the request
+/// headers, if present and prefixed `ione_sat_`.
+fn bearer_sat_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let token = raw.strip_prefix("Bearer ").unwrap_or(raw).trim();
+    if token.starts_with(SAT_TOKEN_PREFIX) {
+        Some(token.to_string())
+    } else {
+        None
+    }
 }
 
 pub async fn enforce_auth(
@@ -263,7 +335,7 @@ pub async fn enforce_auth(
         let ok = req
             .extensions()
             .get::<AuthContext>()
-            .map(|c| c.is_oidc)
+            .map(|c| c.is_oidc || c.is_service_account)
             .unwrap_or(false);
         if !ok {
             return Err(AppError::Unauthorized);
@@ -320,6 +392,16 @@ pub async fn require_permission(
     workspace_id: Uuid,
     permission: &str,
 ) -> Result<(), AppError> {
+    // A service-account context carries its own grant set; the synthetic
+    // user_id has no memberships, so resolve against ctx.permissions directly.
+    if ctx.is_service_account {
+        let held: HashSet<String> = ctx.permissions.iter().cloned().collect();
+        return if held.contains("admin") || permission_grants(&held, permission) {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden)
+        };
+    }
     let (held, _) = RoleRepo::new(pool.clone())
         .effective_permissions(ctx.user_id, workspace_id)
         .await
@@ -339,6 +421,14 @@ pub async fn require_org_permission(
     pool: &PgPool,
     permission: &str,
 ) -> Result<(), AppError> {
+    if ctx.is_service_account {
+        let held: HashSet<String> = ctx.permissions.iter().cloned().collect();
+        return if permission_grants(&held, permission) {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden)
+        };
+    }
     let held = OrgMembershipRepo::new(pool.clone())
         .org_permissions(ctx.user_id, ctx.org_id)
         .await
