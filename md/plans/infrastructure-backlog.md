@@ -13,7 +13,7 @@ Ranked by dual fit: backs a DICE abstract claim *and* is product capability any 
 | 1 | Structured T&E event export (P6) | T&E observability surface — §2.4 monitoring claims | Audit analytics / compliance reporting / agent-ops monitoring for any org | ~1 wk |
 | 2 | RBAC scaffolding (P4) | **Partial — pending walkthrough** (`feature/rbac-scaffolding`) | Enterprise table stakes; unblocks every multi-team deployment | ~3–5 d |
 | 3 | Auto-exec policy DSL (P4) | **Partial — pending walkthrough** (`feature/auto-exec-governance`) | Removes the #1 friction for production use (approval fatigue) | ~3–4 d |
-| 4 | Programmatic workspace/peer provisioning (P6) | "One workspace per mission" at scale; any scale demo | API-first onboarding, IaC, multi-env deploys | ~2–3 d |
+| 4 | Programmatic workspace/peer provisioning (P6) | **Partial — pending walkthrough** (`feature/headless-provisioning`) | API-first onboarding, IaC, multi-env deploys | ~2–3 d |
 | 5 | Cross-app semantic catalog + vector search (P3) | Backs the "surfaced upon relevance" bounded-context claim (§2.4) | Tool/resource discovery as peer count grows — core product value | ~1 wk |
 | 6 | MCP routing throughput benchmark (P6) | §2.7 <5% overhead target needs measured baseline | Perf numbers for sales/marketing; cheap | ~2–3 d |
 | 7 | Adaptor-contract spec (P3) | §2.3 claim de-risk | Protocol neutrality (A2A/ANP) widens market, but speculative pre-award | ~2–3 d |
