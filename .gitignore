@@ -9,3 +9,7 @@
 /playwright-report
 /.claude/state
 .claude/settings.json
+
+# DARPA DICE proposal materials (drafts, generated PDFs/DOCX, BAA attachment zip)
+# live on the rfp/darpa-dice-abstract branch, not main.
+/rfp/
