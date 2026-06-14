@@ -537,3 +537,154 @@ async fn phase2_limit_clamp() {
     let count = body.get("items").and_then(Value::as_array).unwrap().len();
     assert_eq!(count, 50, "limit must clamp to 50, got {count}");
 }
+
+// ── Phase 3 (search_catalog MCP tool) ───────────────────────────────────────
+
+fn authed_ctx(user_id: Uuid, org_id: Uuid) -> ione::auth::AuthContext {
+    ione::auth::AuthContext {
+        user_id,
+        org_id,
+        is_oidc: true,
+        is_mcp_peer: false,
+        active_role_id: None,
+        session_id: None,
+        mfa_verified: true,
+        is_service_account: false,
+        service_account_token_id: None,
+        permissions: vec![],
+    }
+}
+
+fn unauth_ctx(user_id: Uuid, org_id: Uuid) -> ione::auth::AuthContext {
+    // The default-user fallback: real user_id, but neither OIDC nor SA.
+    let mut ctx = authed_ctx(user_id, org_id);
+    ctx.is_oidc = false;
+    ctx.mfa_verified = false;
+    ctx
+}
+
+fn result_names(value: &Value) -> Vec<String> {
+    value
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.get("namespaced_name").and_then(Value::as_str))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+#[ignore]
+async fn phase3_unauth_mcp_rejected() {
+    let (_base, pool, state) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+    let peer = seed_peer(&pool, "weatherpeer", "weatherpeer").await;
+    index_peer(&state, &peer, vec![tool("get_flood", "flood risk", &[])]).await;
+    set_member_permissions(&pool, ws, json!(["tool_invoke:weatherpeer:*"])).await;
+
+    // Default-user fallback (not OIDC, not SA) must be rejected — never served
+    // the default user's permissions (FCS-C2 / AC-6).
+    let result = ione::mcp_server::call_tool(
+        "search_catalog",
+        json!({ "workspace_id": ws, "query": "flood risk" }),
+        &unauth_ctx(user_id, org_id),
+        &state,
+    )
+    .await;
+    assert!(result.is_err(), "unauthenticated MCP call must error");
+}
+
+#[tokio::test]
+#[ignore]
+async fn phase3_untrusted_flag() {
+    let (_base, pool, state) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+    let peer = seed_peer(&pool, "weatherpeer", "weatherpeer").await;
+    index_peer(
+        &state,
+        &peer,
+        vec![
+            tool("get_flood", "flood risk inundation", &[]),
+            tool("get_storm", "storm flood risk", &[]),
+        ],
+    )
+    .await;
+    set_member_permissions(&pool, ws, json!(["tool_invoke:weatherpeer:*"])).await;
+
+    let out = ione::mcp_server::call_tool(
+        "search_catalog",
+        json!({ "workspace_id": ws, "query": "flood risk" }),
+        &authed_ctx(user_id, org_id),
+        &state,
+    )
+    .await
+    .expect("mcp search ok");
+    let rows = out
+        .get("results")
+        .and_then(Value::as_array)
+        .expect("results");
+    assert!(!rows.is_empty(), "expected at least one result");
+    for r in rows {
+        assert_eq!(
+            r.get("untrusted_content"),
+            Some(&Value::Bool(true)),
+            "each result must carry untrusted_content:true"
+        );
+        // MCP response omits peer_id/peer_name by design.
+        assert!(r.get("peer_id").is_none(), "MCP result must omit peer_id");
+        assert!(
+            r.get("peer_name").is_none(),
+            "MCP result must omit peer_name"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn phase3_rest_mcp_parity() {
+    let (base, pool, state) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+    let peer = seed_peer(&pool, "weatherpeer", "weatherpeer").await;
+    index_peer(
+        &state,
+        &peer,
+        vec![
+            tool("get_flood", "flood risk inundation", &[]),
+            tool("get_storm", "storm flood risk", &[]),
+            tool("get_finance", "financial risk exposure", &[]),
+        ],
+    )
+    .await;
+    set_member_permissions(&pool, ws, json!(["tool_invoke:weatherpeer:*"])).await;
+
+    // REST (session cookie, same default user).
+    let (status, body) = search(&base, &pool, ws, "flood risk").await;
+    assert_eq!(status, StatusCode::OK);
+    let rest = names(&body);
+
+    // MCP (shared CatalogService, same caller identity).
+    let out = ione::mcp_server::call_tool(
+        "search_catalog",
+        json!({ "workspace_id": ws, "query": "flood risk" }),
+        &authed_ctx(user_id, org_id),
+        &state,
+    )
+    .await
+    .expect("mcp search ok");
+    let mcp = result_names(&out);
+
+    assert!(!rest.is_empty(), "expected non-empty result set");
+    assert_eq!(
+        rest, mcp,
+        "REST and MCP must return the same ranked invokable set"
+    );
+}

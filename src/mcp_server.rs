@@ -28,10 +28,11 @@ use crate::{
         session_key_from_env, AuthContext, AuthMode,
     },
     connectors::build_from_row,
-    models::{ActorKind, ArtifactKind},
+    models::{ActorKind, ArtifactKind, CatalogEntryKind},
     repos::{
         ApprovalRepo, ArtifactRepo, AuditEventRepo, ConnectorRepo, SurvivorRepo, WorkspaceRepo,
     },
+    services::catalog::CatalogService,
     state::AppState,
 };
 
@@ -156,6 +157,20 @@ pub(crate) fn tool_list() -> Value {
                     "text": { "type": "string", "minLength": 1, "maxLength": 4096 }
                 },
                 "required": ["workspace_id", "connector_id", "text"]
+            }
+        },
+        {
+            "name": "search_catalog",
+            "description": "Search federated peer tools/resources by relevance, pre-filtered to the capabilities you can actually invoke in this workspace. Returns untrusted, peer-supplied metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace_id": { "type": "string", "format": "uuid" },
+                    "query": { "type": "string", "minLength": 2 },
+                    "kind": { "type": "string", "enum": ["tool", "resource"] },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 }
+                },
+                "required": ["workspace_id", "query"]
             }
         }
     ])
@@ -372,6 +387,7 @@ pub async fn call_tool(
         "search_stream_events" => tool_search_stream_events(args, auth, state).await,
         "propose_artifact" => tool_propose_artifact(args, auth, state).await,
         "deliver_notification" => tool_deliver_notification(args, auth, state).await,
+        "search_catalog" => tool_search_catalog(args, auth, state).await,
         other => anyhow::bail!("unknown tool: {}", other),
     }
 }
@@ -645,6 +661,47 @@ async fn tool_deliver_notification(
         .await?;
 
     Ok(json!({ "delivered": true, "connector_id": connector_id }))
+}
+
+// ── search_catalog ────────────────────────────────────────────────────────────
+
+/// DICE §2.4 bounded-context surface: relevance-ranked, RBAC-pre-filtered tool
+/// discovery via the shared `CatalogService::search`. The service rejects the
+/// unauthenticated default-user fallback (FCS-C2) and computes the invokable set
+/// the same way `route_tool_call` does (FCS-C1). Results omit `peer_id`/
+/// `peer_name` by design and flag every entry `untrusted_content` so the agent
+/// treats peer-supplied metadata as untrusted (already sanitized at index time).
+async fn tool_search_catalog(
+    args: Value,
+    auth: &AuthContext,
+    state: &AppState,
+) -> anyhow::Result<Value> {
+    let workspace_id = parse_uuid(&args, "workspace_id")?;
+    let query = args["query"].as_str().unwrap_or("");
+    let kind = match args["kind"].as_str() {
+        None | Some("") => None,
+        Some("tool") => Some(CatalogEntryKind::Tool),
+        Some("resource") => Some(CatalogEntryKind::Resource),
+        Some(other) => anyhow::bail!("invalid kind: {other}"),
+    };
+    let limit = args["limit"].as_i64();
+    let rows = CatalogService::search(state, workspace_id, auth, query, kind, limit)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let results: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "namespaced_name": r.namespaced_name,
+                "kind": r.kind,
+                "description": r.description,
+                "sample_queries": r.sample_queries,
+                "untrusted_content": true,
+                "score": r.score,
+            })
+        })
+        .collect();
+    Ok(json!({ "results": results }))
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
