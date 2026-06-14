@@ -66,3 +66,40 @@ test("catalog panel renders peer <script> description as escaped text", async ({
   const desc = await page.locator("#catalog-results .catalog-result-desc").textContent();
   expect(desc).toContain("<script>window.__xss=1</script>");
 });
+
+test("catalog search flow: type → fetch → render, with min-char guard", async ({ page }) => {
+  await stubShell(page);
+  let calls = 0;
+  await page.route("**/api/v1/workspaces/*/catalog-search*", (route) => {
+    calls += 1;
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          { peer_id: "11111111-1111-1111-1111-111111111111", peer_name: "Weather Peer", namespaced_name: "weatherpeer:get_flood", kind: "tool", description: "flood risk inundation outlook", sample_queries: ["flood risk forecast"], score: 0.96 },
+        ],
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await expect.poll(() => page.evaluate(() => typeof (window as any).loadCatalog)).toBe("function");
+
+  // Select a workspace and open the Catalog tab via the real wiring.
+  await page.evaluate(() =>
+    (window as any).setActiveWorkspace({ id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", name: "Operations", domain: "test", lifecycle: "continuous", closedAt: null })
+  );
+  await page.click("#tab-catalog");
+  await expect(page.locator("#panel-catalog")).toBeVisible();
+
+  // Min-char guard: a single character does not fetch and shows the hint.
+  await page.fill("#catalog-search-input", "f");
+  await expect(page.locator("#catalog-status")).toHaveText(/at least 2 characters/i);
+  expect(calls).toBe(0);
+
+  // A real query fetches and renders the result + a count status.
+  await page.fill("#catalog-search-input", "flood risk");
+  await expect(page.locator("#catalog-results .catalog-result-name")).toHaveText("weatherpeer:get_flood");
+  await expect(page.locator("#catalog-status")).toHaveText(/1 result/i);
+  expect(calls).toBeGreaterThan(0);
+});
