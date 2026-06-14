@@ -27,6 +27,7 @@ pub mod auth_routes;
 pub mod auto_exec_policies;
 pub mod bindings;
 pub mod broker;
+pub mod catalog;
 pub mod chart_data;
 pub mod chart_panels;
 pub mod chat;
@@ -173,6 +174,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/audit-export",
             get(audit_export::get_audit_export),
+        )
+        .route(
+            "/api/v1/workspaces/:id/catalog-search",
+            get(catalog::catalog_search),
         )
         .route(
             "/api/v1/workspaces/:id/event-table",

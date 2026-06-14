@@ -81,6 +81,7 @@
         <button id="tab-chart" role="tab" aria-selected="false" aria-controls="panel-chart" class="tab">Charts</button>
         <button id="tab-table" role="tab" aria-selected="false" aria-controls="panel-table" class="tab">Tables</button>
         <button id="tab-document" role="tab" aria-selected="false" aria-controls="panel-document" class="tab">Documents</button>
+        <button id="tab-catalog" role="tab" aria-selected="false" aria-controls="panel-catalog" class="tab tab--ops">Catalog</button>
         <button id="tab-connectors" role="tab" aria-selected="false" aria-controls="panel-connectors" class="tab tab--ops">Connectors</button>
         <button id="tab-signals" role="tab" aria-selected="false" aria-controls="panel-signals" class="tab tab--ops">Signals</button>
         <button id="tab-survivors" role="tab" aria-selected="false" aria-controls="panel-survivors" class="tab tab--ops">Survivors</button>
@@ -389,6 +390,25 @@
           <tbody id="audit-rows"></tbody>
         </table>
         <button id="audit-load-more" type="button" hidden>Load more</button>
+      </div>
+
+      <!-- Catalog panel: always available to authenticated members. Results
+           self-filter to the caller's invokable set via the RBAC pre-filter,
+           so there is nothing to gate behind a permission (no probe-and-hide). -->
+      <div id="panel-catalog" role="tabpanel" aria-labelledby="tab-catalog" hidden>
+        <div id="catalog-toolbar">
+          <label for="catalog-search-input">Search</label>
+          <input id="catalog-search-input" type="search" autocomplete="off"
+                 placeholder="Search federated capabilities (e.g. flood risk)" />
+          <label for="catalog-kind-filter">Kind</label>
+          <select id="catalog-kind-filter">
+            <option value="">All</option>
+            <option value="tool">Tools</option>
+            <option value="resource">Resources</option>
+          </select>
+        </div>
+        <div id="catalog-status" aria-live="polite"></div>
+        <ul id="catalog-results" class="catalog-results"></ul>
       </div>
 
       <!-- Roles panel (visible only to roles:manage holders — probe-and-hide) -->

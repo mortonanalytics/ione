@@ -1,4 +1,5 @@
 pub mod auto_exec;
+pub mod catalog;
 pub mod chart_data;
 pub mod chart_panels;
 pub mod claim_mapper;

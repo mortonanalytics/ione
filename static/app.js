@@ -1069,6 +1069,8 @@ const tabAudit         = document.getElementById('tab-audit');
 const tabRoles         = document.getElementById('tab-roles');
 const tabPolicies      = document.getElementById('tab-policies');
 const tabTokens        = document.getElementById('tab-tokens');
+const tabCatalog       = document.getElementById('tab-catalog');
+const panelCatalog     = document.getElementById('panel-catalog');
 const panelChat        = document.getElementById('panel-chat');
 const panelMap         = document.getElementById('panel-map');
 const panelChart       = document.getElementById('panel-chart');
@@ -1122,6 +1124,10 @@ function switchTab(name) {
   tabDocument.classList.toggle('tab--active', name === 'document');
   panelDocument.hidden = name !== 'document';
 
+  tabCatalog.setAttribute('aria-selected', String(name === 'catalog'));
+  tabCatalog.classList.toggle('tab--active', name === 'catalog');
+  panelCatalog.hidden = name !== 'catalog';
+
   tabConnectors.setAttribute('aria-selected', String(name === 'connectors'));
   tabConnectors.classList.toggle('tab--active', name === 'connectors');
   panelConnectors.hidden = name !== 'connectors';
@@ -1153,6 +1159,10 @@ function switchTab(name) {
   tabTokens.setAttribute('aria-selected', String(name === 'tokens'));
   tabTokens.classList.toggle('tab--active', name === 'tokens');
   panelTokens.hidden = name !== 'tokens';
+
+  if (name === 'catalog' && activeWorkspace) {
+    loadCatalog();
+  }
 
   if (name === 'connectors' && activeWorkspace) {
     loadConnectors(activeWorkspace.id);
@@ -1219,6 +1229,7 @@ function switchTab(name) {
 const tabBar = document.getElementById('tab-bar');
 const TAB_REGISTRY = [
   { id: 'chat',       el: tabChat,       always: true },
+  { id: 'catalog',    el: tabCatalog,    always: true },
   { id: 'map',        el: tabMap,        show: (p) => p.eventLayers > 0 || p.hasActivePeer },
   { id: 'chart',      el: tabChart,      show: (p) => p.charts > 0 || p.hasActivePeer },
   { id: 'table',      el: tabTable,      show: (p) => p.tables > 0 || p.hasActivePeer },
@@ -3419,6 +3430,80 @@ function renderPeerBrowserItems(list, items, kind) {
     list.appendChild(li);
   });
 }
+
+/* ── Federated catalog search ── */
+
+let catalogSearchTimer = null;
+
+function loadCatalog() {
+  const input = document.getElementById('catalog-search-input');
+  if (input) input.focus();
+  runCatalogSearch();
+}
+
+function runCatalogSearch() {
+  const input = document.getElementById('catalog-search-input');
+  const kindSel = document.getElementById('catalog-kind-filter');
+  const status = document.getElementById('catalog-status');
+  const results = document.getElementById('catalog-results');
+  if (!input || !results || !activeWorkspace) return;
+  const q = input.value.trim();
+  if (q.length < 2) {
+    results.innerHTML = '';
+    if (status) status.textContent = 'Type at least 2 characters to search.';
+    return;
+  }
+  const params = new URLSearchParams({ q });
+  if (kindSel && kindSel.value) params.set('kind', kindSel.value);
+  if (status) status.textContent = 'Searching…';
+  apiFetch(`/api/v1/workspaces/${activeWorkspace.id}/catalog-search?${params.toString()}`, { skipErrorToast: true })
+    .then((data) => renderCatalogResults(data.items || []))
+    .catch((err) => {
+      results.innerHTML = '';
+      if (status) status.textContent = err.message || 'Search failed.';
+    });
+}
+
+function renderCatalogResults(items) {
+  const status = document.getElementById('catalog-status');
+  const results = document.getElementById('catalog-results');
+  if (!results) return;
+  results.innerHTML = '';
+  if (!items.length) {
+    if (status) status.textContent = 'No matching capabilities you can invoke.';
+    return;
+  }
+  if (status) status.textContent = `${items.length} result${items.length === 1 ? '' : 's'}.`;
+  items.forEach((item) => {
+    const li = document.createElement('li');
+    li.className = 'catalog-result';
+    const samples = Array.isArray(item.sample_queries) ? item.sample_queries : [];
+    // Peer-supplied strings rendered via escapeHtml only — never marked.parse
+    // (XSS, FCS-M1). Peer description/name/queries are untrusted content.
+    li.innerHTML = `
+      <header class="catalog-result-head">
+        <code class="catalog-result-name">${escapeHtml(item.namespaced_name || '')}</code>
+        <span class="catalog-result-kind">${escapeHtml(item.kind || '')}</span>
+        <span class="catalog-result-peer">${escapeHtml(item.peer_name || '')}</span>
+      </header>
+      ${item.description ? `<p class="catalog-result-desc">${escapeHtml(item.description)}</p>` : ''}
+      ${samples.length ? `<ul class="catalog-result-samples">${samples.map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ul>` : ''}
+    `;
+    results.appendChild(li);
+  });
+}
+
+(function wireCatalogSearch() {
+  const input = document.getElementById('catalog-search-input');
+  const kindSel = document.getElementById('catalog-kind-filter');
+  if (input) {
+    input.addEventListener('input', () => {
+      clearTimeout(catalogSearchTimer);
+      catalogSearchTimer = setTimeout(runCatalogSearch, 250);
+    });
+  }
+  if (kindSel) kindSel.addEventListener('change', runCatalogSearch);
+})();
 
 /* ── Add connector dialog ── */
 

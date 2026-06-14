@@ -10,17 +10,20 @@ use chrono::Utc;
 use ione::repos::PeerRepo;
 use ione::services::federation::{reindex_peer_catalog, PeerManifest};
 use ione::state::AppState;
+use reqwest::header::COOKIE;
+use reqwest::StatusCode;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
-const TEST_STATIC_BEARER: &str = "phase-catalog-search-test-bearer";
 
 async fn spawn_app() -> (String, PgPool, AppState) {
-    std::env::set_var("IONE_AUTH_MODE", "local");
-    std::env::set_var("IONE_OAUTH_STATIC_BEARER", TEST_STATIC_BEARER);
+    // OIDC mode so the HTTP tests can present a session cookie and reach the
+    // endpoint as an authenticated (is_oidc) caller; Phase-1 tests call the
+    // service directly and are unaffected by the mode.
+    std::env::set_var("IONE_AUTH_MODE", "oidc");
 
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
     let pool = PgPoolOptions::new()
@@ -331,4 +334,206 @@ async fn phase1_sanitize_stored() {
         "stored description must be capped at 512 chars, got {}",
         stored.chars().count()
     );
+}
+
+// ── Phase 2 (REST search + RBAC pre-filter) ─────────────────────────────────
+
+async fn default_user_id(pool: &PgPool) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM users WHERE email = 'default@localhost' LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .expect("default user")
+}
+
+async fn default_workspace_id(pool: &PgPool) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM workspaces WHERE name = 'Operations' LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .expect("Operations workspace")
+}
+
+/// Set the default user's bootstrap 'member' role permissions in place.
+async fn set_member_permissions(pool: &PgPool, workspace_id: Uuid, perms: Value) {
+    sqlx::query("UPDATE roles SET permissions = $2 WHERE workspace_id = $1 AND name = 'member'")
+        .bind(workspace_id)
+        .bind(perms)
+        .execute(pool)
+        .await
+        .expect("set member permissions");
+}
+
+/// Issue a DB-backed OIDC session cookie for `user_id`/`org_id`.
+async fn session_cookie(pool: &PgPool, user_id: Uuid, org_id: Uuid) -> String {
+    let expires_at = Utc::now() + chrono::Duration::hours(1);
+    let session_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO user_sessions (user_id, org_id, idp_type, expires_at)
+         VALUES ($1, $2, 'oidc', $3) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(org_id)
+    .bind(expires_at)
+    .fetch_one(pool)
+    .await
+    .expect("insert session");
+    ione::auth::set_session_cookie_header_for_session(session_id, expires_at)
+}
+
+async fn index_peer(state: &AppState, peer: &ione::models::Peer, tools: Vec<Value>) {
+    let m = manifest(peer.id, tools);
+    reindex_peer_catalog(state, peer, &m)
+        .await
+        .expect("reindex");
+}
+
+/// Authenticated GET against the catalog-search endpoint for the default user.
+async fn search(base: &str, pool: &PgPool, workspace_id: Uuid, query: &str) -> (StatusCode, Value) {
+    let org_id = default_org_id(pool).await;
+    let user_id = default_user_id(pool).await;
+    let cookie = session_cookie(pool, user_id, org_id).await;
+    let url = format!("{base}/api/v1/workspaces/{workspace_id}/catalog-search");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .query(&[("q", query)])
+        .header(COOKIE, cookie)
+        .send()
+        .await
+        .expect("request");
+    let status = resp.status();
+    let body = resp.json::<Value>().await.unwrap_or(Value::Null);
+    (status, body)
+}
+
+fn names(body: &Value) -> Vec<String> {
+    body.get("items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.get("namespaced_name").and_then(Value::as_str))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+#[ignore]
+async fn phase2_flood_ranks_finance_absent() {
+    let (base, pool, state) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let peer = seed_peer(&pool, "weatherpeer", "weatherpeer").await;
+    index_peer(
+        &state,
+        &peer,
+        vec![
+            tool("get_flood", "flood risk inundation outlook", &[]),
+            tool("get_finance", "financial risk exposure", &[]),
+        ],
+    )
+    .await;
+    set_member_permissions(&pool, ws, json!(["tool_invoke:weatherpeer:*"])).await;
+
+    let (status, body) = search(&base, &pool, ws, "flood risk").await;
+    assert_eq!(status, StatusCode::OK);
+    let got = names(&body);
+    assert!(
+        got.contains(&"weatherpeer:get_flood".to_string()),
+        "hydrology tool must appear: {got:?}"
+    );
+    assert!(
+        !got.contains(&"weatherpeer:get_finance".to_string()),
+        "finance tool must be absent (AND-semantics): {got:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn phase2_prefilter_hides_uninvokable() {
+    let (base, pool, state) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let weather = seed_peer(&pool, "weatherpeer", "weatherpeer").await;
+    let fin = seed_peer(&pool, "finpeer", "finpeer").await;
+    index_peer(
+        &state,
+        &weather,
+        vec![tool("get_storm", "storm surge flood", &[])],
+    )
+    .await;
+    index_peer(
+        &state,
+        &fin,
+        vec![tool("get_trade", "trade flood liquidity", &[])],
+    )
+    .await;
+    // Caller can invoke weatherpeer tools only.
+    set_member_permissions(&pool, ws, json!(["tool_invoke:weatherpeer:*"])).await;
+
+    let (status, body) = search(&base, &pool, ws, "flood").await;
+    assert_eq!(status, StatusCode::OK);
+    let got = names(&body);
+    assert!(
+        got.contains(&"weatherpeer:get_storm".to_string()),
+        "invokable tool must appear: {got:?}"
+    );
+    assert!(
+        !got.contains(&"finpeer:get_trade".to_string()),
+        "uninvokable finpeer tool must be hidden: {got:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn phase2_injection_string_200() {
+    let (base, pool, state) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let peer = seed_peer(&pool, "weatherpeer", "weatherpeer").await;
+    index_peer(&state, &peer, vec![tool("get_flood", "flood risk", &[])]).await;
+    set_member_permissions(&pool, ws, json!(["tool_invoke:weatherpeer:*"])).await;
+
+    let (status, _body) = search(&base, &pool, ws, "' | (select 1) &").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "websearch_to_tsquery must not parse-error on injection input"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn phase2_short_query_400() {
+    let (base, pool, _state) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    set_member_permissions(&pool, ws, json!(["tool_invoke:*:*"])).await;
+
+    let (status, _body) = search(&base, &pool, ws, "a").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore]
+async fn phase2_limit_clamp() {
+    let (base, pool, state) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let peer = seed_peer(&pool, "weatherpeer", "weatherpeer").await;
+    let tools: Vec<Value> = (0..60)
+        .map(|i| tool(&format!("get_flood_{i}"), "flood watch advisory", &[]))
+        .collect();
+    index_peer(&state, &peer, tools).await;
+    set_member_permissions(&pool, ws, json!(["tool_invoke:weatherpeer:*"])).await;
+
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+    let cookie = session_cookie(&pool, user_id, org_id).await;
+    let url = format!("{base}/api/v1/workspaces/{ws}/catalog-search");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .query(&[("q", "flood"), ("limit", "500")])
+        .header(COOKIE, cookie)
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.json::<Value>().await.expect("json");
+    let count = body.get("items").and_then(Value::as_array).unwrap().len();
+    assert_eq!(count, 50, "limit must clamp to 50, got {count}");
 }

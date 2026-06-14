@@ -53,6 +53,16 @@ pub struct AuthContext {
     pub permissions: Vec<String>,
 }
 
+impl AuthContext {
+    /// True when the caller is a real principal, not the unauthenticated
+    /// default-user fallback (FCS-C2). The fallback resolves to
+    /// `default_user_id` with neither OIDC nor a service-account token; any
+    /// real session, OIDC login, or SA token makes this true.
+    pub fn is_authenticated(&self, default_user_id: Uuid) -> bool {
+        self.user_id != default_user_id || self.is_oidc || self.is_service_account
+    }
+}
+
 /// Authentication mode derived from `IONE_AUTH_MODE`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthMode {
