@@ -66,7 +66,7 @@ Goal: get precomputed data rendering in IONe panels with **no server, no OAuth, 
 3. **Load it**: `POST /api/v1/connectors/validate` (dry-run the schema/pointers), then the artifact connector creates a `stream` + `stream_events`.
 4. **Attach to a workspace** and open it. The panels summary picks up the new charts/tables; the shell renders them.
 
-**Authenticated sources:** if your artifact or feed comes from a gated URL (API key, basic auth, OAuth), you need connector credentials — see [connector-auth-plan.md](../plans/connector-auth-plan.md). Public sources skip this. OAuth-delegated sources (QuickBooks, Google, agency portals) reuse the same dance as peer federation; do not hand-roll token handling.
+**Authenticated sources:** if your artifact or feed comes from a gated URL (API key, basic auth, OAuth), you need connector credentials — see [connector-auth-plan.md](../plans/archive/connector-auth-plan.md). Public sources skip this. OAuth-delegated sources (QuickBooks, Google, agency portals) reuse the same dance as peer federation; do not hand-roll token handling.
 
 **What you inherit for free:** the chart engine (myIO), HTML tables with sort/filter/paginate, the map shell (MapLibre + event-layers), 508/WCAG-compliant chrome, adaptive navigation. This is the work doi-ss-ping and doi-reclamation each rebuilt from scratch.
 
