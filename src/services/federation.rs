@@ -9,10 +9,10 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthContext,
-    models::{ActorKind, ArtifactKind, Peer},
+    models::{ActorKind, ArtifactKind, CatalogEntryKind, Peer},
     repos::{
-        ApprovalRepo, ArtifactRepo, AuditEventRepo, PeerRepo, PendingPeerToolCallRepo,
-        WorkspacePeerBindingRepo,
+        ApprovalRepo, ArtifactRepo, AuditEventRepo, CatalogRepo, CatalogUpsert, PeerRepo,
+        PendingPeerToolCallRepo, WorkspacePeerBindingRepo,
     },
     routes::webhooks::WebhookEnvelope,
     state::AppState,
@@ -232,6 +232,7 @@ pub async fn refresh_manifest_if_changed(state: &AppState, peer_id: Uuid) -> any
     PeerRepo::new(state.pool.clone())
         .set_last_manifest(peer_id, &serde_json::to_value(&new_manifest)?)
         .await?;
+    reindex_peer_catalog(state, &peer, &new_manifest).await?;
     Ok(changed)
 }
 
@@ -729,6 +730,149 @@ pub fn namespaced_tools_from_manifest(peer: &Peer, manifest: &PeerManifest) -> V
         .collect()
 }
 
+/// Re-derive the org-scoped catalog rows for a peer from its manifest, off the
+/// manifest-refresh path. Tools and resources become `peer_catalog_entries`
+/// rows keyed by the invocation-form `namespaced_name` (`<tool_prefix>:<raw>`,
+/// the same string `route_tool_call` splits). Peer-supplied text is sanitized
+/// at index time (FCS-M2); `sample_queries` are pulled best-effort from the
+/// cached peer slice (empty if absent). `org_id` comes from `peers.org_id`,
+/// never the org-blind manifest cache (FCS-H2).
+pub async fn reindex_peer_catalog(
+    state: &AppState,
+    peer: &Peer,
+    manifest: &PeerManifest,
+) -> anyhow::Result<()> {
+    let Some(prefix) = peer.tool_prefix.as_deref() else {
+        return Ok(());
+    };
+    let slice = state
+        .peer_slice_cache
+        .get(&peer.id)
+        .map(|entry| entry.value().clone());
+    let repo = CatalogRepo::new(state.pool.clone());
+
+    let mut desired: Vec<CatalogUpsert> = Vec::new();
+    for tool in &manifest.tools {
+        if let Some(entry) =
+            build_catalog_upsert(peer, prefix, CatalogEntryKind::Tool, tool, slice.as_ref())
+        {
+            desired.push(entry);
+        }
+    }
+    for resource in &manifest.resources {
+        if let Some(entry) = build_catalog_upsert(
+            peer,
+            prefix,
+            CatalogEntryKind::Resource,
+            resource,
+            slice.as_ref(),
+        ) {
+            desired.push(entry);
+        }
+    }
+
+    let existing: HashMap<String, String> = repo
+        .hashes_for_peer(peer.org_id, peer.id)
+        .await?
+        .into_iter()
+        .collect();
+
+    for entry in &desired {
+        let unchanged = existing
+            .get(&entry.namespaced_name)
+            .map(|hash| hash == &entry.content_hash)
+            .unwrap_or(false);
+        if !unchanged {
+            repo.upsert_entry(entry).await?;
+        }
+    }
+
+    let surviving: Vec<String> = desired.iter().map(|e| e.namespaced_name.clone()).collect();
+    repo.delete_orphans(peer.org_id, peer.id, &surviving)
+        .await?;
+    Ok(())
+}
+
+fn build_catalog_upsert(
+    peer: &Peer,
+    prefix: &str,
+    kind: CatalogEntryKind,
+    item: &Value,
+    slice: Option<&SliceEntry>,
+) -> Option<CatalogUpsert> {
+    let raw_name = item.get("name").and_then(Value::as_str)?;
+    if raw_name.contains(':') {
+        return None;
+    }
+    let description = sanitize_catalog_text(
+        item.get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    let schema_field_names = catalog_schema_field_names(item);
+    let sample_queries = catalog_sample_queries(slice, raw_name);
+    let namespaced_name = format!("{prefix}:{raw_name}");
+    let content_hash =
+        catalog_content_hash(raw_name, &description, &sample_queries, &schema_field_names);
+    Some(CatalogUpsert {
+        org_id: peer.org_id,
+        peer_id: peer.id,
+        kind,
+        namespaced_name,
+        raw_name: raw_name.to_string(),
+        description,
+        sample_queries,
+        schema_field_names,
+        content_hash,
+    })
+}
+
+/// Top-level JSON-schema property names from a tool's `inputSchema`, sorted for
+/// a stable `content_hash` regardless of the serde map backing.
+fn catalog_schema_field_names(item: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = item
+        .get("inputSchema")
+        .and_then(|schema| schema.get("properties"))
+        .and_then(Value::as_object)
+        .map(|props| props.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+/// Best-effort `sample_queries` from the cached peer slice. The slice body may
+/// carry `{"sample_queries": {"<raw_name>": ["q1", ...]}}`; absent → empty.
+fn catalog_sample_queries(slice: Option<&SliceEntry>, raw_name: &str) -> Vec<String> {
+    slice
+        .and_then(|s| s.body.get("sample_queries"))
+        .and_then(|sq| sq.get(raw_name))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(sanitize_catalog_text)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn catalog_content_hash(
+    raw_name: &str,
+    description: &str,
+    sample_queries: &[String],
+    schema_field_names: &[String],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(raw_name.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(description.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(sample_queries.join("\u{1f}").as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(schema_field_names.join("\u{1f}").as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 async fn peer_by_prefix(state: &AppState, org_id: Uuid, prefix: &str) -> anyhow::Result<Peer> {
     sqlx::query_as::<_, Peer>(
         "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
@@ -943,6 +1087,22 @@ pub fn sanitize_slice_text(input: &str) -> String {
         .last()
         .unwrap_or(0);
     stripped[..boundary].to_string()
+}
+
+/// Maximum stored character length for a catalog `description` (FCS-M2).
+const MAX_CATALOG_DESCRIPTION_CHARS: usize = 512;
+
+/// Sanitize peer-supplied catalog text at index time: strip slice sentinels
+/// (reuses `sanitize_slice_text`) and cap at 512 characters.
+pub fn sanitize_catalog_text(input: &str) -> String {
+    let stripped = sanitize_slice_text(input);
+    if stripped.chars().count() <= MAX_CATALOG_DESCRIPTION_CHARS {
+        return stripped;
+    }
+    stripped
+        .chars()
+        .take(MAX_CATALOG_DESCRIPTION_CHARS)
+        .collect()
 }
 
 pub fn build_slice_context(entries: &[SliceEntry]) -> String {
