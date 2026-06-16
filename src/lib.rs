@@ -37,7 +37,9 @@ pub async fn app_with_state(pool: PgPool) -> (Router, state::AppState) {
             .expect("workspace bootstrap failed");
 
     let config = config::Config::from_env();
-    let app_state = state::AppState::new(config, pool, default_user_id, default_workspace_id);
+    let (app_state, interaction_rx) =
+        state::AppState::new_parts(config, pool, default_user_id, default_workspace_id);
+    services::interaction_sink::spawn_writer(app_state.pool.clone(), interaction_rx);
     services::federation::hydrate_manifest_cache(&app_state).await;
     let router = routes::router(app_state.clone());
     (router, app_state)

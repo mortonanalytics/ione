@@ -12,6 +12,7 @@ pub mod funnel;
 pub mod generator;
 pub mod identity_audit_writer;
 pub mod idp_service;
+pub mod interaction_sink;
 pub mod map_layers;
 pub mod ollama;
 pub mod peer;

@@ -8,6 +8,7 @@ use crate::{
     connectors::peer_session::PeerSessionRegistry,
     services::{
         federation::{PeerManifest, SliceEntry},
+        interaction_sink::{InteractionSink, InteractionWriterRx},
         ollama::OllamaClient,
         peer_governor::PeerGovernor,
         pipeline_bus::PipelineBus,
@@ -19,6 +20,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub ollama: Arc<OllamaClient>,
     pub pipeline_bus: Arc<PipelineBus>,
+    pub interaction_sink: Arc<InteractionSink>,
     pub config: Arc<Config>,
     pub pool: PgPool,
     pub default_user_id: Uuid,
@@ -41,24 +43,38 @@ impl AppState {
         default_user_id: Uuid,
         default_workspace_id: Uuid,
     ) -> Self {
+        Self::new_parts(config, pool, default_user_id, default_workspace_id).0
+    }
+
+    pub fn new_parts(
+        config: Config,
+        pool: PgPool,
+        default_user_id: Uuid,
+        default_workspace_id: Uuid,
+    ) -> (Self, InteractionWriterRx) {
         let http = crate::util::url_guard::guarded_client(15_000);
         let ollama = Arc::new(OllamaClient::new(config.ollama_base_url.clone()));
         let pipeline_bus = Arc::new(PipelineBus::new());
-        Self {
-            http,
-            ollama,
-            pipeline_bus,
-            config: Arc::new(config),
-            pool,
-            default_user_id,
-            default_workspace_id,
-            peer_manifest_cache: Arc::new(dashmap::DashMap::new()),
-            peer_slice_cache: Arc::new(dashmap::DashMap::new()),
-            peer_sessions: Arc::new(PeerSessionRegistry::default()),
-            peer_governor: Arc::new(dashmap::DashMap::new()),
-            mcp_sessions: Arc::new(dashmap::DashMap::new()),
-            peer_refresh_locks: Arc::new(dashmap::DashMap::new()),
-            export_locks: Arc::new(dashmap::DashMap::new()),
-        }
+        let (interaction_sink, interaction_rx) = InteractionSink::new();
+        (
+            Self {
+                http,
+                ollama,
+                pipeline_bus,
+                interaction_sink,
+                config: Arc::new(config),
+                pool,
+                default_user_id,
+                default_workspace_id,
+                peer_manifest_cache: Arc::new(dashmap::DashMap::new()),
+                peer_slice_cache: Arc::new(dashmap::DashMap::new()),
+                peer_sessions: Arc::new(PeerSessionRegistry::default()),
+                peer_governor: Arc::new(dashmap::DashMap::new()),
+                mcp_sessions: Arc::new(dashmap::DashMap::new()),
+                peer_refresh_locks: Arc::new(dashmap::DashMap::new()),
+                export_locks: Arc::new(dashmap::DashMap::new()),
+            },
+            interaction_rx,
+        )
     }
 }

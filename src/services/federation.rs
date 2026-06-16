@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -8,8 +11,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthContext,
-    models::{ActorKind, ArtifactKind, CatalogEntryKind, Peer},
+    auth::{AuthContext, Principal},
+    models::{outcome, ActorKind, ArtifactKind, CatalogEntryKind, InteractionEvent, Peer},
     repos::{
         ApprovalRepo, ArtifactRepo, AuditEventRepo, CatalogRepo, CatalogUpsert, PeerRepo,
         PendingPeerToolCallRepo, WorkspacePeerBindingRepo,
@@ -103,38 +106,204 @@ pub async fn route_tool_call(
     args: Value,
     auth: &AuthContext,
 ) -> anyhow::Result<Value> {
+    route_tool_call_with_session(state, workspace_id, namespaced, args, auth, None).await
+}
+
+pub async fn route_tool_call_with_session(
+    state: &AppState,
+    workspace_id: Uuid,
+    namespaced: &str,
+    args: Value,
+    auth: &AuthContext,
+    transport_session_id: Option<Uuid>,
+) -> anyhow::Result<Value> {
+    let started = Instant::now();
     let (prefix, raw_tool) = namespaced
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("federated tool name must be prefix:name"))?;
     let peer = peer_by_prefix(state, auth.org_id, prefix).await?;
-    ensure_peer_bound_to_workspace(state, workspace_id, peer.id, auth.org_id).await?;
+    if let Err(err) =
+        ensure_peer_bound_to_workspace(state, workspace_id, peer.id, auth.org_id).await
+    {
+        emit_interaction_event(
+            state,
+            workspace_id,
+            &peer,
+            raw_tool,
+            auth,
+            transport_session_id,
+            outcome::DENY,
+            None,
+            json!({ "code": "peer_not_bound" }),
+        );
+        return Err(err);
+    }
 
     // DICE §2.4 / C-2: the caller must hold a matching tool_invoke grant for
-    // this workspace. Resolved from (user, workspace) directly — MCP bearer
-    // paths carry no role on AuthContext. Denial happens here, before the
-    // manifest fetch or tool invocation can reach the peer.
-    let (held, _) = crate::repos::RoleRepo::new(state.pool.clone())
-        .effective_permissions(auth.user_id, workspace_id)
-        .await?;
+    // this workspace. Use the shared permission gate so service-account
+    // `tool_invoke:*:*` grants work the same way as normal route checks.
     let needed = format!("tool_invoke:{}:{}", peer.name, raw_tool);
-    if !held.contains("admin") && !crate::auth::permission_grants(&held, &needed) {
+    if crate::auth::require_permission(auth, &state.pool, workspace_id, &needed)
+        .await
+        .is_err()
+    {
+        emit_interaction_event(
+            state,
+            workspace_id,
+            &peer,
+            raw_tool,
+            auth,
+            transport_session_id,
+            outcome::DENY,
+            None,
+            json!({ "code": "permission_denied", "permission": needed }),
+        );
         anyhow::bail!("FORBIDDEN: caller lacks permission '{needed}'");
     }
 
-    let manifest = manifest_for_peer(state, &peer).await?;
-    let tool = manifest
+    let manifest = match manifest_for_peer(state, &peer).await {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            emit_interaction_event(
+                state,
+                workspace_id,
+                &peer,
+                raw_tool,
+                auth,
+                transport_session_id,
+                outcome::ERROR,
+                Some(elapsed_ms(started)),
+                json!({ "code": "manifest_unavailable" }),
+            );
+            return Err(err);
+        }
+    };
+    let Some(tool) = manifest
         .tools
         .iter()
         .find(|tool| tool.get("name").and_then(Value::as_str) == Some(raw_tool))
-        .ok_or_else(|| anyhow::anyhow!("tool '{namespaced}' not found in peer manifest"))?;
+    else {
+        emit_interaction_event(
+            state,
+            workspace_id,
+            &peer,
+            raw_tool,
+            auth,
+            transport_session_id,
+            outcome::ERROR,
+            Some(elapsed_ms(started)),
+            json!({ "code": "tool_not_found" }),
+        );
+        anyhow::bail!("tool '{namespaced}' not found in peer manifest");
+    };
 
     if tool_approval_required(tool) {
-        let pending =
-            create_pending_tool_call(state, workspace_id, &peer, namespaced, args, auth).await?;
-        return Ok(json!({ "status": "pending_approval", "pending_id": pending.id }));
+        match create_pending_tool_call(state, workspace_id, &peer, namespaced, args, auth).await {
+            Ok(pending) => {
+                emit_interaction_event(
+                    state,
+                    workspace_id,
+                    &peer,
+                    raw_tool,
+                    auth,
+                    transport_session_id,
+                    outcome::PENDING,
+                    Some(elapsed_ms(started)),
+                    json!({ "approval_id": pending.id }),
+                );
+                return Ok(json!({ "status": "pending_approval", "pending_id": pending.id }));
+            }
+            Err(err) => {
+                emit_interaction_event(
+                    state,
+                    workspace_id,
+                    &peer,
+                    raw_tool,
+                    auth,
+                    transport_session_id,
+                    outcome::ERROR,
+                    Some(elapsed_ms(started)),
+                    json!({ "code": "approval_enqueue_failed" }),
+                );
+                return Err(err);
+            }
+        }
     }
 
-    invoke_peer_tool(state, &peer, raw_tool, args).await
+    match invoke_peer_tool(state, &peer, raw_tool, args).await {
+        Ok(result) => {
+            emit_interaction_event(
+                state,
+                workspace_id,
+                &peer,
+                raw_tool,
+                auth,
+                transport_session_id,
+                outcome::ALLOW,
+                Some(elapsed_ms(started)),
+                json!({}),
+            );
+            Ok(result)
+        }
+        Err(err) => {
+            emit_interaction_event(
+                state,
+                workspace_id,
+                &peer,
+                raw_tool,
+                auth,
+                transport_session_id,
+                outcome::ERROR,
+                Some(elapsed_ms(started)),
+                json!({ "code": "peer_tool_error" }),
+            );
+            Err(err)
+        }
+    }
+}
+
+fn elapsed_ms(started: Instant) -> i32 {
+    let millis = started.elapsed().as_millis();
+    millis.min(i32::MAX as u128) as i32
+}
+
+fn emit_interaction_event(
+    state: &AppState,
+    workspace_id: Uuid,
+    peer: &Peer,
+    raw_tool: &str,
+    auth: &AuthContext,
+    transport_session_id: Option<Uuid>,
+    outcome: &str,
+    latency_ms: Option<i32>,
+    detail: Value,
+) {
+    let session_id = transport_session_id.or(auth.session_id);
+    let sequence_number = state.interaction_sink.next_sequence(session_id);
+    let (caller_kind, caller_user_id, caller_peer_id, caller_token_id) = match auth.principal() {
+        Principal::User { user_id } => (ActorKind::User, Some(user_id), None, None),
+        Principal::ServiceAccount { token_id } => {
+            (ActorKind::ServiceAccount, None, None, Some(token_id))
+        }
+    };
+    state.interaction_sink.emit(InteractionEvent {
+        id: Uuid::new_v4(),
+        org_id: auth.org_id,
+        workspace_id,
+        peer_id: peer.id,
+        peer_name: peer.name.clone(),
+        tool_name: raw_tool.to_string(),
+        caller_kind,
+        caller_user_id,
+        caller_peer_id,
+        caller_token_id,
+        session_id,
+        sequence_number,
+        outcome: outcome.to_string(),
+        latency_ms,
+        detail,
+        recorded_at: Utc::now(),
+    });
 }
 
 pub async fn execute_pending_tool_call(

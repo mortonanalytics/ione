@@ -5,7 +5,7 @@
 // is isolated behind `pub fn router()` so swapping to rmcp later is a single-file
 // change.
 
-use std::convert::Infallible;
+use std::{convert::Infallible, pin::Pin};
 
 use axum::{
     extract::{Query, State},
@@ -18,6 +18,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -25,9 +26,10 @@ use uuid::Uuid;
 use crate::{
     auth::{
         ensure_workspace_in_org, extract_session_id_from_headers, mode_from_env,
-        session_key_from_env, AuthContext, AuthMode,
+        require_permission, session_key_from_env, AuthContext, AuthMode,
     },
     connectors::build_from_row,
+    error::AppError,
     models::{ActorKind, ArtifactKind, CatalogEntryKind},
     repos::{
         ApprovalRepo, ArtifactRepo, AuditEventRepo, ConnectorRepo, SurvivorRepo, WorkspaceRepo,
@@ -782,6 +784,13 @@ fn mcp_json_response(
     (headers, Json(resp)).into_response()
 }
 
+fn transport_session_id(headers: &HeaderMap) -> Option<Uuid> {
+    headers
+        .get(MCP_SESSION_ID)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
 async fn dispatch_method(
     state: &AppState,
     headers: &HeaderMap,
@@ -859,6 +868,7 @@ async fn dispatch_method(
                 &auth,
                 state,
                 workspace_id,
+                transport_session_id(headers),
             )
             .await
         }
@@ -1027,6 +1037,7 @@ async fn handle_tools_call(
     auth: &AuthContext,
     state: &AppState,
     workspace_id: Uuid,
+    transport_session_id: Option<Uuid>,
 ) -> JsonRpcResponse {
     let tool_name = match params["name"].as_str() {
         Some(n) if !n.is_empty() => n,
@@ -1036,12 +1047,13 @@ async fn handle_tools_call(
     let args = params["arguments"].clone();
 
     if tool_name.contains(':') {
-        return match crate::services::federation::route_tool_call(
+        return match crate::services::federation::route_tool_call_with_session(
             state,
             workspace_id,
             tool_name,
             args,
             auth,
+            transport_session_id,
         )
         .await
         {
@@ -1107,24 +1119,47 @@ fn needs_workspace_id(tool_name: &str) -> bool {
 #[derive(Deserialize)]
 pub struct SseQuery {
     pub session: Option<String>,
+    pub workspace_id: Option<Uuid>,
 }
+
+type McpSseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 
 pub async fn sse_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<SseQuery>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<McpSseStream>, AppError> {
     let init_event = build_init_event();
 
-    let stream = if let Some(encoded) = query.session {
+    if let Some(workspace_id) = query.workspace_id {
+        if query.session.is_some() {
+            return Err(AppError::BadRequest(
+                "session and workspace_id cannot be combined".into(),
+            ));
+        }
+        let auth = resolve_auth(&state, &headers)
+            .await
+            .ok_or(AppError::Unauthorized)?;
+        ensure_workspace_in_org(&state.pool, workspace_id, auth.org_id).await?;
+        require_permission(&auth, &state.pool, workspace_id, "audit:read").await?;
+
+        let live = state
+            .interaction_sink
+            .subscribe_workspace(workspace_id)
+            .map(|event| Ok(interaction_notification_event(event)));
+        let stream: McpSseStream = Box::pin(tokio_stream::once(Ok(init_event)).chain(live));
+        return Ok(Sse::new(stream).keep_alive(KeepAlive::default()));
+    }
+
+    let stream: McpSseStream = if let Some(encoded) = query.session {
         // Inline request: decode and dispatch.
         let response_event = handle_inline_sse_request(&state, &headers, &encoded).await;
-        tokio_stream::iter(vec![Ok(init_event), Ok(response_event)])
+        Box::pin(tokio_stream::iter(vec![Ok(init_event), Ok(response_event)]))
     } else {
-        tokio_stream::iter(vec![Ok(init_event)])
+        Box::pin(tokio_stream::iter(vec![Ok(init_event)]))
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 pub async fn delete_session_handler(
@@ -1151,6 +1186,15 @@ fn build_init_event() -> Event {
     Event::default()
         .event("initialize")
         .data(payload.to_string())
+}
+
+fn interaction_notification_event(event: crate::models::InteractionEvent) -> Event {
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/tools/interaction",
+        "params": event,
+    });
+    Event::default().event("message").data(payload.to_string())
 }
 
 async fn handle_inline_sse_request(state: &AppState, headers: &HeaderMap, encoded: &str) -> Event {

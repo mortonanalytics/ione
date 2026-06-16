@@ -10,6 +10,7 @@ pub mod catalog_repo;
 pub mod connector_repo;
 pub mod conversation_repo;
 pub mod funnel_event_repo;
+pub mod interaction_event_repo;
 pub mod membership_repo;
 pub mod message_repo;
 pub mod oauth_client_repo;
@@ -46,6 +47,9 @@ pub use catalog_repo::{CatalogRepo, CatalogSearchRow, CatalogUpsert, PermissionC
 pub use connector_repo::ConnectorRepo;
 pub use conversation_repo::ConversationRepo;
 pub use funnel_event_repo::*;
+pub use interaction_event_repo::{
+    InteractionEventFilter, InteractionEventRepo, OutcomeCount, PrincipalCount,
+};
 pub use membership_repo::MembershipRepo;
 pub use message_repo::MessageRepo;
 pub use oauth_client_repo::*;

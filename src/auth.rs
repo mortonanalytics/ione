@@ -53,6 +53,12 @@ pub struct AuthContext {
     pub permissions: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Principal {
+    User { user_id: Uuid },
+    ServiceAccount { token_id: Uuid },
+}
+
 impl AuthContext {
     /// True when the caller is a real principal, not the unauthenticated
     /// default-user fallback (FCS-C2). The fallback resolves to
@@ -60,6 +66,17 @@ impl AuthContext {
     /// real session, OIDC login, or SA token makes this true.
     pub fn is_authenticated(&self, default_user_id: Uuid) -> bool {
         self.user_id != default_user_id || self.is_oidc || self.is_service_account
+    }
+
+    pub fn principal(&self) -> Principal {
+        if self.is_service_account {
+            if let Some(token_id) = self.service_account_token_id {
+                return Principal::ServiceAccount { token_id };
+            }
+        }
+        Principal::User {
+            user_id: self.user_id,
+        }
     }
 }
 

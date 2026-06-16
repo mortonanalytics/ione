@@ -40,6 +40,7 @@ pub mod event_layers;
 pub mod event_table;
 pub mod feed;
 pub mod health;
+pub mod interaction_events;
 pub mod map_layers;
 pub mod mcp_clients;
 pub mod me;
@@ -166,6 +167,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/audit-aggregates",
             get(audit_aggregates::get_audit_aggregates),
+        )
+        .route(
+            "/api/v1/workspaces/:id/interaction-events",
+            get(interaction_events::list_interaction_events),
+        )
+        .route(
+            "/api/v1/workspaces/:id/interaction-aggregates",
+            get(interaction_events::get_interaction_aggregates),
+        )
+        .route(
+            "/api/v1/workspaces/:id/interaction-sessions/:session_id",
+            get(interaction_events::get_interaction_session),
         )
         .route(
             "/api/v1/workspaces/:id/pipeline-aggregates",
