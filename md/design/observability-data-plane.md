@@ -1,6 +1,6 @@
 # Observability Data Plane (OBS-1..OBS-4)
 
-**Status:** Reviewed (PM + rust-api-architect + sql-architect + devil's advocate + technical-writer passes complete) — ready for `/implement`
+**Status:** Implemented (commit `ffb4271` + scale-index follow-up `0046`); review-passed (fmt/clippy/`-D warnings`, 7/7 integration tests, no regression in 51 existing RBAC/routing/MCP/peer tests). Contract record: `md/requirements/active/observability-data-plane.md`.
 **Layers:** `db` (one new table + indexes), `api` (read endpoints + MCP SSE push); **no `ui`** in v1 (consumers are programmatic)
 **Demand signals:** DARPA DICE TA3 abstract §2.4 (monitoring layer) + §2.7 ("async lock-free capture, <5% overhead") · every domain app on the substrate (GroundPulse, TerraYield, bearingLineDash) wants a low-latency, subscribable interaction stream for audit/billing/anomaly analytics
 **Backlog:** `md/plans/infrastructure-backlog.md` → "Observability data plane" (OBS-1..OBS-4)
@@ -98,7 +98,7 @@ The `interaction_events` table and the stable-principal + session-correlation mo
 The query endpoints that let an evaluator/app consume what was captured (and that make the capture testable).
 
 - **DB:** none beyond Slice 3 indexes.
-- **API:** three read endpoints — filterable list (keyset paginated), aggregates (count-by-bucket / count-by-principal / outcome-summary), and per-session ordered replay. All admin-gated (coc ≥ 80) until RBAC's `audit:read` lands, matching the `audit-event-export` precedent.
+- **API:** three read endpoints — filterable list (keyset paginated), aggregates (count-by-bucket / count-by-principal / outcome-summary), and per-session ordered replay. All gated on the `audit:read` RBAC permission (RBAC has shipped; the workspace-admin role grants it) — `require_permission(audit:read)`, not the coc≥80 stopgap the `audit-event-export` precedent used.
 - **UI:** none in v1 (the existing audit panel may gain a tab in a later UI pass; out of scope here).
 - **Wiring:** consumer → read endpoint → interaction-event repository query → `interaction_events`.
 
@@ -118,7 +118,7 @@ Real-time fanout of interaction events to subscribed MCP clients over the existi
 
 | Endpoint | Method | Request schema | Response schema | Error codes | Auth |
 |---|---|---|---|---|---|
-| `/api/v1/workspaces/:id/interaction-events` | GET | `?peer_id=UUID&caller_user_id=UUID&outcome=enum(allow,deny,pending,error)&session_id=UUID&since=ISO8601&until=ISO8601&cursor=opaque&limit=int(1..200)` — window ≤ 90d; if `until` absent defaults to now, if `since` absent defaults to `until − 90d` | `{ items: InteractionEvent[], next_cursor: string\|null }` | 400, 401, 403, 404 | Session/SA + workspace-in-org + admin (coc ≥ 80) |
+| `/api/v1/workspaces/:id/interaction-events` | GET | `?peer_id=UUID&caller_user_id=UUID&caller_peer_id=UUID&caller_token_id=UUID&outcome=enum(allow,deny,pending,error)&session_id=UUID&since=ISO8601&until=ISO8601&cursor=opaque&limit=int(1..200)` — keyset-paged on `(recorded_at, id)`; each page ≤ `limit` (≤200) is the DoS bound. `since`/`until` are optional filters, **not** time-windowed/defaulted (as-built) | `{ items: InteractionEvent[], next_cursor: string\|null }` | 400, 401, 403, 404 | Session/SA + workspace-in-org + workspace `audit:read` |
 | `/api/v1/workspaces/:id/interaction-aggregates` | GET | `?op=enum(count_by_bucket,count_by_principal,outcome_summary)&bucket=enum(minute,hour,day,week)&peer_id=UUID?&since=ISO8601&until=ISO8601` — `bucket` **required when** `op=count_by_bucket`, **400 when** sent for other ops; window ≤ 90d; ≤ 1000 buckets; ≤ 200 principals | Per-op shape, see below | 400, 401, 403, 404 | same as above |
 | `/api/v1/workspaces/:id/interaction-sessions/:session_id` | GET | path `session_id=UUID`; `?limit=int(1..1000)` | `{ session_id: UUID, items: InteractionEvent[] }` ordered by `sequence_number` ASC | 400, 401, 403, 404 | same as above |
 | `GET /mcp?workspace_id=:id` (SSE) | GET | `workspace_id=UUID` query param on the existing MCP SSE transport | SSE stream of JSON-RPC notifications, method `notifications/tools/interaction`, params = `InteractionEvent` | 401, 403, 404 | MCP auth (`resolve_auth`) + workspace-in-org |
@@ -126,9 +126,10 @@ Real-time fanout of interaction events to subscribed MCP clients over the existi
 **`InteractionEvent` shape (response):** id (UUID), org id (UUID), workspace id (UUID), peer id (UUID·null), peer name (string·null), tool name (string), caller kind (enum: user/service_account/peer), caller user id (UUID·null), caller token id (UUID·null), caller peer id (UUID·null), session id (UUID·null), sequence number (int·null), outcome (enum: allow/deny/pending/error), latency ms (int·null when outcome=deny; int≥0 otherwise), detail (JSON object, opaque, ≤4KB), recorded at (ISO8601).
 
 **Per-op shapes for `interaction-aggregates`:**
-- `count_by_bucket` → `{ op, bucket, groups: [{ peer_id: UUID\|null, bucket_start: ISO8601, count: int }] }`
-- `count_by_principal` → `{ op, groups: [{ caller_kind: enum(user,service_account,peer), caller_id: UUID, count: int, deny_count: int }] }` — ≤ 200, count-desc. **The group key is the resolved principal**: `caller_id` is whichever of `caller_user_id` / `caller_token_id` / `caller_peer_id` is non-null for that `caller_kind`, so the aggregate covers headless and peer callers, not just users.
-- `outcome_summary` → `{ op, groups: [{ peer_id: UUID\|null, outcome: enum, count: int }] }`
+Response fields are camelCase (codebase serde convention). As-built shapes:
+- `count_by_bucket` → `{ op, bucket, groups: [{ bucket: ISO8601, peerId: UUID, peerName: string, outcome: enum, count: int }] }` — grouped by bucket × peer × outcome.
+- `count_by_principal` → `{ op, groups: [{ callerKind: enum(user,service_account,peer), callerId: UUID, count: int, denyCount: int, errorCount: int }] }` — ≤ 200, count-desc. **The group key is the resolved principal**: `callerId` is whichever of `caller_user_id` / `caller_token_id` / `caller_peer_id` is non-null for that `callerKind`, so the aggregate covers headless and peer callers, not just users.
+- `outcome_summary` → `{ op, outcomes: [{ outcome: enum, count: int }] }` — grouped by outcome (not peer-scoped).
 
 **Contract rules:** `outcome`, `op`, `bucket` are allow-listed enums (injection-guard pattern from the existing aggregates endpoints); all filter values are bound parameters, never interpolated; no wildcard/regex modes. The `peer_id` query param filters the underlying rows for **all** ops regardless of the grouping dimension. Every field the response carries appears in the `InteractionEvent` shape above — no consumer may infer shapes from prose.
 
@@ -162,7 +163,9 @@ Columns (domain terms): **id**; **org id** (denormalized — see Tenancy); **wor
 
 Append-only: no `updated_at`, rows never mutate. CHECK: at least one caller-principal reference is non-null; `sequence_number >= 1` when present; `peer_name` non-null when `peer_id` set.
 
-**Indexes (v1):** `(workspace_id, recorded_at DESC)`; `(workspace_id, peer_id, recorded_at DESC)`; `(workspace_id, caller_user_id, recorded_at DESC) WHERE caller_user_id IS NOT NULL`; `(session_id, sequence_number)`; `(org_id, recorded_at DESC)` (built now, queried when org-level analytics endpoints land — cheaper than `ADD CONCURRENTLY` on a large table later).
+**Indexes (as-built):** `(workspace_id, recorded_at DESC, id DESC)`; `(workspace_id, peer_id, recorded_at DESC)`; `(workspace_id, outcome, recorded_at DESC)`; `(session_id, sequence_number) WHERE session_id IS NOT NULL`; `(workspace_id, caller_kind, caller_user_id, caller_peer_id, caller_token_id, recorded_at DESC)` (serves principal-keyed aggregates across all caller kinds); `(org_id, recorded_at DESC, id DESC)` (org-level rollups; built now, queried later). All in migration `0045` except the org index + `autovacuum_vacuum_scale_factor=0.01` tuning, which ship in `0046`.
+
+**FK delete behavior:** `workspace_id` and `peer_id` are `ON DELETE CASCADE` — consistent with `audit_events` and the codebase-wide `workspace_id` convention, and required by the demo-purge hard-delete path (`DELETE FROM workspaces`). The caller-principal refs (`caller_user_id` / `caller_peer_id` / `caller_token_id`) are `ON DELETE SET NULL`. (An earlier draft considered `RESTRICT` to make telemetry resist deletion; that would break demo-purge and diverge from the compliance trail — do not reintroduce it.)
 
 **Deviation from the schema review (recorded):** the sql-architect specified `session_id` and `sequence_number` as NOT NULL. This design makes both **nullable** — headless service-account and direct REST callers legitimately have no MCP session, and forcing a synthetic per-call session would corrupt the per-session replay semantics the role-coherence consumer depends on. Sessioned MCP agent calls (the role-coherence case) always carry both.
 
@@ -170,8 +173,8 @@ Append-only: no `updated_at`, rows never mutate. CHECK: at least one caller-prin
 
 - **Denormalized `org_id`** on every row (unlike `audit_events`, which joins to `workspaces`). Justification: at 1M rows/scenario the per-query join cost multiplies across parallel analytics queries, and time-range partitioning (future) needs org isolation in the WHERE clause to preserve partition pruning. `org_id` is available at the router with no extra lookup; cost is 16 bytes/row.
 - **Isolation** is the `org_id` WHERE predicate in every query plus the route-layer workspace-in-org check — the same defense-in-depth posture as `audit_events`. An RLS policy is defined for parity but is inert until the app sets the session variable (pre-existing codebase defect, not fixed or relied on here).
-- **Authz tiers (pre-RBAC):** all three read endpoints are admin-gated (coc ≥ 80) — bulk retrieval of every principal's interactions is a materially broader exposure than the existing per-workspace audit list. Names the future `audit:read` permission (`md/design/rbac-scaffolding.md`); when RBAC ships, the rbac-scaffolding "gates applied" table must be updated to include the three interaction-events endpoints and the SSE subscription under `audit:read`. The SSE subscription requires workspace-in-org and the same gate.
-- **Limits:** 90-day query windows, ≤1000 buckets, ≤200 principals, list `limit` ≤200, session replay ≤1000 — guards connection/stream DoS by authenticated callers.
+- **Authz tiers:** all three read endpoints **and** the SSE subscription are gated on the `audit:read` RBAC permission (`md/design/rbac-scaffolding.md`) via `require_permission` — bulk retrieval of every principal's interactions is a materially broader exposure than the existing per-workspace audit list. The rbac-scaffolding "gates applied" table should list the three interaction-events endpoints and the SSE subscription under `audit:read`. The SSE subscription additionally enforces workspace-in-org before subscribing.
+- **Limits:** aggregate query windows default to the trailing 30 days and are capped at 90 days (reject `since > until`); ≤1000 buckets, ≤200 principals; the list and session-replay endpoints are keyset+`limit`-bounded (≤200 / ≤1000 per page) rather than time-windowed — together these guard connection/stream DoS by authenticated callers.
 - **No secret leakage:** the `detail` JSONB carries only deny reasons, approval ids, and error codes — never raw upstream error strings (those stay on the compliance path, which already has the `audit-event-export` scrub). The 4KB cap is enforced by the batch writer before insert.
 - **Compliance framing:** supports NIST 800-171 AU-12 (on-demand review of agent actions) through the API; the admin gate supports AU-9.
 
@@ -205,7 +208,7 @@ All mechanically verifiable against a seeded workspace; each maps to an integrat
 3. **Provenance — service account** — Given a service-account-token caller, when it routes a tool call, then the row has `caller_kind='service_account'`, `caller_token_id` = the token id, and `caller_user_id` null.
 4. **Session correlation** — Given a single MCP session that routes 20 tool calls, when the rows are read via `GET …/interaction-sessions/:session_id`, then all 20 share one `session_id` and carry `sequence_number` 1..20 strictly increasing with no gaps, returned in ascending order.
 5. **Async / non-blocking** — Given the interaction sink's channel is artificially saturated, when a tool call is routed, then the call still returns successfully (the send is dropped, the drop counter increments, and `route_tool_call` latency is unaffected) — verified by asserting the call succeeds while the drop counter advances.
-6. **Aggregates — counts** — Given 50 allowed and 10 denied calls to peer P in a 1-hour window, when `GET …/interaction-aggregates?op=outcome_summary&since=…&until=…` is called by an admin, then the response groups contain `{peer P, allow, 50}` and `{peer P, deny, 10}`.
+6. **Aggregates — counts** — Given 50 allowed and 10 denied calls to peer P in a 1-hour window, when `GET …/interaction-aggregates?op=outcome_summary&peer_id=P&since=…&until=…` is called by an `audit:read` holder, then the `outcomes` array contains `{allow, 50}` and `{deny, 10}`.
 7. **Aggregates — bucketing** — Given calls spanning 3 hours, when `op=count_by_bucket&bucket=hour` is called, then the per-bucket counts sum to the seeded total; sending `bucket` to `op=outcome_summary` returns 400.
 8. **Authz** — Given a non-admin workspace member, when they call any of the three read endpoints, then status is 403; given a member of a different org calling with this workspace id, then status is 404 and zero foreign rows are returned.
 9. **Graceful drain** — Given N buffered, un-flushed interaction events, when the writer receives a shutdown signal, then all N are flushed to `interaction_events` before the task exits (no loss on clean shutdown).
