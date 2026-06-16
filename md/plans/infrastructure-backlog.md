@@ -112,6 +112,23 @@ Not here: CMMC / NIST SP 800-171 enclave stand-up (§2.6 commitment) — busines
 
 ---
 
+## Observability data plane — the DICE net-gain (capture in substrate, compute in app)
+
+The true substrate net-gain from supporting DICE TA3 is **one durable thing**: turn IONe's audit/observability from a synchronous internal log into an async, agent-correlatable, subscribable **event-data product**. This is reusable by every app on the substrate (GroundPulse alerting, TerraYield, bearingLineDash), not DICE-only — DICE just funds it. The DICE-specific *compute* (role-coherence, MSR, time-to-recover scoring; PDES; MDO scenario) reads this plane from above and stays in the DICE-MDO app, never in IONe core. Boundary rationale: code review 2026-06-15 (4-cluster audit vs abstract §2.4/§2.7); C/A/R/P claim IDs from that audit.
+
+The already-shipped `feature/audit-event-export` ships interaction counts + recovery-gap over operator `audit_events` but is **synchronous inline writes** and has **no per-agent/step provenance** — it explicitly punted both. These four items close exactly that, and only that.
+
+| # | Item | Audit gap | Net-gain framing (why substrate, not app) | Effort |
+|---|------|-----------|---------------------------------------------|--------|
+| OBS-1 | **Async non-blocking event capture + background batch writer** | C4 — audit writes are inline `sqlx` INSERTs on the request path (`audit_event_repo.rs:125`); contradicts §2.7 "async lock-free, <5%" | Any high-throughput app needs operator/interaction capture off the hot path + a feed for analytics. Makes §2.7's number real. **Foundation — OBS-2/3 emit through it.** | ~3–4 d |
+| OBS-2 | **Per-interaction event at the federation router** | C1 — `route_tool_call` (`federation.rs:99`) emits no per-call event; only `deliver_notification`/approval-exec do | Per-tool-call records (caller, peer, tool, allow/deny, latency) are generic: audit, billing, anomaly detection, capacity — DICE just needs the count. Instruments IONe's *own core function*. | ~2 d |
+| OBS-3 | **Rich event provenance: caller principal + session/sequence tags** | C3 (capture half) — no per-agent, per-step correlation on any event | Stable principal + session/seq markers let *any* analytics correlate a session's actions across peers. DICE's drift/role-coherence math is the app consumer; IONe only emits the provenance. | ~2 d |
+| OBS-4 | **MCP server→client push / event subscription** | A4 — IONe receives `notifications/*` from peers but cannot push to its own connected clients (`mcp_server.rs` SSE is request/response) | Playbook already reserves `notifications/*` (surface 1/3); every app's operator UI wants live updates. Closes the MCP server surface symmetry. | ~3 d |
+
+Sequence: OBS-1 → OBS-2 → OBS-3 land as one unit (sink + first producer + provenance on the emitted schema); OBS-4 is independent and follows. Explicitly **not** in scope for IONe core (DICE-MDO app code): role-coherence/MSR/time-to-recover computation, failure-injection *semantics*, PDES runtime, MDO scenario, protocol-neutral adaptor contract.
+
+---
+
 ## Out of scope (noted, not planned)
 
 - **Multi-tenant hosted SaaS tier.** Per the pricing strategy, gated behind 3 unsolicited asks + hire #2. IONe stays self-hosted-per-org until then.
