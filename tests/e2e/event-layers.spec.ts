@@ -184,7 +184,7 @@ test("event list supports keyboard popup flow and map panel has no axe violation
   await showButton.focus();
   await page.keyboard.press("Enter");
 
-  const closeButton = page.locator(".event-popup-close");
+  const closeButton = page.locator("#map-detail-close");
   await expect(closeButton).toBeVisible();
   await expect(closeButton).toBeFocused();
 
