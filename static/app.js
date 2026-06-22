@@ -1450,7 +1450,7 @@ function addEventLayersToMap(eventLayers) {
       const r = 22;
       const bbox = [[e.point.x - r, e.point.y - r], [e.point.x + r, e.point.y + r]];
       const features = mapInstance.queryRenderedFeatures(bbox, { layers: [layerId] });
-      if (features[0]) openEventPopup(features[0], false);
+      if (features[0]) openEventPopup(features[0], false, layer);
     });
     mapInstance.on('mouseenter', layerId, () => { mapInstance.getCanvas().style.cursor = 'pointer'; });
     mapInstance.on('mouseleave', layerId, () => { mapInstance.getCanvas().style.cursor = ''; });
@@ -1732,61 +1732,41 @@ function showEventOnMap(feature, layer) {
   const coords = feature.geometry && feature.geometry.coordinates;
   if (!mapInstance || !Array.isArray(coords) || coords.length !== 2) return;
   mapInstance.flyTo({ center: coords, zoom: Math.max(mapInstance.getZoom(), 8), essential: !prefersReducedMotion() });
-  openEventPopup({ ...feature, layer: { id: `evt-lyr-${layer.streamId}` } }, true);
+  openEventPopup(feature, true, layer);
 }
 
-// First property whose key matches any of `names` (case-insensitive). Field
-// names are the allowlisted view_config.property_fields[].name values.
-function firstProp(props, names) {
-  const lower = {};
-  Object.keys(props).forEach((k) => { lower[k.toLowerCase()] = props[k]; });
-  for (const n of names) {
-    const v = lower[n.toLowerCase()];
-    if (v != null && v !== '') return v;
+// Render a property value: a clickable link for http(s) URLs, escaped text otherwise.
+// Domain-agnostic — no assumptions about which fields exist.
+function renderEventValue(value) {
+  const s = String(value);
+  if (/^https?:\/\/\S+$/i.test(s)) {
+    return `<a href="${escapeHtml(s)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s)}</a>`;
   }
-  return null;
+  return escapeHtml(s);
 }
 
-// PAGER alert level → human label. USGS green<yellow<orange<red. We pair the
-// color chip with a TEXT label so meaning is never conveyed by color alone
-// (AC-2.6 / WCAG 1.4.1).
-const PAGER_LABELS = {
-  green: 'Green — no impact expected',
-  yellow: 'Yellow — local impact',
-  orange: 'Orange — regional impact',
-  red: 'Red — major impact',
-};
-
-function openEventPopup(feature, triggeredByKeyboard) {
+function openEventPopup(feature, triggeredByKeyboard, layer) {
   const panel = document.getElementById('map-detail-panel');
   if (!panel) return;
   const props = feature.properties || {};
 
-  const mag = firstProp(props, ['magnitude', 'mag']);
-  const depth = firstProp(props, ['depth_km', 'depth']);
-  const place = firstProp(props, ['place', 'location', 'region']);
-  const alert = firstProp(props, ['alert', 'pager']);
-  const url = firstProp(props, ['url', 'usgs_url', 'detail']);
-
   const titleEl = document.getElementById('map-detail-title');
-  titleEl.textContent = place != null ? String(place) : (eventFeatureLabel(feature, feature.layer || {}) || 'Event');
+  titleEl.textContent = eventFeatureLabel(feature, layer || {}) || 'Event';
+
+  // Render the operator-declared property fields, in declared order. Fall back to
+  // every non-internal property if the layer carries no field manifest.
+  const declared = (layer && Array.isArray(layer.propertyFields)) ? layer.propertyFields : [];
+  const names = declared.length
+    ? declared
+    : Object.keys(props).filter((k) => !k.startsWith('_'));
 
   const rows = [];
-  if (mag != null) rows.push(`<dt>Magnitude</dt><dd>${escapeHtml(mag)}</dd>`);
-  if (depth != null) rows.push(`<dt>Depth (km)</dt><dd>${escapeHtml(depth)}</dd>`);
-  if (place != null) rows.push(`<dt>Place</dt><dd>${escapeHtml(place)}</dd>`);
-
-  // PAGER impact assessment: chip carries a text label, never color-alone.
-  const alertKey = alert != null ? String(alert).toLowerCase() : null;
-  if (alertKey && PAGER_LABELS[alertKey]) {
-    rows.push(`<dt>PAGER alert</dt><dd><span class="pager-chip pager-chip--${escapeHtml(alertKey)}">${escapeHtml(PAGER_LABELS[alertKey])}</span></dd>`);
-  } else {
-    rows.push('<dt>PAGER alert</dt><dd>No impact assessment</dd>');
-  }
-
-  if (url != null) {
-    rows.push(`<dt>Source</dt><dd><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">View on USGS</a></dd>`);
-  }
+  names.forEach((name) => {
+    const value = props[name];
+    if (value == null || value === '') return;
+    rows.push(`<dt>${escapeHtml(name)}</dt><dd>${renderEventValue(value)}</dd>`);
+  });
+  if (!rows.length) rows.push('<dt>Event</dt><dd>No detail fields</dd>');
 
   document.getElementById('map-detail-fields').innerHTML = rows.join('');
   panel.hidden = false;
