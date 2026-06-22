@@ -232,7 +232,7 @@ impl ConnectorImpl for McpClientConnector {
 
         // list_survivors and search_stream_events require workspace_id.
         // Resolve all workspace ids and aggregate results.
-        let workspace_ids = self.resolve_workspace_ids_with_binding().await;
+        let workspace_ids = self.resolve_workspace_ids_with_binding().await?;
         let now = chrono::Utc::now();
         let mut all_events = Vec::new();
 
@@ -313,27 +313,37 @@ impl McpClientConnector {
         }
     }
 
-    async fn resolve_workspace_ids_with_binding(&self) -> Vec<String> {
+    async fn resolve_workspace_ids_with_binding(&self) -> anyhow::Result<Vec<String>> {
+        // When this connector is bound to a workspace+peer, the poll scope MUST come
+        // from an Active binding's foreign_workspace_id. Falling back to the peer-wide
+        // unscoped enumeration here would read across workspaces the binding does not
+        // authorize (C-1 workspace-isolation leak), so this path fails closed.
         if let (Some(pool), Some(workspace_id), Some(peer_id)) =
             (&self.pool, self.workspace_id, self.peer_id)
         {
-            match WorkspacePeerBindingRepo::new(pool.clone())
+            return match WorkspacePeerBindingRepo::new(pool.clone())
                 .get_by_workspace_peer(workspace_id, peer_id)
                 .await
             {
                 Ok(Some(binding)) if binding.status == BindingStatus::Active => {
-                    if let Some(foreign_workspace_id) = binding.foreign_workspace_id {
-                        if !foreign_workspace_id.is_empty() {
-                            return vec![foreign_workspace_id];
-                        }
+                    match binding.foreign_workspace_id {
+                        Some(fw) if !fw.is_empty() => Ok(vec![fw]),
+                        _ => anyhow::bail!(
+                            "mcp_client: active binding for peer {} has no foreign_workspace_id; poll blocked",
+                            peer_id
+                        ),
                     }
                 }
-                Ok(_) => {}
-                Err(e) => warn!("mcp_client: binding lookup failed during poll: {}", e),
-            }
+                Ok(_) => anyhow::bail!(
+                    "mcp_client: no active workspace_peer_binding for peer {}; poll blocked (fail-closed)",
+                    peer_id
+                ),
+                Err(e) => Err(e.context("mcp_client: binding lookup failed during poll")),
+            };
         }
 
-        self.resolve_all_peer_workspace_ids().await
+        // Unbound connector (no workspace/peer context): legacy peer-wide resolution.
+        Ok(self.resolve_all_peer_workspace_ids().await)
     }
 
     /// Resolve the peer's first workspace id via tools/call list_workspaces.

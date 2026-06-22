@@ -55,9 +55,11 @@ impl PeerSessionRegistry {
     }
 
     pub fn start(&self, state: AppState, peer_id: Uuid) {
-        if self.tasks.contains_key(&peer_id) {
-            return;
-        }
+        use dashmap::mapref::entry::Entry;
+        let vacant = match self.tasks.entry(peer_id) {
+            Entry::Occupied(_) => return,
+            Entry::Vacant(vacant) => vacant,
+        };
         let (state_tx, _state_rx) = watch::channel(SessionState::Connecting);
         let tx = state_tx.clone();
         let limit = self.limit.clone();
@@ -68,8 +70,7 @@ impl PeerSessionRegistry {
             };
             run_session_task(state, peer_id, tx).await;
         });
-        self.tasks
-            .insert(peer_id, PeerSessionHandle { state_tx, task });
+        vacant.insert(PeerSessionHandle { state_tx, task });
     }
 
     pub fn stop(&self, peer_id: Uuid) {

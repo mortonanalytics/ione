@@ -234,6 +234,15 @@ fn validate_envelope(path_peer_id: Uuid, env: &WebhookEnvelope) -> Result<(), Ap
     if !env.data.is_object() {
         return Err(AppError::WebhookRejected);
     }
+    // Domain-agnostic cap on the `data` field: it is stored as signal evidence and
+    // later inlined into the critic LLM prompt, so an oversized payload inflates
+    // tokens/storage even within the 256 KB body limit.
+    if serde_json::to_string(&env.data)
+        .map(|s| s.len() > 102_400)
+        .unwrap_or(true)
+    {
+        return Err(AppError::WebhookRejected);
+    }
     if env.r#type.is_empty()
         || env.r#type.len() > 255
         || !env.r#type.bytes().all(|b| {

@@ -172,20 +172,20 @@ pub async fn evaluate_signal(
     let evidence_text = if event_ids.is_empty() {
         "(no evidence events referenced)".to_string()
     } else {
-        let id_list = event_ids
+        let uuids: Vec<Uuid> = event_ids
             .iter()
-            .map(|id| format!("'{}'", id))
-            .collect::<Vec<_>>()
-            .join(",");
+            .filter_map(|id| Uuid::parse_str(id).ok())
+            .collect();
 
-        let sql = format!(
-            "SELECT payload::TEXT FROM stream_events WHERE id IN ({})",
-            id_list
-        );
-        let payloads: Vec<String> = sqlx::query_scalar(&sql)
-            .fetch_all(&state.pool)
-            .await
-            .unwrap_or_default();
+        let payloads: Vec<String> = if uuids.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query_scalar("SELECT payload::TEXT FROM stream_events WHERE id = ANY($1)")
+                .bind(&uuids)
+                .fetch_all(&state.pool)
+                .await
+                .unwrap_or_default()
+        };
 
         if payloads.is_empty() {
             "(evidence event ids provided but payloads not found)".to_string()

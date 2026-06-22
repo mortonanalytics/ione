@@ -354,6 +354,26 @@ pub async fn execute_pending_tool_call(
         .get(pending.peer_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("pending peer not found"))?;
+    if peer.status != crate::models::PeerStatus::Active {
+        anyhow::bail!(
+            "peer is not active (status: {:?}); execution blocked",
+            peer.status
+        );
+    }
+    let binding_is_active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM workspace_peer_bindings
+            WHERE workspace_id = $1 AND peer_id = $2 AND status = 'active'::binding_status
+        )",
+    )
+    .bind(pending.workspace_id)
+    .bind(pending.peer_id)
+    .fetch_one(&state.pool)
+    .await
+    .context("failed to check workspace peer binding status")?;
+    if !binding_is_active {
+        anyhow::bail!("workspace peer binding is not active; execution blocked");
+    }
     let result = invoke_peer_tool(state, &peer, raw_tool, args).await?;
     repo.mark_executed(pending.id, &result).await?;
     AuditEventRepo::new(state.pool.clone())
