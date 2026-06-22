@@ -12,6 +12,28 @@ pub enum InsertOutcome {
     Inserted,
     Updated,
     Duplicate,
+    Rejected,
+}
+
+/// Default cap on a single stream-event payload (serialized JSON bytes). Stream events
+/// are inlined into generator/critic LLM prompts and stored unbounded as JSONB, so an
+/// oversized peer-supplied payload can blow the context window or bloat storage. Mirrors
+/// the `interaction_events` detail cap. Override with `IONE_MAX_STREAM_EVENT_BYTES`.
+const DEFAULT_MAX_STREAM_EVENT_BYTES: usize = 65_536;
+
+fn max_stream_event_bytes() -> usize {
+    std::env::var("IONE_MAX_STREAM_EVENT_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_MAX_STREAM_EVENT_BYTES)
+}
+
+/// True if the payload serializes within the configured byte cap.
+fn payload_within_limit(payload: &Value) -> bool {
+    serde_json::to_vec(payload)
+        .map(|v| v.len() <= max_stream_event_bytes())
+        .unwrap_or(false)
 }
 
 pub struct StreamEventRepo {
@@ -48,6 +70,9 @@ impl StreamEventRepo {
         payload: serde_json::Value,
         observed_at: DateTime<Utc>,
     ) -> anyhow::Result<bool> {
+        if !payload_within_limit(&payload) {
+            return Ok(false);
+        }
         let rows_affected = sqlx::query(
             "INSERT INTO stream_events (stream_id, payload, observed_at)
              VALUES ($1, $2, $3)
@@ -71,6 +96,9 @@ impl StreamEventRepo {
         observed_at: DateTime<Utc>,
         dedup_key: Option<&str>,
     ) -> anyhow::Result<InsertOutcome> {
+        if !payload_within_limit(&payload) {
+            return Ok(InsertOutcome::Rejected);
+        }
         if let Some(dedup_key) = dedup_key {
             let inserted: bool = sqlx::query_scalar(
                 "INSERT INTO stream_events (stream_id, payload, observed_at, dedup_key)

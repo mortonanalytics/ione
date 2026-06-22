@@ -319,12 +319,21 @@ pub async fn subscribe_peer(
         }
     };
 
-    // Trigger first poll: create default streams for this connector.
-    trigger_first_poll(&state, connector.id);
+    // Only trigger the first poll once an Active binding exists: the connector resolves
+    // its poll scope from the binding's foreign_workspace_id and now fails closed without
+    // one, so polling before the binding is Active would be unscoped/erroring work.
+    let binding_active = matches!(
+        &binding,
+        Some(b) if b.status == crate::models::BindingStatus::Active
+    );
+    if binding_active {
+        trigger_first_poll(&state, connector.id);
+    }
 
     Ok(Json(json!({
         "connector": connector,
         "binding": binding,
+        "firstPollDeferred": !binding_active,
     })))
 }
 
