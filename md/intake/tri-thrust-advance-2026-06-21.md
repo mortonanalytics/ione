@@ -16,24 +16,22 @@ Thrusts: **A** = federation data infrastructure · **B** = UI/UX generalization 
 | TT-A04 | `peers:manage` RBAC gate on create/patch/delete/refresh binding routes | **Shipped** (backend) | `src/routes/bindings.rs` ×4 |
 | TT-A05 | TOCTOU race in MCP session init → atomic DashMap `entry()` | **Shipped** | `src/connectors/peer_session.rs:57` |
 | TT-C09 | 100 KB domain-agnostic cap on webhook `data` (flows into critic LLM prompt) | **Shipped** | `src/routes/webhooks.rs:236` |
+| TT-A06 | `mcp_client` poll fails closed when no Active binding (was unscoped peer-wide enumeration → C-1 cross-workspace read) | **Shipped** | `src/connectors/mcp_client.rs:316` |
+| TT-A07 | Defer `subscribe_peer` first-poll until binding is `Active` (`firstPollDeferred`) | **Shipped** | `src/routes/peers.rs:322` |
+| TT-C01 | `stream_event` payload size cap (64 KiB) at repo choke point; `InsertOutcome::Rejected` + `skipped` in poll response; env `IONE_MAX_STREAM_EVENT_BYTES` | **Shipped** | `src/repos/stream_event_repo.rs:10` |
+| TT-C08 | `bucket_expr` → `Option` (no panic on unvalidated bucket) in stream + audit aggregate repos; `minute` arm added | **Shipped** | `src/repos/{stream_event,audit_event}_aggregate_repo.rs` |
+| TT-B01 | Event-detail panel renders operator-declared `propertyFields` (kills earthquake/PAGER hardcode); `EventLayer.propertyFields` manifest | **Shipped** | `src/services/event_layers.rs:48`, `static/app.js` openEventPopup; req `event-view-schema.md` |
 
-## Scheduled (verified-real, queued for the next landing wave)
-
-| ID | Item | Pairing | Source survivors |
-|----|------|---------|------------------|
-| TT-A06 | `mcp_client::resolve_workspace_ids_with_binding` falls back to **unscoped** `resolve_all_peer_workspace_ids()` when binding inactive/absent → cross-workspace data leak. **Fail closed.** | UI: binding-required chip (`app.js` buildConnectorCard) + `style.css` | #3, #22, #42 |
-| TT-A07 | `subscribe_peer` triggers first-poll even when `bind_on_subscribe` failed → unscoped polling. Guard poll on binding `Active`. | UI: pending callout copy (`app.js`) | #5 |
-| TT-A03b | Add observable **DENY interaction_event** trail + UI toast to the execution-time revalidation (TT-A03 shipped the guard; this adds audit + UI) | UI: approve-button catch branch (`app.js:4514`) | #6, #15 |
-| TT-A04b | UI probe-and-hide for binding Refresh/Edit/Delete buttons (pairs TT-A04 backend gate) | backend already enforced | #1 |
-| TT-B01 | Backend-driven event-detail field schema — `event_layers.rs` `PropertyField{label,format}`+`PropertyFormat`; `app.js` renders from `layer.propertyFields` (kills magnitude/depth/PAGER hardcode) | new req doc `event-view-schema.md` | #2,#12,#13,#14,#20 |
-| TT-C01 | `stream_event` payload size cap (64 KiB) at repo choke point, mirroring `interaction_events` 4096 cap; `InsertOutcome::Rejected` + skipped counter | UI: skipped-events note (`app.js`) | #4, #27 |
-| TT-C02 | Unescaped user data (signal titles, stream names) inlined into LLM prompts → prompt-injection vector; delimit/escape | backend-only | #8 |
-| TT-C08 | `bucket_expr` panics on unvalidated bucket in aggregate repos → return `Result`; single-source bucket allowlist; add `minute` arm | UI: align bucket selector options | design #7 residual |
+Commits: `b4e2fef` (A-cluster), `003a2fd` (fail-closed/ingest/bucket), `b4ecb88` (B01) on `feat/tri-thrust-federation-hardening`.
+Verification ceiling this session: `cargo check` + `clippy` + `fmt` + `node --check` green. **Integration tests not run** (no Postgres reachable).
 
 ## Deferred (real but need design / intent / migration before code)
 
 | ID | Item | Re-entry gate | Source |
 |----|------|---------------|--------|
+| TT-A03b | DENY `interaction_event` trail + UI toast for execution-time revalidation (TT-A03 guard already shipped) | Design: `execute_pending_tool_call` has no `AuthContext`, so the InteractionEvent caller-attribution contract needs a decision before emitting. Error already surfaces to the user today. | #6, #15 |
+| TT-A04b | UI probe-and-hide for binding mutation buttons (pairs TT-A04 backend gate) | Design: no `peers:manage`-gated GET exists to probe, and `/me` per-workspace permission scoping isn't wired for it. Backend gate is the control; 403-on-click is already handled by the error toast. | #1 |
+| TT-C02 | Unescaped user data (signal titles, stream names) inlined into LLM prompts | Design: prompt-injection mitigation approach (delimiting vs. structured prompts vs. sanitization) is not a surgical edit; needs a decision. | #8 |
 | TT-A08 | Pending-tool-call dedup excludes `executed` rows | **Owner intent**: is repeat-execution with identical args intended? If dedup desired → new migration + DB verification | #16, #29 |
 | TT-A09 | Advisory lock in approval execution doesn't cover subsequent DB ops | Design: widen to a transaction or extend lock scope | #17 |
 | TT-A10 | Peer-session task survives peer deletion (orphan) | Design: tie session lifecycle to peer delete | #28 |
