@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::{ensure_workspace_in_org, AuthContext},
+    auth::{ensure_workspace_in_org, require_permission, AuthContext},
     error::AppError,
     repos::WorkspacePeerBindingRepo,
     services::workspace_peer_binding::{self, RefreshError},
@@ -80,6 +80,7 @@ pub async fn create_binding(
     Json(req): Json<CreateBindingRequest>,
 ) -> Result<Json<Value>, AppError> {
     ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
+    require_permission(&ctx, &state.pool, workspace_id, "peers:manage").await?;
     let tenant_id = validate_tenant_id(&req.foreign_tenant_id)?;
     validate_scope(&req.scope)?;
     let foreign_workspace_id = req
@@ -112,6 +113,7 @@ pub async fn patch_binding(
     Json(req): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
     ensure_binding_in_workspace(&state, ctx.org_id, workspace_id, binding_id).await?;
+    require_permission(&ctx, &state.pool, workspace_id, "peers:manage").await?;
     let foreign_tenant_id = match req.get("foreignTenantId") {
         Some(v) => Some(validate_tenant_id(v.as_str().ok_or_else(|| {
             AppError::UnprocessableEntity("foreignTenantId must be a string".into())
@@ -169,6 +171,7 @@ pub async fn delete_binding(
     Path((workspace_id, binding_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, AppError> {
     ensure_binding_in_workspace(&state, ctx.org_id, workspace_id, binding_id).await?;
+    require_permission(&ctx, &state.pool, workspace_id, "peers:manage").await?;
     let deleted = WorkspacePeerBindingRepo::new(state.pool.clone())
         .delete_by_id_org_scoped(binding_id, ctx.org_id)
         .await
@@ -185,6 +188,7 @@ pub async fn refresh_binding(
     Path((workspace_id, binding_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, AppError> {
     ensure_binding_in_workspace(&state, ctx.org_id, workspace_id, binding_id).await?;
+    require_permission(&ctx, &state.pool, workspace_id, "peers:manage").await?;
     match workspace_peer_binding::refresh_binding(&state, binding_id, ctx.org_id).await {
         Ok(binding) => Ok(Json(
             serde_json::to_value(binding).map_err(|e| AppError::Internal(e.into()))?,

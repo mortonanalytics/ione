@@ -289,6 +289,13 @@ pub async fn subscribe_peer(
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::BadRequest(format!("peer {} not found", peer_id)))?;
 
+    if peer.status != crate::models::PeerStatus::Active {
+        return Err(AppError::BadRequest(format!(
+            "peer {} is not active (current status: {:?})",
+            peer_id, peer.status
+        )));
+    }
+
     let connector = auto_create_connector_for_peer(&state.pool, workspace_id, &peer)
         .await
         .map_err(AppError::Internal)?;

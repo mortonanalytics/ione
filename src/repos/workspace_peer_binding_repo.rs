@@ -231,6 +231,7 @@ impl WorkspacePeerBindingRepo {
                 SELECT 1 FROM workspaces w, peers p
                 WHERE w.id = $1 AND p.id = $2
                   AND w.org_id = $3 AND p.org_id = $3
+                  AND p.status = 'active'::peer_status
              )",
         )
         .bind(workspace_id)
