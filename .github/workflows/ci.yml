@@ -105,3 +105,63 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --bin ione
+
+  # The Playwright specs were previously never executed by any job, so the
+  # browser-side acceptance criteria (notably the peer document expired-signed-URL
+  # protocol) had no CI enforcement at all.
+  e2e:
+    name: playwright e2e
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ione
+          POSTGRES_PASSWORD: ione
+          POSTGRES_DB: ione
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U ione"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      DATABASE_URL: postgres://ione:ione@localhost:5433/ione
+      IONE_TOKEN_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      IONE_WEBHOOK_SECRET_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      IONE_BIND: 127.0.0.1:3007
+      BASE_URL: http://127.0.0.1:3007
+      # The specs stub peer APIs at the network layer, so no Ollama is needed —
+      # point at a closed port so nothing can silently reach a live service.
+      OLLAMA_BASE_URL: http://127.0.0.1:9
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: build server
+        run: cargo build --bin ione
+      - name: install e2e deps
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: start server
+        run: |
+          # ione::db::migrate runs at startup, so no separate migration step.
+          ./target/debug/ione &
+          echo $! > /tmp/ione.pid
+          for i in $(seq 1 60); do
+            if curl -fsS "$BASE_URL/api/v1/health" >/dev/null 2>&1; then
+              echo "server ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not become ready"; exit 1
+      - name: playwright
+        run: npm run test:e2e
+      - name: stop server
+        if: always()
+        run: kill "$(cat /tmp/ione.pid)" 2>/dev/null || true
