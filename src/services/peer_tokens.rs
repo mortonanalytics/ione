@@ -688,13 +688,40 @@ fn static_bearer() -> Result<String> {
         .context("peer has no token and IONE_OAUTH_STATIC_BEARER is not set")
 }
 
+/// Resolve the peer's authorization-server metadata the same way the join path
+/// does: RFC 8414 origin location first, legacy `{mcp_url}/.well-known/…` only as
+/// a fallback. Rebuilding just the legacy URL here meant a peer publishing solely
+/// at the origin could join successfully and then fail every token refresh.
 async fn discover_peer(peer: &Peer, http: &reqwest::Client) -> Result<PeerDiscovery> {
-    let discovery_url = format!(
+    let origin_url = crate::services::peer_oauth::origin_discovery_url(&peer.mcp_url)
+        .map_err(|e| anyhow::anyhow!("invalid peer mcp_url for discovery: {e:?}"))?;
+    let legacy_url = format!(
         "{}/.well-known/oauth-authorization-server",
         peer.mcp_url.trim_end_matches('/')
     );
-    let discovery: PeerDiscovery = http
-        .get(&discovery_url)
+
+    let mut last_err = None;
+    for url in [origin_url.as_str(), legacy_url.as_str()] {
+        match fetch_discovery_at(url, http).await {
+            Ok(discovery) => {
+                if url == legacy_url {
+                    tracing::warn!(
+                        peer_id = %peer.id,
+                        "peer serves OAuth metadata at the deprecated {{mcp_url}}/.well-known \
+                         location; RFC 8414 places it at the origin"
+                    );
+                }
+                verify_refresh_endpoint_host(peer, &discovery)?;
+                return Ok(discovery);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("peer discovery failed")))
+}
+
+async fn fetch_discovery_at(url: &str, http: &reqwest::Client) -> Result<PeerDiscovery> {
+    http.get(url)
         .send()
         .await
         .context("peer discovery request failed")?
@@ -702,9 +729,7 @@ async fn discover_peer(peer: &Peer, http: &reqwest::Client) -> Result<PeerDiscov
         .context("peer discovery status")?
         .json()
         .await
-        .context("peer discovery json")?;
-    verify_refresh_endpoint_host(peer, &discovery)?;
-    Ok(discovery)
+        .context("peer discovery json")
 }
 
 fn verify_refresh_endpoint_host(peer: &Peer, discovery: &PeerDiscovery) -> Result<()> {

@@ -266,14 +266,13 @@ fn token_is_fresh(expires_at: Option<DateTime<Utc>>) -> bool {
 /// does not live on the peer's own host, so a compromised discovery document
 /// cannot redirect the operator's consent or the code exchange elsewhere.
 async fn discover(state: &AppState, peer: &Peer) -> Result<PeerDiscovery, AppError> {
-    let base = peer.mcp_url.trim_end_matches('/');
-    let discovery_url = format!("{base}/.well-known/oauth-authorization-server");
-    let value =
-        crate::services::peer_oauth::fetch_peer_metadata(state, &peer.mcp_url, &discovery_url)
-            .await
-            .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
-    let discovery: PeerDiscovery = serde_json::from_value(value)
-        .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
+    // Delegate to the shared resolver rather than rebuilding the URL: it tries the
+    // RFC 8414 origin location first and only then the legacy `{mcp_url}/.well-known`
+    // path. Building the legacy URL directly here meant a peer that publishes only
+    // at the origin — i.e. a spec-conforming one — could complete the join (which
+    // uses the resolver) and then fail every delegated-token refresh afterwards.
+    let (discovery, _url) =
+        crate::services::peer_oauth::fetch_peer_discovery(state, &peer.mcp_url).await?;
     crate::services::peer_oauth::verify_peer_endpoint_hosts(&peer.mcp_url, &discovery)?;
     Ok(discovery)
 }

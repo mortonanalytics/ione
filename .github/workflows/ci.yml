@@ -28,6 +28,11 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: cargo check
         run: cargo check --all-targets
+      # "Enforced — <citation>" is the frozen contract's whole verifiability
+      # story. Two citations once pointed past EOF and eleven were ambiguous
+      # between src/routes/ and src/services/; this keeps that from recurring.
+      - name: contract citations resolve
+        run: python3 scripts/check-contract-citations.py
 
   test:
     name: integration tests

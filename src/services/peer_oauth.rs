@@ -35,7 +35,7 @@ pub struct PeerDiscovery {
 /// `https://host[:port]/.well-known/oauth-authorization-server`, not below the
 /// resource path. `peers.mcp_url` carries the MCP path (`https://host/mcp`), so
 /// the discovery URL is derived from its origin.
-fn origin_discovery_url(peer_url: &str) -> Result<String, AppError> {
+pub(crate) fn origin_discovery_url(peer_url: &str) -> Result<String, AppError> {
     let mut url =
         url::Url::parse(peer_url).map_err(|_| AppError::BadRequest("invalid peerUrl".into()))?;
     if url.host_str().is_none() {
