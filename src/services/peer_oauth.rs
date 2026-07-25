@@ -8,11 +8,88 @@ use crate::{error::AppError, state::AppState};
 
 #[derive(Debug, Deserialize)]
 pub struct PeerDiscovery {
+    /// RFC 8414 `issuer`. Validated against the peer host like every other URL in
+    /// the document (see [`verify_peer_endpoint_hosts`]); a document claiming to
+    /// be issued by somewhere else is not this peer's document.
+    #[serde(default)]
+    pub issuer: Option<String>,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
-    pub registration_endpoint: String,
+    /// RFC 7591 dynamic client registration. **Optional**: a peer that advertises
+    /// `client_id_metadata_document_supported` needs no registration step at all,
+    /// because IONe can present its own published client-metadata document URL as
+    /// the `client_id`. Contract §2's endpoint table does not list this endpoint,
+    /// so requiring it kept conforming peers out.
+    #[serde(default)]
+    pub registration_endpoint: Option<String>,
+    /// RFC 7009 revocation endpoint. IONe does not call it; it is host-validated
+    /// with the rest so a tampered document cannot point a future revoke
+    /// elsewhere.
+    #[serde(default)]
+    pub revocation_endpoint: Option<String>,
     #[serde(default)]
     pub client_id_metadata_document_supported: bool,
+}
+
+/// RFC 8414 §3: authorization-server metadata is published at the **origin**,
+/// `https://host[:port]/.well-known/oauth-authorization-server`, not below the
+/// resource path. `peers.mcp_url` carries the MCP path (`https://host/mcp`), so
+/// the discovery URL is derived from its origin.
+fn origin_discovery_url(peer_url: &str) -> Result<String, AppError> {
+    let mut url =
+        url::Url::parse(peer_url).map_err(|_| AppError::BadRequest("invalid peerUrl".into()))?;
+    if url.host_str().is_none() {
+        return Err(AppError::BadRequest("invalid peerUrl".into()));
+    }
+    url.set_path("/.well-known/oauth-authorization-server");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
+/// Fetch and validate a peer's authorization-server metadata.
+///
+/// Tries the RFC 8414 origin location first and falls back to the pre-2026-07-25
+/// `{mcp_url}/.well-known/…` location. The fallback is kept rather than dropped
+/// because peers were built against the old behaviour — `tests/support/stub_peer.rs`
+/// and the fixtures in `tests/identity_broker_integration.rs` and
+/// `tests/credential_presentation_integration.rs` among them — and an outright
+/// switch would break every one of them at the first step of the join. It logs at
+/// `warn!` so the legacy location is visible and can be retired later.
+///
+/// Returns the document together with the URL it was actually read from, so an
+/// error message can name the document the operator has to change.
+pub async fn fetch_peer_discovery(
+    state: &AppState,
+    peer_url: &str,
+) -> Result<(PeerDiscovery, String), AppError> {
+    let origin_url = origin_discovery_url(peer_url)?;
+    let legacy_url = format!(
+        "{}/.well-known/oauth-authorization-server",
+        peer_url.trim_end_matches('/')
+    );
+
+    let (value, source_url) = match fetch_peer_metadata(state, peer_url, &origin_url).await {
+        Ok(value) => (value, origin_url),
+        Err(origin_error) if legacy_url != origin_url => {
+            let value = fetch_peer_metadata(state, peer_url, &legacy_url)
+                .await
+                .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
+            tracing::warn!(
+                peer_url,
+                legacy_url,
+                %origin_error,
+                "peer serves OAuth discovery under its MCP path; RFC 8414 places it at the origin"
+            );
+            (value, legacy_url)
+        }
+        Err(_) => return Err(AppError::BadRequest("invalid peer metadata".into())),
+    };
+
+    let discovery: PeerDiscovery = serde_json::from_value(value)
+        .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
+    verify_peer_endpoint_hosts(peer_url, &discovery)?;
+    Ok((discovery, source_url))
 }
 
 #[derive(Debug)]
@@ -49,53 +126,61 @@ pub async fn begin_federation(
     peer_id: uuid::Uuid,
     peer_url: &str,
 ) -> Result<BeginResp, AppError> {
-    let discovery_url = format!("{peer_url}/.well-known/oauth-authorization-server");
-    let disc_value = fetch_peer_metadata(state, peer_url, &discovery_url)
-        .await
-        .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
-    let disc: PeerDiscovery = serde_json::from_value(disc_value)
-        .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
-    verify_peer_endpoint_hosts(peer_url, &disc)?;
+    let (disc, discovery_url) = fetch_peer_discovery(state, peer_url).await?;
 
     let self_client_metadata_url = format!("{}/.well-known/mcp-client", state.config.oauth_issuer);
     let redirect_uri = format!("{}/api/v1/peers/callback", state.config.oauth_issuer);
 
-    let register_resp: RegisterResp = if disc.client_id_metadata_document_supported {
-        state
-            .http
-            .post(&disc.registration_endpoint)
-            .json(&RegisterCimd {
-                client_metadata_url: &self_client_metadata_url,
-            })
-            .send()
-            .await
-            .context("peer register (CIMD)")?
-            .error_for_status()
-            .context("peer register status")?
-            .json()
-            .await
-            .context("peer register json")?
-    } else {
-        let body = serde_json::json!({
-            "client_name": "IONe",
-            "redirect_uris": [redirect_uri.clone()],
-            "grant_types": ["authorization_code", "refresh_token"],
-            "response_types": ["code"],
-            "scope": "mcp",
-            "token_endpoint_auth_method": "none"
-        });
-        state
-            .http
-            .post(&disc.registration_endpoint)
-            .json(&body)
-            .send()
-            .await
-            .context("peer register (DCR)")?
-            .error_for_status()
-            .context("peer register status")?
-            .json()
-            .await
-            .context("peer register json")?
+    // Precedence: register when the peer offers a registration endpoint (in CIMD
+    // form if it supports it, otherwise RFC 7591), and fall back to presenting
+    // IONe's own client-metadata document as the `client_id` only when there is
+    // no registration endpoint to call. CIMD is the fallback rather than the
+    // preference because a peer that publishes both — IONe's own authorization
+    // server does, `routes/oauth.rs:26,33` — resolves `client_id` against its
+    // registered-client table (`routes/oauth.rs:122`) and would reject a bare
+    // metadata URL.
+    let client_id = match disc.registration_endpoint.as_deref() {
+        Some(registration_endpoint) => {
+            let body = if disc.client_id_metadata_document_supported {
+                serde_json::to_value(RegisterCimd {
+                    client_metadata_url: &self_client_metadata_url,
+                })
+                .map_err(|e| AppError::Internal(e.into()))?
+            } else {
+                serde_json::json!({
+                    "client_name": "IONe",
+                    "redirect_uris": [redirect_uri.clone()],
+                    "grant_types": ["authorization_code", "refresh_token"],
+                    "response_types": ["code"],
+                    "scope": "mcp",
+                    "token_endpoint_auth_method": "none"
+                })
+            };
+            let register_resp: RegisterResp = state
+                .http
+                .post(registration_endpoint)
+                .json(&body)
+                .send()
+                .await
+                .context("peer register")?
+                .error_for_status()
+                .context("peer register status")?
+                .json()
+                .await
+                .context("peer register json")?;
+            register_resp.client_id
+        }
+        None if disc.client_id_metadata_document_supported => self_client_metadata_url.clone(),
+        None => {
+            return Err(AppError::BadRequest(format!(
+                "peer discovery document at {discovery_url} publishes no \
+                 'registration_endpoint' and does not advertise \
+                 'client_id_metadata_document_supported', so IONe cannot obtain a client_id. \
+                 The peer must publish 'registration_endpoint' (RFC 7591 dynamic client \
+                 registration) or set 'client_id_metadata_document_supported': true and accept \
+                 {self_client_metadata_url} as the client_id."
+            )))
+        }
     };
 
     let code_verifier = generate_opaque(32);
@@ -106,7 +191,7 @@ pub async fn begin_federation(
     let authorize_url = format!(
         "{endpoint}?response_type=code&client_id={client_id}&redirect_uri={redirect}&code_challenge={challenge}&code_challenge_method=S256&scope=mcp&state={state}",
         endpoint = disc.authorization_endpoint,
-        client_id = urlencoding::encode(&register_resp.client_id),
+        client_id = urlencoding::encode(&client_id),
         redirect = urlencoding::encode(&redirect_uri),
         challenge = urlencoding::encode(&code_challenge),
         state = urlencoding::encode(&nonce),
@@ -114,7 +199,7 @@ pub async fn begin_federation(
 
     let peer_repo = crate::repos::PeerRepo::new(state.pool.clone());
     peer_repo
-        .begin_oauth(peer_id, &register_resp.client_id)
+        .begin_oauth(peer_id, &client_id)
         .await
         .map_err(AppError::Internal)?;
     sqlx::query(
@@ -136,7 +221,7 @@ pub async fn begin_federation(
             discovery: disc,
             code_verifier,
             code_challenge,
-            client_id: register_resp.client_id,
+            client_id,
             redirect_uri,
             nonce,
         },
@@ -213,11 +298,14 @@ pub fn verify_peer_endpoint_hosts(peer_url: &str, disc: &PeerDiscovery) -> Resul
         .ok_or_else(|| AppError::BadRequest("invalid peerUrl".into()))?
         .to_string();
 
-    for endpoint in [
-        &disc.authorization_endpoint,
-        &disc.token_endpoint,
-        &disc.registration_endpoint,
-    ] {
+    let endpoints = [
+        Some(disc.authorization_endpoint.as_str()),
+        Some(disc.token_endpoint.as_str()),
+        disc.registration_endpoint.as_deref(),
+        disc.revocation_endpoint.as_deref(),
+        disc.issuer.as_deref(),
+    ];
+    for endpoint in endpoints.into_iter().flatten() {
         let endpoint_host = url::Url::parse(endpoint)
             .map_err(|_| AppError::BadRequest("invalid peer endpoint".into()))?
             .host_str()

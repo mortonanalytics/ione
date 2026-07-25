@@ -151,13 +151,8 @@ pub(crate) async fn callback(
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::BadRequest("peer not found".into()))?;
-    let discovery_url = format!("{}/.well-known/oauth-authorization-server", peer.mcp_url);
-    let disc_value =
-        crate::services::peer_oauth::fetch_peer_metadata(&state, &peer.mcp_url, &discovery_url)
-            .await
-            .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
-    let discovery: crate::services::peer_oauth::PeerDiscovery = serde_json::from_value(disc_value)
-        .map_err(|_| AppError::BadRequest("invalid peer metadata".into()))?;
+    let (discovery, _discovery_url) =
+        crate::services::peer_oauth::fetch_peer_discovery(&state, &peer.mcp_url).await?;
     let pending = crate::services::peer_oauth::PendingFederation {
         peer_id,
         peer_url: peer.mcp_url.clone(),
@@ -443,24 +438,45 @@ async fn ensure_local_peer_issuer(state: &AppState, org_id: Uuid) -> Result<Uuid
     .map_err(|e| AppError::Internal(e.into()))
 }
 
+/// Human-readable peer name derived from its MCP URL.
+///
+/// The port is part of the name whenever it is present and not the scheme's
+/// default — `Url::port()` returns `None` in both of the other cases — because
+/// `peers_org_id_name_key UNIQUE (org_id, name)` makes the name the identity of
+/// the peer, and two services behind one hostname on different ports are two
+/// peers. Peers already registered on a default-port URL keep the bare host they
+/// were named with, so nothing existing is renamed.
 fn peer_name_from_url(peer_url: &str) -> String {
     reqwest::Url::parse(peer_url)
         .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .filter(|host| !host.is_empty())
+        .and_then(|url| {
+            let host = url.host_str().filter(|host| !host.is_empty())?;
+            Some(match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            })
+        })
         .unwrap_or_else(|| peer_url.to_owned())
 }
 
 fn map_peer_registration_error(e: anyhow::Error) -> AppError {
-    let msg = e.to_string();
-    if msg.contains("not found") || msg.contains("issuer_id") {
-        AppError::BadRequest(msg)
-    } else if msg.contains("unique") || msg.contains("duplicate") {
+    // Alternate Display walks the whole chain: `PeerRepo::insert` wraps the sqlx
+    // error in `.context("failed to insert peer")`, so the constraint violation
+    // is only visible below the top-level message.
+    let msg = format!("{e:#}");
+    if msg.contains("unique") || msg.contains("duplicate") {
         AppError::BadRequest("peer URL already registered".into())
+    } else if msg.contains("not found") || msg.contains("issuer_id") {
+        AppError::BadRequest(msg)
     } else {
         AppError::Internal(e)
     }
 }
+
+/// Contract §8.1 page cap, same as `federation::paginated_list` and
+/// `peer_panels::list_peer_resources`: a peer returning an endless cursor is
+/// truncated rather than followed forever.
+const MANIFEST_MAX_PAGES: usize = 50;
 
 async fn fetch_manifest_over_mcp(state: &AppState, peer_id: Uuid) -> anyhow::Result<Value> {
     let peer_repo = PeerRepo::new(state.pool.clone());
@@ -474,27 +490,53 @@ async fn fetch_manifest_over_mcp(state: &AppState, peer_id: Uuid) -> anyhow::Res
     }
 
     let endpoint = peer.mcp_url.trim_end_matches('/');
-    let request_id = crate::services::peer_tokens::next_request_id();
-    let response = crate::services::peer_tokens::send_mcp_request(
-        &state.pool,
-        &state.http,
-        &peer,
-        endpoint,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": "tools/list"
-        }),
-    )
-    .await?
-    .error_for_status()?;
-    let resp = crate::services::peer_tokens::read_jsonrpc_reply(response, &request_id).await?;
+    let mut cursor: Option<Value> = None;
+    let mut tools: Vec<Value> = Vec::new();
 
-    let tools = resp
-        .get("result")
-        .and_then(|result| result.get("tools"))
-        .cloned()
-        .unwrap_or_else(|| json!([]));
+    // Contract §8.1: follow `nextCursor` on every list path. The operator decides
+    // the allowlist from this response, so a peer whose tools span more than one
+    // page must not have the rest of them hidden from that decision.
+    for page in 0..MANIFEST_MAX_PAGES {
+        let params = cursor
+            .as_ref()
+            .map(|cursor| json!({ "cursor": cursor }))
+            .unwrap_or(Value::Null);
+        let request_id = crate::services::peer_tokens::next_request_id();
+        let response = crate::services::peer_tokens::send_mcp_request(
+            &state.pool,
+            &state.http,
+            &peer,
+            endpoint,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/list",
+                "params": params
+            }),
+        )
+        .await?
+        .error_for_status()?;
+        let message =
+            crate::services::peer_tokens::read_jsonrpc_reply(response, &request_id).await?;
+        if let Some(err) = message.get("error").filter(|value| !value.is_null()) {
+            anyhow::bail!("peer MCP error on tools/list: {err}");
+        }
+        let result = message.get("result").cloned().unwrap_or(Value::Null);
+        if let Some(items) = result.get("tools").and_then(Value::as_array) {
+            tools.extend(items.iter().cloned());
+        }
+
+        cursor = crate::services::peer_panels::next_cursor(&result);
+        if cursor.is_none() {
+            break;
+        }
+        if page + 1 == MANIFEST_MAX_PAGES {
+            tracing::warn!(
+                peer_id = %peer.id,
+                "peer manifest tools/list hit page cap ({MANIFEST_MAX_PAGES}); truncating results"
+            );
+        }
+    }
 
     Ok(json!({ "tools": tools }))
 }
