@@ -212,19 +212,23 @@ impl McpClientConnector {
                     )
                     .await;
                 }
-                if peer.access_token_ciphertext.is_some() || self.bearer_token.is_empty() {
+                if self.bearer_token.is_empty() {
                     return crate::services::peer_tokens::resolve_access_token(
                         pool, &self.http, &peer,
                     )
                     .await;
                 }
-                // The per-(workspace, peer) credential outranks the literal in
-                // connector config, so rotating it through the API takes effect
-                // without rewriting connector rows.
-                if let Some(credential) =
-                    crate::services::peer_tokens::workspace_credential(pool, &peer).await?
+                // The literal in connector config is the LAST resort: it stands
+                // in for the process-global env fallback, below the brokered
+                // delegated token (#12), the peer-global OAuth token, and the
+                // per-(workspace, peer) credential (#19). So rotating any of
+                // those through the API takes effect without rewriting
+                // connector rows.
+                if let Some(token) =
+                    crate::services::peer_tokens::resolve_bearer_above_env(pool, &self.http, &peer)
+                        .await?
                 {
-                    return Ok(credential);
+                    return Ok(token);
                 }
                 return Ok(self.bearer_token.clone());
             }

@@ -146,6 +146,37 @@ struct RefreshTokenResp {
     expires_in: Option<i64>,
 }
 
+/// Which precedence tier produced an outbound bearer.
+///
+/// Carried alongside the token so the 401 retry can tell a peer-global OAuth
+/// token — which a peer-global refresh legitimately replaces — from a
+/// workspace-scoped credential, which it does not. Without this the retry has
+/// to guess from `can_refresh(peer)` and silently downgrades a tier-1 or tier-3
+/// bearer to the peer-global grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialTier {
+    /// Tier 1: brokered delegated token for (`peer.workspace_scope`, peer).
+    Delegated,
+    /// Tier 2: peer-global brokered OAuth token (`peers.access_token_ciphertext`).
+    PeerOauth,
+    /// Tier 3: pre-broker static credential for (`peer.workspace_scope`, peer).
+    WorkspaceStatic,
+    /// Tier 4: process-global `IONE_OAUTH_STATIC_BEARER`.
+    EnvStatic,
+}
+
+/// An outbound bearer plus the tier it came from.
+pub struct ResolvedBearer {
+    pub token: String,
+    pub tier: CredentialTier,
+}
+
+impl ResolvedBearer {
+    fn new(token: String, tier: CredentialTier) -> Self {
+        Self { token, tier }
+    }
+}
+
 /// Outbound bearer precedence, highest first:
 ///
 /// 1. the brokered delegated token for (`peer.workspace_scope`, peer) (issue #12),
@@ -170,16 +201,65 @@ pub async fn resolve_access_token(
     http: &reqwest::Client,
     peer: &Peer,
 ) -> Result<String> {
+    Ok(resolve_bearer(pool, http, peer).await?.token)
+}
+
+/// `resolve_access_token`, but reporting which tier produced the bearer.
+async fn resolve_bearer(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    peer: &Peer,
+) -> Result<ResolvedBearer> {
+    match resolve_bearer_above_env_tiers(pool, http, peer).await? {
+        Some(bearer) => Ok(bearer),
+        None => Ok(ResolvedBearer::new(
+            static_bearer()?,
+            CredentialTier::EnvStatic,
+        )),
+    }
+}
+
+/// Tiers 1–3 only: the brokered delegated token, the peer-global OAuth token,
+/// then the per-(workspace, peer) static credential. `Ok(None)` means none of
+/// them applies and the caller supplies the tier-4 last resort.
+async fn resolve_bearer_above_env_tiers(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    peer: &Peer,
+) -> Result<Option<ResolvedBearer>> {
     if let Some(delegated) = crate::services::peer_delegation::resolve(pool, http, peer).await? {
-        return Ok(delegated);
+        return Ok(Some(ResolvedBearer::new(
+            delegated,
+            CredentialTier::Delegated,
+        )));
     }
-    if peer.access_token_ciphertext.is_none() {
-        return pre_broker_bearer(pool, peer).await;
+    if peer.access_token_ciphertext.is_some() {
+        let token = if token_is_fresh(peer) {
+            decrypt_access_token(peer)?
+        } else {
+            refresh_access_token(pool, http, peer).await?
+        };
+        return Ok(Some(ResolvedBearer::new(token, CredentialTier::PeerOauth)));
     }
-    if token_is_fresh(peer) {
-        return decrypt_access_token(peer);
-    }
-    refresh_access_token(pool, http, peer).await
+    Ok(workspace_credential(pool, peer)
+        .await?
+        .map(|credential| ResolvedBearer::new(credential, CredentialTier::WorkspaceStatic)))
+}
+
+/// Tiers 1–3 of `resolve_access_token`, without the tier-4 env fallback.
+///
+/// For callers that carry their own last resort in place of
+/// `IONE_OAUTH_STATIC_BEARER` — the `mcp_client` connector's literal
+/// `bearer_token` from connector config. Keeping the precedence chain in this
+/// module is what stops that caller from re-deriving a partial ordering.
+pub async fn resolve_bearer_above_env(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    peer: &Peer,
+) -> Result<Option<String>> {
+    Ok(resolve_bearer_above_env_tiers(pool, http, peer)
+        .await?
+        .map(|bearer| bearer.token))
 }
 
 /// Like `resolve_access_token` but serializes concurrent refresh for a single peer
@@ -189,17 +269,28 @@ pub async fn resolve_access_token_locked(
     state: &crate::state::AppState,
     peer: &Peer,
 ) -> Result<String> {
+    Ok(resolve_bearer_locked(state, peer).await?.token)
+}
+
+/// `resolve_access_token_locked`, but reporting which tier produced the bearer.
+async fn resolve_bearer_locked(
+    state: &crate::state::AppState,
+    peer: &Peer,
+) -> Result<ResolvedBearer> {
     if let Some(delegated) =
         crate::services::peer_delegation::resolve(&state.pool, &state.http, peer).await?
     {
-        return Ok(delegated);
+        return Ok(ResolvedBearer::new(delegated, CredentialTier::Delegated));
     }
     if peer.access_token_ciphertext.is_none() {
         return pre_broker_bearer(&state.pool, peer).await;
     }
     // Fast path: token is fresh — no need to take the lock.
     if token_is_fresh(peer) {
-        return decrypt_access_token(peer);
+        return Ok(ResolvedBearer::new(
+            decrypt_access_token(peer)?,
+            CredentialTier::PeerOauth,
+        ));
     }
     // Acquire per-peer lock before refresh to serialize concurrent callers.
     let lock = state
@@ -215,13 +306,16 @@ pub async fn resolve_access_token_locked(
         .await
         .ok()
         .flatten();
-    if let Some(ref reloaded) = fresh_peer {
+    let token = if let Some(ref reloaded) = fresh_peer {
         if token_is_fresh(reloaded) {
-            return decrypt_access_token(reloaded);
+            decrypt_access_token(reloaded)?
+        } else {
+            refresh_access_token(&state.pool, &state.http, reloaded).await?
         }
-        return refresh_access_token(&state.pool, &state.http, reloaded).await;
-    }
-    refresh_access_token(&state.pool, &state.http, peer).await
+    } else {
+        refresh_access_token(&state.pool, &state.http, peer).await?
+    };
+    Ok(ResolvedBearer::new(token, CredentialTier::PeerOauth))
 }
 
 pub async fn refresh_access_token(
@@ -304,8 +398,8 @@ pub async fn send_mcp_request_with_session(
 ) -> Result<reqwest::Response> {
     let governor = governor_for(peer.id);
     governor.acquire().await?;
-    let token = resolve_access_token(pool, http, peer).await?;
-    let first = match send_with_token(http, endpoint, body, &token, mcp_session_id).await {
+    let bearer = resolve_bearer(pool, http, peer).await?;
+    let first = match send_with_token(http, endpoint, body, &bearer.token, mcp_session_id).await {
         Ok(response) => {
             record_peer_response(pool, peer, &governor, response.status()).await;
             response
@@ -315,7 +409,7 @@ pub async fn send_mcp_request_with_session(
             return Err(e);
         }
     };
-    if first.status() != StatusCode::UNAUTHORIZED || !can_refresh(peer) {
+    if !peer_global_refresh_applies(first.status(), &bearer, peer) {
         return Ok(first);
     }
 
@@ -344,18 +438,19 @@ pub async fn send_mcp_request_with_state(
 ) -> Result<reqwest::Response> {
     let governor = governor_for(peer.id);
     governor.acquire().await?;
-    let token = resolve_access_token_locked(state, peer).await?;
-    let first = match send_with_token(&state.http, endpoint, body, &token, mcp_session_id).await {
-        Ok(response) => {
-            record_peer_response(&state.pool, peer, &governor, response.status()).await;
-            response
-        }
-        Err(e) => {
-            record_peer_failure(&state.pool, peer, &governor, &e).await;
-            return Err(e);
-        }
-    };
-    if first.status() != StatusCode::UNAUTHORIZED || !can_refresh(peer) {
+    let bearer = resolve_bearer_locked(state, peer).await?;
+    let first =
+        match send_with_token(&state.http, endpoint, body, &bearer.token, mcp_session_id).await {
+            Ok(response) => {
+                record_peer_response(&state.pool, peer, &governor, response.status()).await;
+                response
+            }
+            Err(e) => {
+                record_peer_failure(&state.pool, peer, &governor, &e).await;
+                return Err(e);
+            }
+        };
+    if !peer_global_refresh_applies(first.status(), &bearer, peer) {
         return Ok(first);
     }
 
@@ -435,6 +530,21 @@ fn can_refresh(peer: &Peer) -> bool {
     peer.refresh_token_ciphertext.is_some() && peer.oauth_client_id.is_some()
 }
 
+/// Whether a rejected request should be retried with a freshly refreshed
+/// peer-global OAuth token.
+///
+/// Only when the bearer the peer rejected *was* that peer-global token. A 401
+/// against a tier-1 delegated token or a tier-3 per-workspace credential is
+/// surfaced instead: retrying it with the peer-global grant would present a
+/// credential the operator never scoped to this workspace, which is the silent
+/// downgrade `services::peer_delegation::resolve` and md/design/identity-broker.md
+/// both rule out.
+fn peer_global_refresh_applies(status: StatusCode, bearer: &ResolvedBearer, peer: &Peer) -> bool {
+    status == StatusCode::UNAUTHORIZED
+        && bearer.tier == CredentialTier::PeerOauth
+        && can_refresh(peer)
+}
+
 /// Throttle inbound peer notifications using the peer's governor. Returns false
 /// when the peer has exceeded `max_per_minute` notifications in the trailing
 /// minute, so callers can drop the flood instead of landing it in `stream_events`.
@@ -499,15 +609,21 @@ fn decrypt_access_token(peer: &Peer) -> Result<String> {
     token_crypto::decrypt_token(ciphertext).context("failed to decrypt peer access token")
 }
 
-/// Precedence tiers 2 and 3: the per-(workspace, peer) static credential when
+/// Precedence tiers 3 and 4: the per-(workspace, peer) static credential when
 /// this peer handle carries a workspace scope, else the process-global env
-/// bearer. Peer-global handles (`workspace_scope == None`) skip tier 2 — there
+/// bearer. Peer-global handles (`workspace_scope == None`) skip tier 3 — there
 /// is no workspace to resolve a credential for, and guessing one would present
 /// a credential the operator scoped to a different workspace.
-async fn pre_broker_bearer(pool: &PgPool, peer: &Peer) -> Result<String> {
+async fn pre_broker_bearer(pool: &PgPool, peer: &Peer) -> Result<ResolvedBearer> {
     match workspace_credential(pool, peer).await? {
-        Some(credential) => Ok(credential),
-        None => static_bearer(),
+        Some(credential) => Ok(ResolvedBearer::new(
+            credential,
+            CredentialTier::WorkspaceStatic,
+        )),
+        None => Ok(ResolvedBearer::new(
+            static_bearer()?,
+            CredentialTier::EnvStatic,
+        )),
     }
 }
 

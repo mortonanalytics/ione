@@ -317,6 +317,19 @@ cannot tell which mode IONe is in. An expired delegation with no refresh token
 is treated as absent and falls through; a refresh that reaches the peer and
 fails is propagated rather than silently downgrading to a weaker credential.
 
+The same no-downgrade rule governs the 401 retry in
+`peer_tokens::send_mcp_request_with_session`. The resolver returns the tier it
+used (`peer_tokens::CredentialTier`), and the peer-global refresh-and-retry runs
+only when the rejected bearer was tier 2. A 401 against a tier-1 delegated token
+or a tier-3 per-workspace credential is surfaced to the caller, because retrying
+it with the peer-global grant would present a credential the operator never
+scoped to that workspace.
+
+Tiers 1 and 3 require `peer.workspace_scope`, which only `Peer::scoped_to` sets.
+The paths that set it, and the peer-global paths that deliberately do not, are
+enumerated in [pre-broker-peer-credentials.md](pre-broker-peer-credentials.md)
+under "Workspace scope".
+
 ## Known limitation: RLS is inert as deployed
 
 **AC-15 is not satisfied, and no code in this repo makes it satisfiable.**

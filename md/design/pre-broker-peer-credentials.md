@@ -83,39 +83,73 @@ Audit verbs: `peer_credential.created`, `peer_credential.rotated`,
 
 ## Precedence
 
-Outbound bearer resolution, highest first
-(`services::peer_tokens::resolve_access_token`):
+Outbound bearer resolution, highest first. The canonical statement lives on the
+`services::peer_tokens::resolve_access_token` doc comment; #12 added tier 1 on
+top of the three tiers this design shipped with:
 
-1. the peer's brokered OAuth access token (`peers.access_token_ciphertext`),
-2. the pre-broker credential for the request's workspace scope,
-3. the process-global `IONE_OAUTH_STATIC_BEARER` env fallback.
+1. the brokered delegated token for the request's workspace scope (#12),
+2. the peer's brokered OAuth access token (`peers.access_token_ciphertext`),
+3. the pre-broker credential for the request's workspace scope (#19),
+4. the process-global `IONE_OAUTH_STATIC_BEARER` env fallback.
 
-**OAuth outranks the static credential deliberately.** When #12 lands and a peer
-gains a brokered token, outbound auth switches on the very next request with no
-flag day and no operator action; the now-dormant static credential can be deleted
+**OAuth outranks the static credential deliberately.** When a peer gains a
+brokered token, outbound auth switches on the very next request with no flag day
+and no operator action; the now-dormant static credential can be deleted
 whenever convenient. The reverse ordering would require every operator to delete
 credentials in lockstep with the broker rollout.
 
-In the `mcp_client` connector the credential also outranks the legacy
-`bearer_token` literal in connector config, so rotating through the API takes
-effect without rewriting connector rows.
+In the `mcp_client` connector the legacy `bearer_token` literal in connector
+config stands in for tier 4 rather than for tier 2: the delegated token, the
+peer-global OAuth token, and the per-(workspace, peer) credential all outrank
+it, so rotating any of them through the API takes effect without rewriting
+connector rows.
+
+**A 401 never downgrades the tier.** The refresh-and-retry in
+`send_mcp_request_with_session` runs only when the rejected bearer was the
+peer-global OAuth token (tier 2), which is the only credential a peer-global
+refresh legitimately replaces. A 401 against a tier-1 or tier-3 bearer is
+surfaced to the caller; retrying it with the peer-global grant would present a
+credential the operator never scoped to this workspace. The resolver reports the
+tier it used (`peer_tokens::CredentialTier`) so the retry does not have to infer
+it.
 
 ## Workspace scope
 
 The credential is per `(workspace, peer)`, so outbound auth must know which
 workspace a request is being made for. `models::Peer` carries a
 `workspace_scope: Option<Uuid>` field — not a `peers` column, just the scope the
-handle was resolved under. `WorkspacePeerBindingRepo::list_active_peers_for_workspace`
-tags every peer it returns, which covers the workspace data paths (table data,
-chart data, map layers, table/chart/document panels, federation tool and resource
-calls). `routes::peers::subscribe_peer`, the binding refresh path, and the
-`mcp_client` connector set it explicitly.
+handle was resolved under, set by `Peer::scoped_to`. A handle without it cannot
+resolve tier 1 or tier 3 at all, so every path that has a workspace must tag its
+handle or it silently presents a peer-global credential instead.
 
-Peer-global request paths have no workspace and therefore stay on tiers 1 and 3:
-the registration-time `tools/list` manifest fetch (which runs before any workspace
-is bound) and the long-lived SSE notification session (one per peer, shared across
-every workspace bound to it). Guessing a workspace on those paths would present a
-credential the operator scoped elsewhere.
+`WorkspacePeerBindingRepo::list_active_peers_for_workspace` tags every peer it
+returns, which covers the workspace data paths (table data, chart data, map
+layers, table/chart/document panels, and `federation::workspace_context_slices`).
+These set it explicitly:
+
+| path | scope source |
+| ---- | ------------ |
+| `federation::route_tool_call_with_session` (federated `tools/call`, and the manifest lookup it does first) | the calling workspace |
+| `federation::execute_pending_tool_call` (approved peer-tool execution) | `pending.workspace_id` |
+| `federation::workspace_peer_manifest` / `workspace_peer_resources` | the requested workspace |
+| `federation::expand_tool_schema` | the calling workspace |
+| `routes::peers::subscribe_peer` | the subscribing workspace |
+| `services::workspace_peer_binding` refresh | `binding.workspace_id` |
+| `connectors::mcp_client` | the connector's `workspace_id` |
+
+Peer-global request paths have no workspace and therefore resolve only on tiers 2
+and 4 — they skip the workspace-scoped tiers 1 and 3:
+
+- the registration-time `tools/list` manifest fetch, which runs before any
+  workspace is bound;
+- boot-time `federation::hydrate_manifest_cache` and the notification-driven
+  `refresh_manifest_if_changed` / admin `force_refresh_manifest`, which run over
+  a peer regardless of which workspaces are bound to it;
+- the long-lived SSE notification session (`connectors::peer_session`), one per
+  peer, shared across every workspace bound to it.
+
+Guessing a workspace on those paths would present a credential the operator
+scoped elsewhere.
 
 Fail-closed poll behavior is unchanged: `mcp_client` still refuses to poll without
 an Active binding (TT-A06). A credential does not substitute for a binding.
@@ -126,3 +160,11 @@ an Active binding (TT-A06). A credential does not substitute for a binding.
 Covers header presentation, workspace isolation on a shared peer, encryption at
 rest plus non-echo on every read surface, rotation without a migration, the
 precedence rule, audit-without-secrets, `peers:manage` 403, and cross-org 404.
+Every one of them drives outbound auth through the `/table-data` route.
+
+`tests/credential_presentation_integration.rs` — DB-backed, `#[ignore]`, serial.
+Asserts the same header on the **federation** paths specifically, because
+`/table-data` alone cannot catch a federation path that forgot to scope its peer
+handle: federated `tools/call` (static credential and delegated token), workspace
+isolation on that path, approved peer-tool execution, the no-downgrade rule on a
+401, the connector's delegated-over-literal precedence, and the slice-cache TTL.

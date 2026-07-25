@@ -136,6 +136,12 @@ async fn connect_and_read(
     idle_timeout: Duration,
     state_tx: &watch::Sender<SessionState>,
 ) -> anyhow::Result<()> {
+    // Peer-global by design: one long-lived notification session per peer,
+    // shared by every workspace bound to it. The handle is therefore left
+    // unscoped and this session CANNOT present a workspace-scoped credential
+    // (delegated token #12 or per-(workspace, peer) credential #19) — picking
+    // one of the bound workspaces would present a credential the operator
+    // scoped elsewhere. It resolves on the peer-global OAuth / env tiers.
     let peer = PeerRepo::new(state.pool.clone())
         .get(peer_id)
         .await?
