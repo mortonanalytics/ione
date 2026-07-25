@@ -104,14 +104,66 @@ peer-global OAuth token, and the per-(workspace, peer) credential all outrank
 it, so rotating any of them through the API takes effect without rewriting
 connector rows.
 
-**A 401 never downgrades the tier.** The refresh-and-retry in
-`send_mcp_request_with_session` runs only when the rejected bearer was the
-peer-global OAuth token (tier 2), which is the only credential a peer-global
-refresh legitimately replaces. A 401 against a tier-1 or tier-3 bearer is
-surfaced to the caller; retrying it with the peer-global grant would present a
-credential the operator never scoped to this workspace. The resolver reports the
-tier it used (`peer_tokens::CredentialTier`) so the retry does not have to infer
-it.
+**A 401 never downgrades the tier.** The refresh-and-retry runs only when the
+rejected bearer was the peer-global OAuth token (tier 2), which is the only
+credential a peer-global refresh legitimately replaces. A 401 against a tier-1
+or tier-3 bearer is surfaced to the caller; retrying it with the peer-global
+grant would present a credential the operator never scoped to this workspace.
+The resolver reports the tier it used (`peer_tokens::CredentialTier`), and every
+outbound path asks the same question of it —
+`peer_tokens::ResolvedBearer::allows_peer_global_refresh` — rather than
+inferring the answer from `can_refresh(peer)`, which cannot see which tier was
+used. Both outbound paths are bound by this:
+
+| path | retry gate |
+| ---- | ---------- |
+| `peer_tokens::send_mcp_request_with_session` / `_with_state` (federation, panels, slices) | `peer_global_refresh_applies` |
+| `connectors::mcp_client::jsonrpc_call_once` (connector poll and invoke) | `try_refresh_bearer_token` |
+
+The connector path is not an edge case: `services::peer::auto_create_connector_for_peer`
+writes connector config with `mcp_url`/`peer_id`/`workspace_id` and **no**
+`bearer_token`, so every subscribed peer resolves through the full precedence
+chain and a tier-1 delegated token is the ordinary bearer there.
+
+## Cache scope
+
+A peer may answer `tools/list`, `resources/list` and `slice://` differently per
+credential — that is what per-(workspace, peer) delegation is for. So
+`AppState::peer_manifest_cache` and `AppState::peer_slice_cache` are keyed by
+`state::PeerCacheKey` = (`peer_id`, `Option<workspace_id>`), where the workspace
+is the handle's `workspace_scope`, i.e. exactly the input outbound auth resolves
+from. A peer-global fetch and a workspace-scoped fetch never share an entry, and
+two workspaces never share one.
+
+The key uses the resolution *input* rather than the resolved bearer: keying on
+the bearer would mean resolving (and possibly refreshing) a token before every
+cache read and putting credential material in a map key, and it would only ever
+merge entries the workspace key already keeps apart safely.
+
+Consequences:
+
+- `peers.last_manifest_jsonb` is a single peer-global column, so only a
+  peer-global fetch writes it and only a peer-global read falls back to it. A
+  workspace-scoped fetch that fails with a cold cache surfaces the error instead
+  of being handed a listing fetched under a credential it was never granted.
+  Boot rehydration (`federation::hydrate_manifest_cache`) therefore loads it
+  under the peer-global key only.
+- A peer-global manifest refresh — the scheduler tick, `tools/list_changed`,
+  `resources/list_changed`, and the admin force-refresh — drops every
+  workspace-scoped entry for that peer, since none of them can be re-fetched
+  without its own credential. `resources/updated` drops every slice entry for
+  the peer for the same reason.
+- The key space is (workspaces × peers), so it is bounded the same way the
+  slice cache already was: slice entries are dropped at `SLICE_TTL_SECONDS`, and
+  manifest entries at `MANIFEST_RETENTION_SECONDS` (one hour), which is past the
+  five-minute TTL because an over-TTL entry is still served, marked `stale`,
+  when the peer is unreachable.
+- `federation::reindex_peer_catalog` writes org-scoped `peer_catalog_entries`
+  rows, so its `sample_queries` may only come from the **peer-global** slice. It
+  fetches one when the peer-global manifest cache is fresh (i.e. the caller just
+  completed a peer-global round trip) and otherwise keeps the values already
+  indexed, rather than emptying them whenever the slice cache is cold — which
+  would flip `content_hash` and rewrite every row on every tick.
 
 ## Workspace scope
 
@@ -168,3 +220,17 @@ Asserts the same header on the **federation** paths specifically, because
 handle: federated `tools/call` (static credential and delegated token), workspace
 isolation on that path, approved peer-tool execution, the no-downgrade rule on a
 401, the connector's delegated-over-literal precedence, and the slice-cache TTL.
+
+The same file covers cache scope. Those tests deliberately do **not** pre-seed
+the cache — a pre-seeded cache is what made the peer-id-only key invisible to
+every other test in the file — but drive the real fetch against a stub peer that
+answers `tools/list`, `resources/list` and `slice://` differently per bearer:
+
+- `workspace_manifest_is_not_served_to_another_workspace`
+- `workspace_context_slice_is_not_served_to_another_workspace`
+- `workspace_scoped_manifest_is_not_persisted_or_rehydrated_for_other_workspaces`
+  (asserts `last_manifest_jsonb` stays null after a workspace-scoped fetch, then
+  that a rehydrated peer-global manifest is not served to a workspace)
+- `connector_does_not_retry_a_401_delegated_token_with_the_peer_global_token`
+  and its tier-3 twin, asserting the exact bearers the peer saw, in order
+- `catalog_reindex_keeps_sample_queries_when_the_slice_cache_is_cold`

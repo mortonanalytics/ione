@@ -175,6 +175,28 @@ impl ResolvedBearer {
     fn new(token: String, tier: CredentialTier) -> Self {
         Self { token, tier }
     }
+
+    /// A bearer supplied by the caller in place of the tier-4 env fallback —
+    /// the `mcp_client` connector's config `bearer_token` literal. It sits at
+    /// tier 4, so a 401 against it can no more trigger a peer-global refresh
+    /// than a 401 against `IONE_OAUTH_STATIC_BEARER` can.
+    pub fn last_resort(token: String) -> Self {
+        Self::new(token, CredentialTier::EnvStatic)
+    }
+
+    /// Whether a 401 against this bearer may be retried with a freshly
+    /// refreshed peer-global OAuth token.
+    ///
+    /// True only for tier 2, the one credential a peer-global refresh
+    /// legitimately replaces. Retrying a tier-1 delegated token or a tier-3
+    /// per-workspace credential with the peer-global grant would present a
+    /// credential the operator never scoped to this workspace — the silent
+    /// downgrade `md/design/pre-broker-peer-credentials.md` rules out. Every
+    /// outbound path asks this question here rather than re-deriving it from
+    /// `can_refresh(peer)`, which cannot see which tier was used.
+    pub fn allows_peer_global_refresh(&self) -> bool {
+        self.tier == CredentialTier::PeerOauth
+    }
 }
 
 /// Outbound bearer precedence, highest first:
@@ -205,7 +227,7 @@ pub async fn resolve_access_token(
 }
 
 /// `resolve_access_token`, but reporting which tier produced the bearer.
-async fn resolve_bearer(
+pub async fn resolve_bearer(
     pool: &PgPool,
     http: &reqwest::Client,
     peer: &Peer,
@@ -251,15 +273,14 @@ async fn resolve_bearer_above_env_tiers(
 /// For callers that carry their own last resort in place of
 /// `IONE_OAUTH_STATIC_BEARER` — the `mcp_client` connector's literal
 /// `bearer_token` from connector config. Keeping the precedence chain in this
-/// module is what stops that caller from re-deriving a partial ordering.
+/// module is what stops that caller from re-deriving a partial ordering, and
+/// reporting the tier is what stops it from re-deriving the 401 retry rule.
 pub async fn resolve_bearer_above_env(
     pool: &PgPool,
     http: &reqwest::Client,
     peer: &Peer,
-) -> Result<Option<String>> {
-    Ok(resolve_bearer_above_env_tiers(pool, http, peer)
-        .await?
-        .map(|bearer| bearer.token))
+) -> Result<Option<ResolvedBearer>> {
+    resolve_bearer_above_env_tiers(pool, http, peer).await
 }
 
 /// Like `resolve_access_token` but serializes concurrent refresh for a single peer
@@ -531,18 +552,11 @@ fn can_refresh(peer: &Peer) -> bool {
 }
 
 /// Whether a rejected request should be retried with a freshly refreshed
-/// peer-global OAuth token.
-///
-/// Only when the bearer the peer rejected *was* that peer-global token. A 401
-/// against a tier-1 delegated token or a tier-3 per-workspace credential is
-/// surfaced instead: retrying it with the peer-global grant would present a
-/// credential the operator never scoped to this workspace, which is the silent
-/// downgrade `services::peer_delegation::resolve` and md/design/identity-broker.md
-/// both rule out.
+/// peer-global OAuth token: only a 401, only against the peer-global token
+/// itself (`ResolvedBearer::allows_peer_global_refresh`), and only when the peer
+/// actually holds refresh material.
 fn peer_global_refresh_applies(status: StatusCode, bearer: &ResolvedBearer, peer: &Peer) -> bool {
-    status == StatusCode::UNAUTHORIZED
-        && bearer.tier == CredentialTier::PeerOauth
-        && can_refresh(peer)
+    status == StatusCode::UNAUTHORIZED && bearer.allows_peer_global_refresh() && can_refresh(peer)
 }
 
 /// Throttle inbound peer notifications using the peer's governor. Returns false

@@ -20,7 +20,11 @@
 use std::net::SocketAddr;
 
 use chrono::Utc;
-use ione::{auth::AuthContext, services::federation::PeerManifest, state::AppState};
+use ione::{
+    auth::AuthContext,
+    services::federation::PeerManifest,
+    state::{AppState, PeerCacheKey},
+};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -1089,7 +1093,7 @@ async fn tool_invoke_gated() {
         })
     };
     state.peer_manifest_cache.insert(
-        peer_ids[0],
+        PeerCacheKey::for_workspace(peer_ids[0], workspace_id),
         PeerManifest {
             peer_id: peer_ids[0],
             tools: vec![tool_for("get_forecast")],
@@ -1100,7 +1104,7 @@ async fn tool_invoke_gated() {
         },
     );
     state.peer_manifest_cache.insert(
-        peer_ids[1],
+        PeerCacheKey::for_workspace(peer_ids[1], workspace_id),
         PeerManifest {
             peer_id: peer_ids[1],
             tools: vec![tool_for("run_query")],
@@ -1208,7 +1212,7 @@ async fn approval_gated_peer_tool_call_executes_once_on_retry() {
     .expect("insert peer binding failed");
 
     state.peer_manifest_cache.insert(
-        peer_id,
+        PeerCacheKey::for_workspace(peer_id, workspace_id),
         PeerManifest {
             peer_id,
             tools: vec![json!({
