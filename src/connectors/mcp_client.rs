@@ -71,9 +71,10 @@ impl McpClientConnector {
         params: Value,
         mcp_session_id: Option<&str>,
     ) -> anyhow::Result<Value> {
+        let request_id = crate::services::peer_tokens::next_request_id();
         let body = json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": request_id,
             "method": method,
             "params": params,
         });
@@ -84,20 +85,24 @@ impl McpClientConnector {
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             let Some(token) = self.try_refresh_bearer_token().await? else {
-                return self.handle_jsonrpc_response(resp).await;
+                return self.handle_jsonrpc_response(resp, &request_id).await;
             };
             resp = self.send_jsonrpc(&body, &token, mcp_session_id).await?;
         }
 
-        self.handle_jsonrpc_response(resp).await
+        self.handle_jsonrpc_response(resp, &request_id).await
     }
 
     async fn initialize_session(&self) -> anyhow::Result<String> {
+        let request_id = crate::services::peer_tokens::next_request_id();
         let body = json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": request_id,
             "method": "initialize",
-            "params": { "protocolVersion": "2025-11-25", "capabilities": {} },
+            "params": {
+                "protocolVersion": crate::services::peer_tokens::MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+            },
         });
         let token = self.resolve_bearer_token(false).await?;
         let resp = self.send_jsonrpc(&body, &token, None).await?;
@@ -106,11 +111,12 @@ impl McpClientConnector {
             .get("MCP-Session-Id")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let value: Value = resp.error_for_status()?.json().await?;
+        let resp = resp.error_for_status()?;
+        let value = crate::services::peer_tokens::read_jsonrpc_reply(resp, &request_id).await?;
         if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
             anyhow::bail!("peer initialize error: {}", error);
         }
-        header_session
+        let session_id = header_session
             .or_else(|| {
                 value
                     .get("result")
@@ -118,10 +124,33 @@ impl McpClientConnector {
                     .and_then(Value::as_str)
                     .map(str::to_string)
             })
-            .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))
+            .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))?;
+        self.send_initialized_notification(&session_id).await;
+        Ok(session_id)
     }
 
-    async fn handle_jsonrpc_response(&self, resp: reqwest::Response) -> anyhow::Result<Value> {
+    /// MCP lifecycle: the client announces it is initialized before issuing any
+    /// other request. Best-effort — a peer that rejects the notification must
+    /// not fail an otherwise-good handshake.
+    async fn send_initialized_notification(&self, mcp_session_id: &str) {
+        let body = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        let token = match self.resolve_bearer_token(false).await {
+            Ok(token) => token,
+            Err(e) => {
+                warn!("mcp_client: notifications/initialized token resolve failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = self.send_jsonrpc(&body, &token, Some(mcp_session_id)).await {
+            warn!("mcp_client: notifications/initialized send failed: {e}");
+        }
+    }
+
+    async fn handle_jsonrpc_response(
+        &self,
+        resp: reqwest::Response,
+        request_id: &Value,
+    ) -> anyhow::Result<Value> {
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             anyhow::bail!("peer auth error: HTTP {}", status.as_u16());
@@ -130,7 +159,7 @@ impl McpClientConnector {
             anyhow::bail!("peer returned HTTP {}", status.as_u16());
         }
 
-        let val: Value = resp.json().await?;
+        let val = crate::services::peer_tokens::read_jsonrpc_reply(resp, request_id).await?;
 
         if let Some(err) = val.get("error") {
             if !err.is_null() {
@@ -147,7 +176,18 @@ impl McpClientConnector {
         token: &str,
         mcp_session_id: Option<&str>,
     ) -> anyhow::Result<reqwest::Response> {
-        let mut req = self.http.post(&self.mcp_url).json(body);
+        let mut req = self
+            .http
+            .post(&self.mcp_url)
+            .header(
+                reqwest::header::ACCEPT,
+                crate::services::peer_tokens::MCP_ACCEPT,
+            )
+            .header(
+                crate::services::peer_tokens::MCP_PROTOCOL_VERSION_HEADER,
+                crate::services::peer_tokens::MCP_PROTOCOL_VERSION,
+            )
+            .json(body);
         if !token.is_empty() {
             req = req.bearer_auth(token);
         }

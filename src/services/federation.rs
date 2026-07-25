@@ -680,6 +680,23 @@ async fn fetch_manifest(state: &AppState, peer: &Peer) -> anyhow::Result<PeerMan
 /// infinite cursor would otherwise loop forever; this caps the damage.
 const MAX_PAGINATION_PAGES: usize = 50;
 
+/// The cursor for the next page, or `None` when the peer signalled the last one.
+///
+/// `nextCursor` is the spec spelling; `cursor` is accepted as an alias. Both are
+/// terminal when absent, JSON `null`, or an empty string. The null case is not
+/// cosmetic: the frozen app-integration contract (§8.1) lets a conforming peer
+/// end pagination with an explicit `"nextCursor": null`, and `Value::get` returns
+/// `Some(Value::Null)` for that — so treating "key present" as "keep paging"
+/// re-requests the last page until the page cap and duplicates every item on it.
+fn next_cursor(result: &Value) -> Option<Value> {
+    result
+        .get("nextCursor")
+        .or_else(|| result.get("cursor"))
+        .filter(|value| !value.is_null())
+        .filter(|value| value.as_str() != Some(""))
+        .cloned()
+}
+
 async fn paginated_list(
     state: &AppState,
     peer: &Peer,
@@ -697,12 +714,7 @@ async fn paginated_list(
         if let Some(items) = result.get(field).and_then(Value::as_array) {
             out.extend(items.iter().cloned());
         }
-        cursor = result.get("nextCursor").cloned().or_else(|| {
-            result
-                .get("cursor")
-                .filter(|value| !value.is_null())
-                .cloned()
-        });
+        cursor = next_cursor(&result);
         if cursor.is_none() {
             break;
         }
@@ -741,9 +753,10 @@ async fn send_jsonrpc_once(
     mcp_session_id: Option<&str>,
 ) -> anyhow::Result<Value> {
     let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
+    let request_id = crate::services::peer_tokens::next_request_id();
     let body = json!({
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": request_id,
         "method": method,
         "params": params,
     });
@@ -759,7 +772,7 @@ async fn send_jsonrpc_once(
     if !status.is_success() {
         anyhow::bail!("peer returned HTTP {}", status.as_u16());
     }
-    let value: Value = resp.json().await?;
+    let value = crate::services::peer_tokens::read_jsonrpc_reply(resp, &request_id).await?;
     if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
         anyhow::bail!("peer MCP error: {}", error);
     }
@@ -768,11 +781,15 @@ async fn send_jsonrpc_once(
 
 async fn initialize_peer_session(state: &AppState, peer: &Peer) -> anyhow::Result<String> {
     let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
+    let request_id = crate::services::peer_tokens::next_request_id();
     let body = json!({
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": request_id,
         "method": "initialize",
-        "params": { "protocolVersion": "2025-11-25", "capabilities": {} },
+        "params": {
+            "protocolVersion": crate::services::peer_tokens::MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+        },
     });
     let resp = crate::services::peer_tokens::send_mcp_request(
         &state.pool,
@@ -787,11 +804,12 @@ async fn initialize_peer_session(state: &AppState, peer: &Peer) -> anyhow::Resul
         .get("MCP-Session-Id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let value: Value = resp.error_for_status()?.json().await?;
+    let resp = resp.error_for_status()?;
+    let value = crate::services::peer_tokens::read_jsonrpc_reply(resp, &request_id).await?;
     if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
         anyhow::bail!("peer initialize error: {}", error);
     }
-    header_session
+    let session_id = header_session
         .or_else(|| {
             value
                 .get("result")
@@ -799,7 +817,16 @@ async fn initialize_peer_session(state: &AppState, peer: &Peer) -> anyhow::Resul
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
-        .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))
+        .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))?;
+    crate::services::peer_tokens::send_initialized_notification(
+        &state.pool,
+        &state.http,
+        peer,
+        &endpoint,
+        &session_id,
+    )
+    .await;
+    Ok(session_id)
 }
 
 fn looks_like_missing_session(error: &anyhow::Error) -> bool {
@@ -1323,6 +1350,25 @@ mod tests {
             derive_prefix("Very Long Peer Name With Spaces", &HashSet::new()),
             "very_long_peer_n"
         );
+    }
+
+    #[test]
+    fn next_cursor_treats_null_and_empty_as_terminal() {
+        assert_eq!(
+            next_cursor(&json!({ "tools": [], "nextCursor": "page-2" })),
+            Some(json!("page-2"))
+        );
+        assert_eq!(
+            next_cursor(&json!({ "tools": [], "nextCursor": null })),
+            None
+        );
+        assert_eq!(next_cursor(&json!({ "tools": [], "nextCursor": "" })), None);
+        assert_eq!(next_cursor(&json!({ "tools": [] })), None);
+        assert_eq!(
+            next_cursor(&json!({ "tools": [], "cursor": "legacy" })),
+            Some(json!("legacy"))
+        );
+        assert_eq!(next_cursor(&json!({ "tools": [], "cursor": null })), None);
     }
 
     #[test]

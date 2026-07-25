@@ -41,6 +41,7 @@ pub async fn app_with_state(pool: PgPool) -> (Router, state::AppState) {
         state::AppState::new_parts(config, pool, default_user_id, default_workspace_id);
     services::interaction_sink::spawn_writer(app_state.pool.clone(), interaction_rx);
     services::federation::hydrate_manifest_cache(&app_state).await;
+    connectors::peer_session::start_sessions_for_active_peers(&app_state).await;
     let router = routes::router(app_state.clone());
     (router, app_state)
 }

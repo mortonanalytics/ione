@@ -474,21 +474,21 @@ async fn fetch_manifest_over_mcp(state: &AppState, peer_id: Uuid) -> anyhow::Res
     }
 
     let endpoint = peer.mcp_url.trim_end_matches('/');
-    let resp: Value = crate::services::peer_tokens::send_mcp_request(
+    let request_id = crate::services::peer_tokens::next_request_id();
+    let response = crate::services::peer_tokens::send_mcp_request(
         &state.pool,
         &state.http,
         &peer,
         endpoint,
         &json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": request_id,
             "method": "tools/list"
         }),
     )
     .await?
-    .error_for_status()?
-    .json()
-    .await?;
+    .error_for_status()?;
+    let resp = crate::services::peer_tokens::read_jsonrpc_reply(response, &request_id).await?;
 
     let tools = resp
         .get("result")
