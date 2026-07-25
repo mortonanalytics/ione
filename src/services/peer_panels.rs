@@ -97,7 +97,10 @@ pub async fn list_peer_resources(
 /// `Value::get` returns `Some(Value::Null)` for an explicit `"nextCursor": null`,
 /// so treating "key present" as "keep paging" re-requests the final page until
 /// the page cap and duplicates every item on it.
-fn next_cursor(result: &Value) -> Option<Value> {
+///
+/// `pub(crate)` so the peer-manifest review path (`routes/peers.rs`) follows the
+/// same rule rather than growing a third copy of it.
+pub(crate) fn next_cursor(result: &Value) -> Option<Value> {
     result
         .get("nextCursor")
         .or_else(|| result.get("cursor"))
