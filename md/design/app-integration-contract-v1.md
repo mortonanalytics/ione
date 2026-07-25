@@ -143,7 +143,7 @@ X-IONe-Signature: t=<unix_seconds>,v1=<hmac_sha256_hex>
 | Header name | `X-IONe-Signature` | **Enforced** — `webhooks.rs:165` |
 | Header grammar | comma-separated `key=value` pairs; only `t` and `v1` permitted | **Enforced** — `webhooks.rs:171-178`; any unknown key, or a repeated `t`/`v1`, is rejected |
 | `t` | Unix seconds, base-10 signed integer | **Enforced** — `webhooks.rs:180-182` |
-| `v1` | Lowercase hex, **exactly 64 characters** decoding to 32 bytes | **Enforced** — `webhooks.rs:184-190` |
+| `v1` | Hex, **exactly 64 characters** decoding to 32 bytes. Case-**insensitive**: `hex::decode` accepts `a-f` and `A-F`. Peers should emit lowercase; uppercase is accepted and will not be rejected in v1. | **Enforced** — `webhooks.rs` |
 | Signed bytes | `t_ascii ++ b"." ++ raw_request_body` | **Enforced** — `webhooks.rs:200-202` |
 | Algorithm | HMAC-SHA256, key = the provisioned `signingSecret` (its ASCII bytes) | **Enforced** — `webhooks.rs:199-203` |
 | Comparison | Constant-time | **Enforced** — `webhooks.rs:204` (`subtle::ConstantTimeEq`) |
