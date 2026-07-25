@@ -62,8 +62,13 @@ CREATE INDEX wpd_org ON workspace_peer_delegations (org_id);
 -- Org-isolation RLS, consistent with the other org-scoped tables. Inert today
 -- (`app.current_org_id` is never set by the application, and the application
 -- role owns the table while no table declares FORCE ROW LEVEL SECURITY); the
--- application `WHERE org_id = $n` predicate is the real guard. See the
--- "RLS activation" limitation in md/design/identity-broker.md.
+-- application `WHERE org_id = $n` predicate is the real guard.
+--
+-- UPDATED by migration 0050: this table now declares FORCE ROW LEVEL SECURITY,
+-- and the policy is genuinely enforced for connections made as the restricted
+-- `ione_app` role. It remains bypassed under the default `ione` role, which is
+-- SUPERUSER + BYPASSRLS. See the "RLS activation" section of
+-- md/design/identity-broker.md for exactly what is and is not covered.
 ALTER TABLE workspace_peer_delegations ENABLE ROW LEVEL SECURITY;
 CREATE POLICY wpd_org_isolation ON workspace_peer_delegations
     USING (org_id = current_setting('app.current_org_id', true)::uuid);
