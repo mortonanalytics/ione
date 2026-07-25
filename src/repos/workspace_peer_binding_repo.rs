@@ -182,7 +182,8 @@ impl WorkspacePeerBindingRepo {
                     p.status, p.created_at, p.oauth_client_id,
                     p.access_token_hash, p.refresh_token_hash,
                     p.access_token_ciphertext, p.refresh_token_ciphertext,
-                    p.token_expires_at, p.tool_allowlist, p.tool_prefix,
+                    p.token_expires_at, p.tool_allowlist, p.tool_allowlist_configured,
+                    p.tool_prefix,
                     p.session_status, p.last_connected_at, p.last_session_error,
                     p.last_manifest_jsonb
              FROM workspace_peer_bindings b

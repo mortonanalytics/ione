@@ -121,7 +121,7 @@ authorization server:
 
 | Endpoint | Purpose |
 |---|---|
-| `/.well-known/oauth-authorization-server` | Discovery metadata |
+| `/.well-known/oauth-authorization-server` | Discovery metadata, resolved against the **origin** of `mcp_url` per RFC 8414 §3. `{mcp_url}/.well-known/…` is accepted as a deprecated fallback and logs a warning. |
 | `/oauth/authorize` | Authorization endpoint |
 | `/oauth/token` | Token endpoint, supports the `refresh_token` grant |
 | `/oauth/revoke` | Token revocation |
@@ -129,27 +129,35 @@ authorization server:
 IONe stores delegated tokens per `(workspace, peer)` and refreshes them
 automatically. The resulting access token is presented per §1.
 
-> **`registration_endpoint` is required.** The discovery document **must**
-> include `registration_endpoint` (RFC 7591 dynamic client registration).
-> `PeerDiscovery` (`src/services/peer_oauth.rs:13`) deserializes it as a
-> non-optional field, so a peer that omits it fails the join with
-> `400 "invalid peer metadata"` before any authorization step — even though the
-> table above did not list it at freeze time. Recorded here because two
-> independent reviews hit it against otherwise-conforming fixtures.
+> **How IONe obtains a `client_id`.** A peer must offer **one** of:
 >
-> IONe currently ignores `issuer` and `revocation_endpoint` from the document.
-> Making `registration_endpoint` optional (falling back to CIMD or a
-> pre-registered client) is the better long-term fix and is tracked as a
-> follow-up; until then, publish it.
+> - `registration_endpoint` — RFC 7591 dynamic client registration, **or**
+> - `client_id_metadata_document_supported: true` (CIMD) — the client metadata
+>   URL is itself the `client_id`, and no registration call is made.
+>
+> Publishing **neither** fails the join with `400`, naming both options.
+> Precedence is `registration_endpoint` first, CIMD as the fallback — not the
+> other way round: IONe's own authorization server advertises both but resolves
+> `client_id` against its registered-client table, so preferring CIMD would break
+> IONe↔IONe federation.
+>
+> At freeze time `registration_endpoint` was **required** —
+> `PeerDiscovery` declared it non-optional, so a CIMD-only peer could not join at
+> all. Corrected 2026-07-25; relaxing a requirement is additive, so a peer that
+> already publishes one is unaffected.
 
-**Enforcement status:** `authorization_endpoint`, `token_endpoint` **and**
-`registration_endpoint` are all **Enforced by deserialization** —
-`PeerDiscovery` (`src/services/peer_oauth.rs:11-13`) declares all three
-non-optional, so a document missing any of them fails the join with
-`400 bad_request` before any authorization step. `issuer` and
-`revocation_endpoint` are **read but unused**: the `/oauth/revoke` row above
-describes what a peer should publish, not something IONe currently calls.
-**Enforced** for the resulting header shape.
+**Enforcement status:** `authorization_endpoint` and `token_endpoint` are
+**Enforced by deserialization** (`src/services/peer_oauth.rs`, `PeerDiscovery`) —
+a document missing either fails the join before any authorization step.
+`registration_endpoint` is **optional**, subject to the `client_id` rule above.
+`issuer` and `revocation_endpoint` are **optional and, when present, Enforced**:
+they must resolve to the peer's own host, the same rule the other endpoints
+carry (`verify_peer_endpoint_hosts`). IONe does not currently *call*
+`revocation_endpoint`. **Enforced** for the resulting header shape.
+
+> The freeze-time text claimed `issuer` and `revocation_endpoint` were "read but
+> unused". They were not read at all — `PeerDiscovery` declared four fields and
+> serde silently discarded the rest. Both are now deserialized and host-checked.
 
 ---
 

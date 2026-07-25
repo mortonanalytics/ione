@@ -1191,25 +1191,29 @@ fn looks_like_missing_session(error: &anyhow::Error) -> bool {
 /// which is also what promotes the peer to Active, so an operator who authorizes
 /// a narrow list has stated the full set of tools any caller may invoke.
 ///
-/// **An empty array means "no allowlist configured", not "nothing allowed."**
-/// `migrations/0016_peers_oauth.sql` defaults the column to `'[]'`, and nothing
-/// distinguishes that default from an operator who authorized zero tools — the
-/// column is `NOT NULL DEFAULT '[]'`, so there is no "unset" value to read. Every
-/// peer seeded directly (rather than through the authorize route) therefore
-/// carries `'[]'`, and reading that as fail-closed would deny every federated
-/// call made by such a peer. Fail-closed is the better posture and needs a
-/// schema change to reach — a nullable column, or a separate
-/// `allowlist_configured` flag — so "unset" and "empty" stop being the same
-/// bytes. Pinned by
-/// `tests/tool_allowlist_integration.rs::an_empty_allowlist_is_treated_as_unconfigured`.
+/// An empty allowlist is read against `peers.tool_allowlist_configured`
+/// (`migrations/0049`), which `PeerRepo::set_allowlist` — the only writer — sets
+/// true. That separates two cases the bytes alone could not:
 ///
-/// A non-empty allowlist *is* enforced, on every federated invocation path.
+/// - **configured and empty** ⇒ the operator authorized this peer to invoke
+///   *nothing*. Fail closed.
+/// - **not configured** ⇒ the row carries the `NOT NULL DEFAULT '[]'` from
+///   `migrations/0016_peers_oauth.sql` and never went through the authorize
+///   route. Fall through, so a directly-seeded peer (demo seeder, fixtures)
+///   keeps working.
+///
+/// Before 0049 those were the same value, so enforcement could not fail closed
+/// without denying every directly-seeded peer. `delivery.rs` has always been
+/// fail-closed on empty; this brings the federated path into line for any peer
+/// that actually went through authorize.
+///
+/// A non-empty allowlist is enforced on every federated invocation path.
 fn tool_is_allowlisted(peer: &Peer, raw_tool: &str) -> bool {
     let Some(entries) = peer.tool_allowlist.as_array() else {
-        return true;
+        return !peer.tool_allowlist_configured;
     };
     if entries.is_empty() {
-        return true;
+        return !peer.tool_allowlist_configured;
     }
     entries
         .iter()
@@ -1578,11 +1582,20 @@ fn catalog_content_hash(
     format!("{:x}", hasher.finalize())
 }
 
+/// NOTE: this is one of **three** hand-written `peers` column lists — the others
+/// are `PeerRepo::PEER_COLUMNS` and the join in
+/// `WorkspacePeerBindingRepo::list_active_peers_for_workspace`. Adding a column
+/// to `Peer` means adding it to all three. `Peer` marks the newer fields
+/// `#[sqlx(default)]`, so a missed list does **not** error — it silently yields
+/// the type default, which for `tool_allowlist_configured` reads as "not
+/// configured" and quietly disables the allowlist gate. That failure mode cost a
+/// debugging cycle; if you add a column here, grep for the other two.
 async fn peer_by_prefix(state: &AppState, org_id: Uuid, prefix: &str) -> anyhow::Result<Peer> {
     sqlx::query_as::<_, Peer>(
         "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                refresh_token_ciphertext, token_expires_at, tool_allowlist, tool_prefix,
+                refresh_token_ciphertext, token_expires_at, tool_allowlist,
+                tool_allowlist_configured, tool_prefix,
                 session_status, last_connected_at, last_session_error, last_manifest_jsonb
          FROM peers
          WHERE org_id = $1 AND tool_prefix = $2 AND status = 'active'",

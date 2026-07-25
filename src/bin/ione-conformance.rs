@@ -839,22 +839,33 @@ async fn check_oauth(options: &Options) -> Surface {
             format!("metadata is missing '{field}' — §2 requires it"),
         );
     }
-    // `PeerDiscovery` (src/services/peer_oauth.rs) deserializes
-    // `registration_endpoint` as a plain `String` with no serde default, so a
-    // document that omits it fails to parse and the join dies with 400
-    // bad_request before any authorization step. §2 was amended on 2026-07-25 to
-    // declare it required, so this FAILs: a kit that PASSes a peer which cannot
-    // federate is worse than one that has no check at all.
+    // A peer must give IONe SOME way to obtain a client_id: either
+    // `registration_endpoint` (RFC 7591 dynamic registration) or
+    // `client_id_metadata_document_supported` (CIMD, where the metadata URL is
+    // itself the client_id). Publishing neither is what actually breaks the
+    // join; requiring `registration_endpoint` specifically would fail a
+    // CIMD-only peer that federates perfectly well.
+    let has_registration = metadata
+        .get("registration_endpoint")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_cimd = metadata
+        .get("client_id_metadata_document_supported")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     surface.check(
-        metadata
-            .get("registration_endpoint")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty()),
-        "metadata declares registration_endpoint (§2, RFC 7591)",
-        "metadata is missing 'registration_endpoint' — §2 requires it. IONe's PeerDiscovery \
-         deserializes it as non-optional, so the join fails with 400 bad_request before the \
-         OAuth flow begins. Serve one (RFC 7591), or federate with a pre-brokered credential \
-         instead of OAuth.",
+        has_registration || has_cimd,
+        if has_registration {
+            "metadata declares registration_endpoint (§2, RFC 7591)"
+        } else {
+            "metadata advertises client_id_metadata_document_supported, so no \
+             registration_endpoint is needed (§2)"
+        },
+        "metadata declares neither 'registration_endpoint' nor \
+         'client_id_metadata_document_supported' — §2 requires one of them. IONe cannot obtain a \
+         client_id and the join fails with 400 before the OAuth flow begins. Publish an RFC 7591 \
+         registration endpoint, or set client_id_metadata_document_supported: true, or federate \
+         with a pre-brokered credential instead of OAuth.",
     );
     surface.check(
         string_array_contains(&metadata, "code_challenge_methods_supported", "S256"),
@@ -2470,7 +2481,16 @@ mod tests {
     /// A peer whose only resource is the `whoami://` body handed in.
     /// Serves an OAuth 2.1 discovery document, optionally omitting
     /// `registration_endpoint`, so surface 2 can be exercised both ways.
-    async fn spawn_oauth_metadata_peer(with_registration: bool) -> String {
+    /// `client_id` source a peer advertises: an RFC 7591 registration endpoint,
+    /// CIMD, or neither (the only combination that actually breaks the join).
+    #[derive(Clone, Copy)]
+    enum ClientIdSource {
+        Registration,
+        Cimd,
+        Neither,
+    }
+
+    async fn spawn_oauth_metadata_peer(source: ClientIdSource) -> String {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind metadata peer");
@@ -2485,8 +2505,14 @@ mod tests {
             "code_challenge_methods_supported": ["S256"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
         });
-        if with_registration {
-            metadata["registration_endpoint"] = json!(format!("{base}/oauth/register"));
+        match source {
+            ClientIdSource::Registration => {
+                metadata["registration_endpoint"] = json!(format!("{base}/oauth/register"));
+            }
+            ClientIdSource::Cimd => {
+                metadata["client_id_metadata_document_supported"] = json!(true);
+            }
+            ClientIdSource::Neither => {}
         }
 
         let metadata = Arc::new(metadata);
@@ -2519,29 +2545,45 @@ mod tests {
     /// than PASS-with-a-note: telling a peer it conforms when it cannot federate
     /// is the one outcome worse than having no check.
     #[tokio::test]
-    async fn a_peer_without_registration_endpoint_fails_surface_two() {
-        let peer_url = spawn_oauth_metadata_peer(false).await;
+    async fn a_peer_with_no_client_id_source_fails_surface_two() {
+        let peer_url = spawn_oauth_metadata_peer(ClientIdSource::Neither).await;
         let mut options = options_for(peer_url);
         options.pre_brokered = false;
         let surface = check_oauth(&options).await;
         assert!(
             surface.failures > 0,
-            "a document missing registration_endpoint must FAIL surface 2, got {:?}",
+            "a document offering neither registration_endpoint nor CIMD must FAIL surface 2, \
+             got {:?}",
             surface.lines
         );
         assert!(
-            surface
-                .lines
-                .iter()
-                .any(|line| line.contains("registration_endpoint")),
-            "the failure must name the missing field, got {:?}",
+            surface.lines.iter().any(|line| {
+                line.contains("registration_endpoint")
+                    && line.contains("client_id_metadata_document_supported")
+            }),
+            "the failure must name BOTH ways to satisfy the rule, got {:?}",
+            surface.lines
+        );
+    }
+
+    /// A CIMD-only peer publishes no registration endpoint and federates fine —
+    /// IONe uses the metadata URL as the client_id. The kit used to FAIL it.
+    #[tokio::test]
+    async fn a_cimd_peer_without_registration_endpoint_passes_surface_two() {
+        let peer_url = spawn_oauth_metadata_peer(ClientIdSource::Cimd).await;
+        let mut options = options_for(peer_url);
+        options.pre_brokered = false;
+        let surface = check_oauth(&options).await;
+        assert_eq!(
+            surface.failures, 0,
+            "a CIMD peer must PASS surface 2 without a registration_endpoint, got {:?}",
             surface.lines
         );
     }
 
     #[tokio::test]
     async fn a_peer_with_registration_endpoint_passes_surface_two() {
-        let peer_url = spawn_oauth_metadata_peer(true).await;
+        let peer_url = spawn_oauth_metadata_peer(ClientIdSource::Registration).await;
         let mut options = options_for(peer_url);
         options.pre_brokered = false;
         let surface = check_oauth(&options).await;

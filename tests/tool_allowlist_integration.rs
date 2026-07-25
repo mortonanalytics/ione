@@ -423,19 +423,17 @@ async fn an_approved_call_for_a_tool_removed_from_the_allowlist_is_denied() {
     );
 }
 
-/// An **empty** allowlist means "not configured", not "nothing allowed".
+/// An empty allowlist on a peer that was **never authorized** means "not
+/// configured", not "nothing allowed".
 ///
 /// `migrations/0016_peers_oauth.sql` declares the column
-/// `JSONB NOT NULL DEFAULT '[]'`, so there is no value that distinguishes a peer
-/// the operator never authorized through the route from one the operator
-/// authorized with zero tools. Reading `'[]'` as fail-closed would therefore
-/// deny every federated call made by any peer seeded outside the authorize
-/// route, which is how every existing federation suite seeds its peers.
-///
-/// Fail-closed is the better posture and needs a schema change to reach: a
-/// nullable `tool_allowlist`, or a separate `allowlist_configured` flag, so
-/// "unset" and "empty" stop being the same bytes. Pinned here so the current
-/// semantics are a decision on the record rather than an accident.
+/// `JSONB NOT NULL DEFAULT '[]'`, so the value alone cannot distinguish a peer
+/// the operator never took through the authorize route from one authorized with
+/// zero tools. `migrations/0049` adds `tool_allowlist_configured` to separate
+/// them; this test covers the not-configured half, where the row still carries
+/// the column default and must keep working (that is how the demo seeder and
+/// most fixtures create peers). The configured half is
+/// `an_authorized_empty_allowlist_denies_every_tool`.
 #[tokio::test]
 #[ignore]
 async fn an_empty_allowlist_is_treated_as_unconfigured() {
@@ -452,4 +450,43 @@ async fn an_empty_allowlist_is_treated_as_unconfigured() {
     .expect("an empty allowlist must not gate; see this test's doc comment");
     assert_eq!(result["isError"], json!(false), "{result}");
     assert_eq!(f.peer.invoked(), vec![TOOL_BLOCKED.to_string()]);
+}
+
+/// The fail-closed half: once the operator has actually been through
+/// `POST /api/v1/peers/:id/authorize`, `tool_allowlist_configured` is true and an
+/// empty allowlist means the peer may invoke **nothing**. Before
+/// `migrations/0049` this was indistinguishable from the column default, so the
+/// federated path could not fail closed here without denying every
+/// directly-seeded peer. `delivery.rs` has always been fail-closed on empty;
+/// this brings the federated path into line.
+#[tokio::test]
+#[ignore]
+async fn an_authorized_empty_allowlist_denies_every_tool() {
+    let f = fixture(json!([])).await;
+
+    // Exactly what the authorize route does: write the allowlist and flag it.
+    sqlx::query("UPDATE peers SET tool_allowlist = '[]'::jsonb, tool_allowlist_configured = true WHERE id = $1")
+        .bind(f.peer_id)
+        .execute(&f.pool)
+        .await
+        .expect("mark the allowlist configured");
+
+    let err = ione::services::federation::route_tool_call(
+        &f.state,
+        f.workspace_id,
+        &format!("gate:{TOOL_BLOCKED}"),
+        json!({}),
+        &f.auth,
+    )
+    .await
+    .expect_err("an authorized-but-empty allowlist must deny every tool");
+    assert!(
+        err.to_string().contains("allowlist"),
+        "denial must name the allowlist, got: {err}"
+    );
+    assert!(
+        f.peer.invoked().is_empty(),
+        "a denied call must not reach the peer, got {:?}",
+        f.peer.invoked()
+    );
 }

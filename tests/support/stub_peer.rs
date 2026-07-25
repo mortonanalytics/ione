@@ -89,10 +89,10 @@ pub const TOOL_ACKNOWLEDGE: &str = "acknowledge_alert";
 pub struct StubPeerProfile {
     /// Host spelling used to build `base_url`.
     ///
-    /// Two loopback instances must use *different* spellings ("127.0.0.1" and
-    /// "localhost"): IONe derives a peer's name from its URL host and drops the
-    /// port (`routes/peers.rs:446`), and `peers_org_id_name_key UNIQUE (org_id,
-    /// name)` then rejects the second registration.
+    /// Two loopback instances may now share a spelling: `peer_name_from_url`
+    /// includes a non-default port, so `127.0.0.1:51000` and `127.0.0.1:51001`
+    /// derive distinct names and both satisfy `peers_org_id_name_key
+    /// UNIQUE (org_id, name)`. Differing spellings are still harmless.
     pub host: String,
     pub self_peer_id: String,
     pub foreign_tenant_id: String,
@@ -839,9 +839,9 @@ async fn oauth_discovery(State(state): State<StubState>) -> Json<Value> {
         "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),
         "revocation_endpoint": format!("{base}/oauth/revoke"),
-        // Not part of contract §2's endpoint table, but `PeerDiscovery` in
-        // src/services/peer_oauth.rs deserializes it as a required field, so a
-        // peer that omits it cannot complete IONe's join at all.
+        // Optional as of 2026-07-25 — a peer may instead advertise
+        // `client_id_metadata_document_supported`. The stub publishes a
+        // registration endpoint because that is the path IONe prefers.
         "registration_endpoint": format!("{base}/oauth/register"),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],

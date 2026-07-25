@@ -36,6 +36,12 @@ pub struct Peer {
     pub refresh_token_ciphertext: Option<Vec<u8>>,
     pub token_expires_at: Option<DateTime<Utc>>,
     pub tool_allowlist: serde_json::Value,
+    /// True once `POST /api/v1/peers/:id/authorize` wrote `tool_allowlist`.
+    /// Disambiguates an authorized-but-empty allowlist (deny everything) from a
+    /// row that still carries the column default. See `tool_is_allowlisted`.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub tool_allowlist_configured: bool,
     pub tool_prefix: Option<String>,
     pub session_status: String,
     pub last_connected_at: Option<DateTime<Utc>>,
