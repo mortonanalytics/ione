@@ -1822,14 +1822,13 @@ async fn check_whoami(client: &McpClient) -> Surface {
             "foreign_roles must contain only strings; a non-string entry fails the whole whoami \
              deserialization (§6)",
         ),
-        // The one field where §6's "a value may be null" and IONe's code
-        // disagree: `#[serde(default)] Vec<String>` accepts an *absent* key and
-        // rejects an explicit `null`.
-        Some(Value::Null) => surface.fail(
-            "foreign_roles is null. §6 permits a null value in general, but IONe deserializes \
-             this field as `#[serde(default)] Vec<String>`, which accepts an absent key and \
-             rejects an explicit null — the whole whoami then fails and the operator is left a \
-             'pending' binding. Send [] for 'no roles'.",
+        // §6 permits an explicit null, and IONe now honours it: `foreign_roles`
+        // deserializes null and absent identically to an empty role list. This
+        // used to FAIL here, back when the field was `#[serde(default)]
+        // Vec<String>` and rejected null.
+        Some(Value::Null) => surface.ok(
+            "foreign_roles is null, which §6 permits — IONe treats null and absent alike as \
+             'no roles'",
         ),
         Some(other) => surface.fail(format!(
             "foreign_roles must be an array of role names (it may be empty), got {other} (§6)"
@@ -2612,8 +2611,8 @@ mod tests {
     /// 'pending' binding. A kit that waved it through passed a peer that cannot
     /// bind.
     #[tokio::test]
-    async fn a_null_foreign_roles_fails_because_ione_cannot_deserialize_it() {
-        for bad in [json!(null), json!([1, 2]), json!("operator")] {
+    async fn a_malformed_foreign_roles_fails_because_ione_cannot_deserialize_it() {
+        for bad in [json!([1, 2]), json!("operator")] {
             let mut whoami = conforming_whoami();
             whoami["foreign_roles"] = bad.clone();
             let options = options_for(spawn_whoami_peer(whoami).await);
@@ -2622,6 +2621,25 @@ mod tests {
                 surface.status(),
                 Status::Fail,
                 "foreign_roles = {bad} breaks IONe's whoami deserialization: {:?}",
+                surface.lines
+            );
+        }
+    }
+
+    /// §6 permits an explicit `null`, and IONe now deserializes null and absent
+    /// identically to an empty role list. The kit used to FAIL this — a peer
+    /// emitting a contract-legal value was told it was broken.
+    #[tokio::test]
+    async fn a_null_foreign_roles_passes_because_section_six_permits_it() {
+        for legal in [json!(null), json!([])] {
+            let mut whoami = conforming_whoami();
+            whoami["foreign_roles"] = legal.clone();
+            let options = options_for(spawn_whoami_peer(whoami).await);
+            let surface = check_whoami(&McpClient::new(&options)).await;
+            assert_eq!(
+                surface.status(),
+                Status::Pass,
+                "foreign_roles = {legal} is legal under §6: {:?}",
                 surface.lines
             );
         }

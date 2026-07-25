@@ -106,7 +106,7 @@ retries the original call **once**. A peer that does not use sessions may ignore
 |---|---|
 | `resources/read` for a chart panel | 5 s |
 | `resources/read` for a table panel | 5 s |
-| `resources/read` for `whoami://` | 3 s on the subscribe path (`bind_on_subscribe`); **no per-call timeout** on the binding-refresh path, which falls back to the 15 s HTTP client timeout |
+| `resources/read` for `whoami://` | 3 s (`WHOAMI_TIMEOUT`), on **both** the subscribe and binding-refresh paths. The budget covers all of `fetch_whoami` — initialize, retry and read — not each request. |
 
 **Enforcement status: Enforced.** `src/services/chart_data.rs:21-27`,
 `src/services/table_data.rs:44-49`, and the whoami invocation contract in
@@ -632,10 +632,10 @@ Returns the foreign tenant and user identity for the authenticated session. This
 populates `workspace_peer_bindings` and powers cross-app correlation.
 
 **Invocation:** `resources/read {"uri": "whoami://"}`, `Authorization: Bearer`.
-Timeout per §1: **3 s** on the subscribe path (`bind_on_subscribe`) and **no
-per-call timeout** on the binding-refresh path, which inherits the 15 s HTTP
-client timeout — and since `fetch_whoami` may issue up to three requests
-(initialize, retry, read), that path's real ceiling is ~45 s.
+Timeout per §1: **3 s** (`WHOAMI_TIMEOUT`) on both the subscribe and
+binding-refresh paths, covering all of `fetch_whoami` — initialize, retry and
+read — so the ceiling is 3 s total, not 3 s per request. A timeout surfaces as
+`502` on `POST /api/v1/workspaces/:id/bindings/:id/refresh`.
 
 > `foreign-tenant-mapping.md:63-67` states 8 s. That design doc predates the
 > implementation and does not match `src/services/workspace_peer_binding.rs`;
@@ -671,8 +671,21 @@ IONe tolerates a failed or partial `whoami` by materializing a `pending` binding
 the operator completes manually.
 
 **All seven keys must be present** in the object. A value may be `null` where the
-peer has no such scope; a v1 consumer must tolerate `null` and must not treat a
-missing key and a null value as equivalent.
+peer has no such scope, **except `foreign_tenant_id`, which must be a non-empty
+string**. A v1 consumer must tolerate `null` on every other key.
+
+> **The `foreign_tenant_id` carve-out is load-bearing.** It is the binding key:
+> it must match the `foreign_tenant_id` in the webhook envelope (§3.3) for
+> events to fan in, and `workspace_peer_bindings` is keyed on it. A `null` there
+> cannot bind anything, so IONe hard-fails the whoami rather than creating a
+> binding that can never receive an event. The freeze-time text applied the
+> blanket null allowance to all seven keys, which contradicted both the code and
+> the conformance kit; the carve-out is stated explicitly as of 2026-07-25.
+>
+> `foreign_roles` goes the other way: an explicit `null` is legal and means the
+> same as an absent key (no roles). It used to be rejected — a peer emitting a
+> contract-legal value got a stuck `pending` binding — and was fixed the same
+> day.
 
 IONe serves this same shape on its own `/mcp` server, since IONe is itself an MCP
 peer. Its own values are derived from the authenticated session:
@@ -781,13 +794,12 @@ When a peer returns a JSON-RPC error, IONe maps on the **code**, not the message
 A peer that does not implement `resources/read` returns `-32601` and is reported
 as 502 (peer fault), not 404.
 
-**Enforcement status: Enforced on the table path only.**
-`src/services/table_data.rs` maps `-32002` to 404 as described. The chart path
-(`src/services/chart_data.rs`) collapses **every** peer JSON-RPC error —
-including `-32002` — to `Unavailable` → **502**, so a not-found chart resource
-reports 502 rather than 404. A v1 peer must not depend on receiving 404 for a
-missing chart resource. Aligning the chart path is additive under the compatibility rule and is
-tracked as a follow-up.
+**Enforcement status: Enforced on both the chart and table paths.**
+`src/services/table_data.rs` and `src/services/chart_data.rs` both branch on the
+JSON-RPC `code`: `-32002` → 404, every other code → 502. At freeze time the
+chart path collapsed all errors to 502; that was corrected on 2026-07-25 and the
+compatibility escape hatch that told peers not to rely on a 404 for charts is
+withdrawn — a v1 peer may now depend on it.
 
 ---
 
