@@ -86,10 +86,14 @@ test("an expired embed re-requests the ref and renders the freshly-signed URL", 
     { peerDocuments: [peerDocument(EXPIRED_PDF_URL)], peerErrors: [] },
     { peerDocuments: [peerDocument(FRESH_PDF_URL)], peerErrors: [] }
   ]);
-  const proxyRequests: string[] = [];
+  // IONe never proxies or stores the object, so every request for the document
+  // bytes must go straight to the peer's origin. Watching for invented `/proxy`
+  // and `/document-data` routes proved nothing — they never existed — so this
+  // instead records who was asked for `report.pdf`, whatever the path.
+  const documentByteRequests: string[] = [];
   page.on("request", (request) => {
     const url = request.url();
-    if (url.includes("/proxy") || url.includes("/document-data")) proxyRequests.push(url);
+    if (url.includes("report.pdf")) documentByteRequests.push(url);
   });
 
   await page.goto("/");
@@ -101,8 +105,15 @@ test("an expired embed re-requests the ref and renders the freshly-signed URL", 
   // The ref — not the object — is re-requested, and the fresh URL is embedded.
   await expect(iframe).toHaveAttribute("src", FRESH_PDF_URL, { timeout: 10000 });
   await expect(page.locator("#document-toolbar a").first()).toHaveAttribute("href", FRESH_PDF_URL);
-  // Nothing was ever fetched through IONe.
-  expect(proxyRequests).toEqual([]);
+  // Nothing was ever fetched through IONe: the browser really did request the
+  // object (so this is not vacuous), and every such request went to the peer's
+  // origin rather than to the app's.
+  expect(documentByteRequests.length).toBeGreaterThan(0);
+  const appOrigin = new URL(page.url()).origin;
+  for (const url of documentByteRequests) {
+    expect(new URL(url).origin).toBe("https://docs.example.test");
+    expect(new URL(url).origin).not.toBe(appOrigin);
+  }
 });
 
 test("a ref the peer no longer lists is reported gone, not served from a cache", async ({ page }) => {

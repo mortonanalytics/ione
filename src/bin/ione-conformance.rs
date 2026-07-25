@@ -966,12 +966,20 @@ fn verify_envelope(surface: &mut Surface, body: &[u8], peer_id: &str, timestamp:
         None => surface.fail("data is required (§3.3)"),
     }
 
-    surface.check(
-        object.get("approval_required").map(Value::is_boolean) == Some(true),
-        "approval_required is present and boolean",
-        "approval_required is required and must be a boolean — it has no serde default, so \
-         omitting it fails deserialization and returns 400 (§3.3, Appendix A #2)",
-    );
+    match object.get("approval_required") {
+        Some(Value::Bool(flag)) => {
+            surface.ok(format!("approval_required is present and boolean ({flag})"))
+        }
+        Some(other) => surface.fail(format!(
+            "approval_required must be a boolean when present, got {other}; any other JSON type \
+             fails deserialization and returns a bare 400 carrying no message (§3.3, §7.2)"
+        )),
+        None => surface.ok(
+            "approval_required is absent and defaults to false (§3.3). The field is optional: \
+             the ingress policy floor is escalate-only, so an absent flag is exactly equivalent \
+             to an explicit false (Appendix A #2).",
+        ),
+    }
 
     match object.get("severity").and_then(Value::as_str) {
         Some(severity) if matches!(severity, "routine" | "flagged" | "command") => {
@@ -1460,5 +1468,88 @@ async fn main() -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PEER_ID: &str = "3f0c1f2e-0000-4000-8000-000000000001";
+
+    /// A §3.3-conforming envelope. Individual cases mutate one field so a failure
+    /// is attributable to that field rather than to the fixture.
+    fn conforming_envelope(timestamp: i64) -> Value {
+        json!({
+            "id": "evt-conformance",
+            "type": "alert.created",
+            "occurred_at": DateTime::from_timestamp(timestamp, 0)
+                .expect("valid timestamp")
+                .to_rfc3339(),
+            "peer_id": PEER_ID,
+            "foreign_tenant_id": "tenant-abc",
+            "severity": "routine",
+            "data": { "message": "hello" },
+            "approval_required": false
+        })
+    }
+
+    fn check(envelope: &Value) -> Surface {
+        let timestamp = Utc::now().timestamp();
+        let mut surface = Surface::new(3, "Signed webhook sender", "§3");
+        verify_envelope(
+            &mut surface,
+            &serde_json::to_vec(envelope).expect("serialize"),
+            PEER_ID,
+            timestamp,
+        );
+        surface
+    }
+
+    /// The control: the kit must not fail an envelope that satisfies every §3.3
+    /// constraint, otherwise the cases below prove nothing.
+    #[test]
+    fn a_conforming_envelope_passes_every_envelope_check() {
+        let surface = check(&conforming_envelope(Utc::now().timestamp()));
+        assert_eq!(
+            surface.failures, 0,
+            "a conforming envelope must pass: {:?}",
+            surface.lines
+        );
+    }
+
+    /// §3.3 freezes `approval_required` as optional, defaulting to `false`. The kit
+    /// is what an external peer runs to validate *itself*, so failing this would
+    /// tell a conforming peer it is broken. The stub always emits the field, which
+    /// is exactly why this case is asserted here rather than through the stub.
+    #[test]
+    fn an_absent_approval_required_passes_because_the_field_is_optional() {
+        let mut envelope = conforming_envelope(Utc::now().timestamp());
+        envelope
+            .as_object_mut()
+            .expect("object")
+            .remove("approval_required");
+        let surface = check(&envelope);
+        assert_eq!(
+            surface.failures, 0,
+            "§3.3: an absent approval_required defaults to false and must pass: {:?}",
+            surface.lines
+        );
+    }
+
+    /// Optional is not "anything goes": present-but-not-boolean still fails
+    /// deserialization inside IONe and returns a bare 400.
+    #[test]
+    fn a_non_boolean_approval_required_still_fails() {
+        for bad in [json!("true"), json!(1), json!(null)] {
+            let mut envelope = conforming_envelope(Utc::now().timestamp());
+            envelope["approval_required"] = bad.clone();
+            let surface = check(&envelope);
+            assert_eq!(
+                surface.failures, 1,
+                "§3.3: approval_required = {bad} must fail: {:?}",
+                surface.lines
+            );
+        }
     }
 }

@@ -182,8 +182,20 @@ async fn setup_bound_peer() -> (String, PgPool, Uuid, Uuid, String) {
 }
 
 async fn post_event(base: &str, peer_id: Uuid, secret: &str, event: &Value) -> reqwest::Response {
+    post_event_at(base, peer_id, secret, event, Utc::now().timestamp()).await
+}
+
+/// `post_event` with an explicit signature `t`, so the §3.2 header-freshness
+/// window can be exercised without disturbing `occurred_at`. The HMAC covers `t`,
+/// so the signature stays valid at any timestamp.
+async fn post_event_at(
+    base: &str,
+    peer_id: Uuid,
+    secret: &str,
+    event: &Value,
+    ts: i64,
+) -> reqwest::Response {
     let body = serde_json::to_string(event).expect("body");
-    let ts = Utc::now().timestamp();
     reqwest::Client::new()
         .post(format!("{base}/webhooks/peer/{peer_id}"))
         .header("X-IONe-Signature", signed_headers(secret, &body, ts))
@@ -532,6 +544,75 @@ async fn header_event_skew_is_enforced_independently_of_header_freshness() {
     assert_eq!(ok.status(), StatusCode::OK, "control must be accepted");
 }
 
+/// Contract §3.2 header freshness, *stale* half: `abs(now - t) <= 300`.
+/// Every other §3.2 test keeps `t` at `now` and moves only `occurred_at`, so all of
+/// them fire the 30 s skew rule and the 300 s window went unexercised. Here `t` sits
+/// 600 s in the past and `occurred_at` is pinned **to `t`**, so the skew rule is
+/// satisfied by construction and only the freshness rule can reject.
+#[tokio::test]
+#[ignore]
+async fn stale_header_timestamp_is_rejected_independently_of_event_skew() {
+    let (base, _pool, _workspace_id, peer_id, secret) = setup_bound_peer().await;
+
+    let stale_at = Utc::now() - Duration::seconds(600);
+    let stale_ts = stale_at.timestamp();
+    let mut event = envelope(peer_id, "evt-stale-t", "t-acme");
+    event["occurred_at"] = json!(stale_at);
+    let resp = post_event_at(&base, peer_id, &secret, &event, stale_ts).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "§3.2: t older than 300 s must be rejected even when occurred_at tracks t"
+    );
+
+    // Control: the identical construction 120 s back — inside the 300 s window — is
+    // accepted, so the rejection above is the window and not the fixture.
+    let fresh_at = Utc::now() - Duration::seconds(120);
+    let fresh_ts = fresh_at.timestamp();
+    let mut fresh = envelope(peer_id, "evt-stale-t-ok", "t-acme");
+    fresh["occurred_at"] = json!(fresh_at);
+    let ok = post_event_at(&base, peer_id, &secret, &fresh, fresh_ts).await;
+    assert_eq!(
+        ok.status(),
+        StatusCode::OK,
+        "a t 120 s old is inside the 300 s window"
+    );
+}
+
+/// Contract §3.2 header freshness, *future* half. The rule is `abs(now - t) <= 300`,
+/// not `now - t <= 300`: a future-dated `t` is as much a replay-window violation as a
+/// stale one, and dropping the `.abs()` would silently accept a `t` arbitrarily far
+/// ahead. `occurred_at` is pinned to `t` so the 30 s skew rule cannot fire instead.
+#[tokio::test]
+#[ignore]
+async fn future_dated_header_timestamp_is_rejected() {
+    let (base, _pool, _workspace_id, peer_id, secret) = setup_bound_peer().await;
+
+    let future_at = Utc::now() + Duration::seconds(600);
+    let future_ts = future_at.timestamp();
+    let mut event = envelope(peer_id, "evt-future-t", "t-acme");
+    event["occurred_at"] = json!(future_at);
+    let resp = post_event_at(&base, peer_id, &secret, &event, future_ts).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "§3.2: t more than 300 s in the future must be rejected"
+    );
+
+    // Control: the identical construction 120 s ahead — inside the 300 s window — is
+    // accepted, so the rejection above is the window and not the clock direction.
+    let near_at = Utc::now() + Duration::seconds(120);
+    let near_ts = near_at.timestamp();
+    let mut near = envelope(peer_id, "evt-future-t-ok", "t-acme");
+    near["occurred_at"] = json!(near_at);
+    let ok = post_event_at(&base, peer_id, &secret, &near, near_ts).await;
+    assert_eq!(
+        ok.status(),
+        StatusCode::OK,
+        "a t 120 s ahead is inside the 300 s window"
+    );
+}
+
 /// Contract §3.2: dedup rows are retained 72 h. `cleanup_expired`
 /// (src/repos/webhook_event_repo.rs:32-42) runs from the scheduler; this pins the
 /// boundary so the purge cannot silently start deleting live dedup state.
@@ -673,9 +754,10 @@ async fn envelope_validation_rejects_malformed_fields() {
     );
 }
 
-/// Contract §3.3 freezes `approval_required` as **required with no default** —
-/// omitting it is a deserialization failure ⇒ 400 (see also Appendix A, divergence
-/// #2). This pins that, and pins the policy floor at §3.3: the flag may escalate
+/// Contract §3.3 freezes `approval_required` as **optional, defaulting to `false`**
+/// (`#[serde(default)]`; see also Appendix A, divergence #2, resolved in the
+/// playbook's favour). Omitting it is a 200 that behaves exactly like an explicit
+/// `false`. This pins that, and pins the policy floor at §3.3: the flag may escalate
 /// but never de-escalate, so `flagged`/`command` are gated regardless of the flag.
 #[tokio::test]
 #[ignore]
