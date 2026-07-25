@@ -2,7 +2,7 @@ use anyhow::Context;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{models::WorkspacePeerCredential, util::token_crypto};
+use crate::{models::WorkspacePeerCredential, rls::org_scoped_tx, util::token_crypto};
 
 /// Non-secret columns. The ciphertext is never part of a metadata SELECT.
 const CREDENTIAL_COLUMNS: &str =
@@ -26,6 +26,9 @@ impl WorkspacePeerCredentialRepo {
     /// Store or replace the credential for (workspace, peer). Replacement is
     /// rotation: it rewrites `credential_ciphertext` in place, so rotating is a
     /// config operation with no schema change.
+    ///
+    /// Not org-scoped: `org_id` is derived by the `wpc_check_same_org` trigger
+    /// rather than supplied, so there is no org context to set before the INSERT.
     pub async fn upsert(
         &self,
         workspace_id: Uuid,
@@ -57,47 +60,63 @@ impl WorkspacePeerCredentialRepo {
         })
     }
 
+    /// Org-scoped: runs inside an `app.current_org_id` transaction, so the
+    /// `wpc_org_isolation` policy is a second guard behind the `org_id` predicate
+    /// when the process connects as a non-BYPASSRLS role.
     pub async fn get(
         &self,
         workspace_id: Uuid,
         peer_id: Uuid,
         org_id: Uuid,
     ) -> anyhow::Result<Option<WorkspacePeerCredential>> {
-        sqlx::query_as::<_, WorkspacePeerCredential>(&format!(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query_as::<_, WorkspacePeerCredential>(&format!(
             "SELECT {CREDENTIAL_COLUMNS} FROM workspace_peer_credentials
              WHERE workspace_id = $1 AND peer_id = $2 AND org_id = $3"
         ))
         .bind(workspace_id)
         .bind(peer_id)
         .bind(org_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .context("failed to get workspace peer credential")
+        .context("failed to get workspace peer credential")?;
+        tx.commit()
+            .await
+            .context("failed to commit workspace peer credential read")?;
+        Ok(row)
     }
 
+    /// Org-scoped; see [`WorkspacePeerCredentialRepo::get`].
     pub async fn list_for_workspace(
         &self,
         workspace_id: Uuid,
         org_id: Uuid,
     ) -> anyhow::Result<Vec<WorkspacePeerCredential>> {
-        sqlx::query_as::<_, WorkspacePeerCredential>(&format!(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let rows = sqlx::query_as::<_, WorkspacePeerCredential>(&format!(
             "SELECT {CREDENTIAL_COLUMNS} FROM workspace_peer_credentials
              WHERE workspace_id = $1 AND org_id = $2
              ORDER BY created_at DESC"
         ))
         .bind(workspace_id)
         .bind(org_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .context("failed to list workspace peer credentials")
+        .context("failed to list workspace peer credentials")?;
+        tx.commit()
+            .await
+            .context("failed to commit workspace peer credential list")?;
+        Ok(rows)
     }
 
+    /// Org-scoped; see [`WorkspacePeerCredentialRepo::get`].
     pub async fn delete(
         &self,
         workspace_id: Uuid,
         peer_id: Uuid,
         org_id: Uuid,
     ) -> anyhow::Result<bool> {
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         let result = sqlx::query(
             "DELETE FROM workspace_peer_credentials
              WHERE workspace_id = $1 AND peer_id = $2 AND org_id = $3",
@@ -105,14 +124,20 @@ impl WorkspacePeerCredentialRepo {
         .bind(workspace_id)
         .bind(peer_id)
         .bind(org_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("failed to delete workspace peer credential")?;
+        tx.commit()
+            .await
+            .context("failed to commit workspace peer credential delete")?;
         Ok(result.rows_affected() > 0)
     }
 
     /// Decrypt the outbound bearer credential for (workspace, peer). Only the
     /// outbound MCP auth path in `services::peer_tokens` calls this.
+    ///
+    /// Not org-scoped: the caller resolves (workspace, peer) without an org id in
+    /// hand. Listed as uncovered under AC-15 in md/design/identity-broker.md.
     pub async fn secret_for(
         &self,
         workspace_id: Uuid,

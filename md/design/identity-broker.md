@@ -287,7 +287,7 @@ All criteria are mechanically verifiable. Each maps to one or more test assertio
 | AC-12 | S5 | Given a `broker_credentials` row whose `access_token_ciphertext` has a leading key-version byte of `0x00` but `IONE_TOKEN_KEY` was loaded with a different key, when BrokerService attempts to decrypt that ciphertext, then the call returns `Err(DecryptionError)` (a typed error) and does not panic. |
 | AC-13 | S6 | Given any successful or failed authentication event, when the handler completes, then exactly one `identity_audit_events` row is written with `org_id`, `outcome`, `occurred_at`, and `detail` containing no `access_token` or `id_token` substrings. |
 | AC-14 | S7 | Given two organizations and one peer per org, when org A's user lists peers, then only org A's peer rows are returned (verified via integration test that inserts a second org's peer and confirms it does not appear). |
-| AC-15 | S6 / RLS | Given a Postgres session with `app.current_org_id` set to org A's UUID, when the session attempts to SELECT from `broker_credentials` where `org_id` is org B, then zero rows are returned (RLS policy enforced at DB level). **NOT SATISFIED — see "Known limitation: RLS is inert as deployed" below.** |
+| AC-15 | S6 / RLS | Given a Postgres session with `app.current_org_id` set to org A's UUID, when the session attempts to SELECT from `broker_credentials` where `org_id` is org B, then zero rows are returned (RLS policy enforced at DB level). **SATISFIED for a connection as the restricted `ione_app` role — proven by `tests/rls_enforcement_integration.rs`. NOT satisfied for the default `ione` connection, which is SUPERUSER and bypasses RLS unconditionally, and not satisfied for the repository methods listed under "RLS enforcement: what is covered" below.** |
 | AC-16 | S5 | Given a connected broker connection with a stored refresh token, when POST /api/v1/broker/connections/:id/refresh is called and the provider returns new tokens, then `access_token_ciphertext` differs from its previous value and exactly one `identity_audit_events` row with `event_type='token_broker_refresh'` and `outcome='success'` is written; when the provider fails, the stored ciphertext is unchanged, the response is 502 `broker_upstream`, and the audit row has `outcome='failure'` with `detail.failureReason`. |
 | AC-17 | S5 | Given a connected broker connection and a provider registry entry with a revocation endpoint, when DELETE /api/v1/broker/connections/:id is called and upstream revocation fails, then the local row is still deleted, one `token_broker_revoke_upstream_failed` row is written with `outcome='failure'`, and the `token_broker_revoke` row records `detail.upstreamRevoked = false`. |
 | AC-18 | S5 | Given a brokered delegation stored for (workspace A, peer P) and workspaces A and B both bound to P, when an outbound MCP request is made in A's scope then the bearer is A's delegated token, and when one is made in B's scope then it is not (B falls through to the next precedence tier). |
@@ -330,44 +330,88 @@ The paths that set it, and the peer-global paths that deliberately do not, are
 enumerated in [pre-broker-peer-credentials.md](pre-broker-peer-credentials.md)
 under "Workspace scope".
 
-## Known limitation: RLS is inert as deployed
+## RLS enforcement: what is covered
 
-**AC-15 is not satisfied, and no code in this repo makes it satisfiable.**
-Recorded here rather than quietly carried, because the policies existing makes
-it look done.
+Eleven tables carry an org-isolation policy keyed on
+`current_setting('app.current_org_id', true)`: `auto_exec_policies`,
+`broker_credentials`, `identity_audit_events`, `interaction_events`,
+`mfa_enrollments`, `mfa_recovery_codes`, `peer_catalog_entries`,
+`service_account_tokens`, `workspace_peer_bindings`,
+`workspace_peer_credentials`, `workspace_peer_delegations`.
 
-Every identity table (`broker_credentials`, `mfa_enrollments`,
-`mfa_recovery_codes`, `identity_audit_events`, `service_account_tokens`,
-`workspace_peer_bindings`, `workspace_peer_credentials`,
-`workspace_peer_delegations`) carries an org-isolation policy keyed on
-`current_setting('app.current_org_id', true)`. Three independent facts make
-those policies unreachable:
+Those policies were originally inert three times over. Two of the three causes
+are now fixed:
 
-1. nothing in `src/` ever sets `app.current_org_id` — there is no `SET LOCAL`
-   anywhere, so the predicate would evaluate against NULL;
-2. no table declares `FORCE ROW LEVEL SECURITY`, and the application role owns
-   every one of them, so PostgreSQL skips policy evaluation for it;
-3. the application role additionally holds `BYPASSRLS`.
+1. **`FORCE ROW LEVEL SECURITY`** — set on all eleven tables by migration
+   `0050_rls_enforcement.sql`, so the table owner no longer skips policy
+   evaluation.
+2. **A role the policies can bind** — the same migration creates `ione_app`:
+   `LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`, owning nothing, granted only
+   SELECT/INSERT/UPDATE/DELETE on the tables plus `USAGE` on the schema and
+   sequences (and matching `ALTER DEFAULT PRIVILEGES` so later migrations stay
+   covered). The bootstrap password is a development default; an operator
+   adopting the role must `ALTER ROLE ione_app PASSWORD '<secret>'`.
+3. **Per-transaction org context** — `src/rls.rs::org_scoped_tx` opens a
+   transaction and runs `set_config('app.current_org_id', $1, true)` with the org
+   id bound as a parameter. Transaction scope is required: sqlx runs on pooled
+   connections, so a session-scoped `SET` would leak one request's org context
+   onto whatever request reuses that connection.
 
-Setting the variable alone would therefore change nothing — it would only make
-the gap harder to see. Activating RLS needs all of: a non-owner, non-`BYPASSRLS`
-application role plus grants (a deployment change, not a code change);
-`FORCE ROW LEVEL SECURITY` on each table; and a transaction handle that sets the
-org context on every query, since sqlx here runs on pooled connections outside
-transactions — the `rls_context.rs` / `TxHandle` the archived plan describes and
-that was never written.
+### Covered
 
-Until then the real guard is the application-layer `WHERE org_id = $n` predicate
-present on every org-scoped repo query, covered by the rbac, binding, peer
-credential, and identity-broker integration suites.
+Every method below runs inside `org_scoped_tx`, so under a `ione_app` connection
+the policy filters its rows in addition to the application-layer
+`WHERE org_id = $n` predicate:
 
-**Follow-up:** *RLS activation — non-owner application role, `FORCE ROW LEVEL
-SECURITY`, and per-transaction org context.* Re-entry gate: the first deployment
-that runs more than one organization in a single IONe database. The current
-state is pinned by
-`tests/identity_broker_integration.rs::rls_policies_are_present_but_inert_as_deployed`,
-which fails the moment any of the three facts above stops holding, so the
-follow-up cannot be silently forgotten.
+- `WorkspacePeerCredentialRepo`: `get`, `list_for_workspace`, `delete`
+- `WorkspacePeerDelegationRepo`: `get`, `delete`
+- `BrokerCredentialRepo`: `create_pending`, `list_for_user`, `find_for_user`,
+  `store_tokens`, `delete`
+
+`tests/rls_enforcement_integration.rs` proves this by connecting as `ione_app`,
+pinning the context to org A, and reading `broker_credentials` with **no**
+`org_id` predicate: org B's rows are absent, while the same unfiltered read as
+the default role still returns both orgs.
+
+### Not covered
+
+- **The default connection.** `DATABASE_URL`, `docker-compose.yml`, CI, and the
+  dev loop all connect as `ione`, which is SUPERUSER and holds `BYPASSRLS`.
+  PostgreSQL lets such a role past row security unconditionally — `FORCE` does
+  not apply to it. So on the deployment everyone actually runs, RLS still filters
+  nothing and the application-layer predicate is still the only guard. `ione_app`
+  is opt-in and deliberately not wired into any config.
+  Pinned by
+  `tests/identity_broker_integration.rs::rls_policies_are_present_but_inert_as_deployed`.
+- **Repository methods with no org id in hand**, which therefore cannot set the
+  context:
+  - `WorkspacePeerCredentialRepo::upsert` (org_id is derived by the
+    `wpc_check_same_org` trigger, not supplied) and `::secret_for`
+  - `WorkspacePeerDelegationRepo::upsert_tokens`, `::update_refreshed`,
+    `::material_for`, `::begin_pending`, `::consume_pending`
+  - `BrokerCredentialRepo::find_by_state`, `::consume_by_state` (the OAuth
+    callback arrives with only the `state` token, which is what establishes the
+    org), `::find_user_provider`
+- **Every other repository** — `peer_repo`, `workspace_peer_binding_repo`,
+  `service_account_token_repo`, `auto_exec_policy_repo`,
+  `interaction_event_repo`, `catalog_repo`, the MFA and identity-audit writers,
+  and the rest. Their tables carry `FORCE` but their queries never set the
+  context.
+
+**Consequence: `ione_app` is not yet a supported runtime role for the binary.**
+Under it, an unmigrated query fails closed rather than open — it either matches
+no rows (fresh connection: the setting is NULL) or raises `22P02` (recycled
+connection: the setting is defined but empty, and `''::uuid` is invalid). Neither
+leaks another org's data, and the enforcement suite pins that. But an unmigrated
+write path would silently affect zero rows, so the role is for proving isolation
+and for a future cutover, not for production today.
+
+**Follow-up:** *Finish the repository migration and cut the default connection
+over to `ione_app`.* Re-entry gate: the first deployment that runs more than one
+organization in a single IONe database. Both halves are pinned by tests — the
+enforcement suite fails if the policies stop filtering, and the inertness test
+fails the moment the default role stops bypassing — so neither can be silently
+forgotten.
 
 ## Tradeoffs
 
