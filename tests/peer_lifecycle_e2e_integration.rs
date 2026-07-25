@@ -877,12 +877,11 @@ async fn webhook_from_a_peer_that_is_not_active_is_unauthorized() {
 /// requires a matching `tool_invoke:<peer>:<tool>` grant for the workspace
 /// (C-2 / DICE §2.4), and a denial never reaches the peer.
 ///
-/// Note the gate under test is the `tool_invoke` grant, not `peers.tool_allowlist`.
-/// The allowlist written by `POST /api/v1/peers/:id/authorize` is read in exactly
-/// one place, `services/delivery.rs:561`, which gates IONe's *outbound*
-/// `propose_artifact` delivery; it is not consulted on the inbound invocation
-/// path. Asserted here as it behaves, so the divergence is visible rather than
-/// assumed away.
+/// Note the gate under test is the `tool_invoke` grant. `peers.tool_allowlist`
+/// is now a *second*, independent gate on the same path — it is checked after
+/// the grant, so the denial below is still attributable to the grant — and is
+/// covered on its own in `tests/tool_allowlist_integration.rs`. Here the peer was
+/// authorized with exactly `TOOL_QUERY`, so both gates agree.
 #[tokio::test]
 #[ignore]
 async fn a_tool_the_caller_was_not_granted_is_not_invokable() {

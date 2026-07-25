@@ -38,6 +38,9 @@ const MANIFEST_RETENTION_SECONDS: i64 = 3600;
 /// lifetime.
 const SLICE_TTL_SECONDS: i64 = 300;
 const PENDING_TOOL_CALL_TTL_MINUTES: i64 = 30;
+/// How long a negotiated MCP session id is reused before it is dropped and
+/// released with a `DELETE`. Overridable with `IONE_MCP_SESSION_TTL_SECS`.
+const DEFAULT_MCP_SESSION_TTL_SECONDS: i64 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +52,17 @@ pub struct PeerManifest {
     pub etag: Option<String>,
     #[serde(default)]
     pub stale: bool,
+}
+
+/// A streamable-HTTP session id IONe negotiated with a peer, and when.
+///
+/// Held in `AppState::peer_mcp_sessions` under a `PeerCacheKey`, so a session
+/// negotiated under one workspace's credential is never presented on another
+/// workspace's call.
+#[derive(Debug, Clone)]
+pub struct PeerMcpSession {
+    pub id: String,
+    pub established_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +193,29 @@ pub async fn route_tool_call_with_session(
             json!({ "code": "permission_denied", "permission": needed }),
         );
         anyhow::bail!("FORBIDDEN: caller lacks permission '{needed}'");
+    }
+
+    // The operator's `peers.tool_allowlist` is an *additional* constraint on top
+    // of the grant above, not a substitute for it: the grant says which caller
+    // may reach the peer, the allowlist says which of the peer's tools the
+    // operator consented to at authorize time. Checked before the manifest
+    // fetch so a tool the operator never approved costs no outbound round trip.
+    if !tool_is_allowlisted(&peer, raw_tool) {
+        emit_interaction_event(
+            state,
+            workspace_id,
+            &peer,
+            raw_tool,
+            auth,
+            transport_session_id,
+            outcome::DENY,
+            None,
+            json!({ "code": "tool_not_allowlisted" }),
+        );
+        anyhow::bail!(
+            "FORBIDDEN: tool '{raw_tool}' is not in peer '{}' allowlist",
+            peer.name
+        );
     }
 
     let manifest = match manifest_for_peer(state, &peer).await {
@@ -398,6 +435,31 @@ pub async fn execute_pending_tool_call(
     if !binding_is_active {
         anyhow::bail!("workspace peer binding is not active; execution blocked");
     }
+    // An approval is consent to run *this* call, not consent to widen the set of
+    // tools the operator authorized. The allowlist is re-read here rather than
+    // captured at enqueue time so a narrowing between enqueue and approval takes
+    // effect, and audited the way `delivery.rs` audits its own allowlist block.
+    if !tool_is_allowlisted(&peer, raw_tool) {
+        AuditEventRepo::new(state.pool.clone())
+            .insert(
+                Some(pending.workspace_id),
+                ActorKind::User,
+                &approver_user_id.to_string(),
+                "peer_tool_blocked",
+                "pending_peer_tool_call",
+                Some(pending.id),
+                json!({
+                    "approval_id": approval_id,
+                    "tool": pending.namespaced_tool,
+                    "reason": "tool not in peer allowlist"
+                }),
+            )
+            .await?;
+        anyhow::bail!(
+            "FORBIDDEN: tool '{raw_tool}' is not in peer '{}' allowlist",
+            peer.name
+        );
+    }
     let result = invoke_peer_tool(state, &peer, raw_tool, args).await?;
     repo.mark_executed(pending.id, &result).await?;
     AuditEventRepo::new(state.pool.clone())
@@ -591,25 +653,38 @@ pub async fn force_refresh_manifest(
 }
 
 /// The peer's own answer to `resources/read slice://`, or `Err` when the peer
-/// did not answer one.
+/// did not serve a slice document.
 ///
 /// The distinction matters to every caller that treats the slice as
-/// authoritative: `Ok` means the peer spoke about its slice — including
-/// `Ok(json!({}))` for a body it declined to fill in — while `Err` means the read
-/// failed and the peer said nothing. `fetch_slice` papers over `Err` with a
-/// synthesized stand-in for display purposes; `catalog_slice_for_peer` must not,
-/// because a stand-in carries no `sample_queries` and would read as the peer
-/// having removed them.
+/// authoritative: `Ok` is a slice body IONe can attribute to the peer, and is
+/// authoritative *including for removals*, while `Err` means there is nothing to
+/// attribute and the caller must keep what it already has. `fetch_slice` papers
+/// over `Err` with a synthesized stand-in for display purposes;
+/// `catalog_slice_for_peer` must not, because a stand-in carries no
+/// `sample_queries` and would read as the peer having removed them.
+///
+/// Three cases, deliberately separated:
+///
+///   * `contents[0].text` parses as JSON → `Ok`. This covers the genuine empty
+///     slice: a peer that serves `"{}"` has *said* it has no sample queries, so
+///     that answer clears them.
+///   * `contents[0].text` is present but does not parse → `Err`. A truncated or
+///     malformed body is a failed read wearing a 200; treating it as an empty
+///     slice would let one bad response wipe every catalog row's
+///     `sample_queries` and flip its `content_hash`.
+///   * `contents[0].text` is absent (no `contents`, an empty array, or an entry
+///     without `text`) → `Err`. The peer answered the request but served no
+///     slice, which is not the same as serving an empty one.
 async fn peer_authored_slice(state: &AppState, peer: &Peer) -> anyhow::Result<Value> {
     let value = send_jsonrpc(state, peer, "resources/read", json!({ "uri": "slice://" })).await?;
-    Ok(value
+    let text = value
         .get("contents")
         .and_then(Value::as_array)
         .and_then(|items| items.first())
         .and_then(|content| content.get("text"))
         .and_then(Value::as_str)
-        .and_then(|text| serde_json::from_str(text).ok())
-        .unwrap_or_else(|| json!({})))
+        .ok_or_else(|| anyhow::anyhow!("peer slice reply carried no contents[0].text"))?;
+    serde_json::from_str(text).context("peer slice body is not valid JSON")
 }
 
 /// A context slice for `peer`, falling back to a manifest-derived stand-in when
@@ -671,39 +746,6 @@ fn fresh_cached_slice(state: &AppState, key: PeerCacheKey) -> Option<SliceEntry>
         .get(&key)
         .map(|entry| entry.value().clone())
         .filter(|entry| (Utc::now() - entry.fetched_at).num_seconds() <= SLICE_TTL_SECONDS)
-}
-
-pub async fn expand_tool_schema(
-    state: &AppState,
-    workspace_id: Uuid,
-    auth: &AuthContext,
-    namespaced: &str,
-) -> anyhow::Result<Value> {
-    let (prefix, raw_tool) = namespaced
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("federated tool name must be prefix:name"))?;
-    // Schema expansion issues a real outbound `tools/get`, so it resolves auth
-    // in the same workspace scope the eventual `tools/call` will.
-    let peer = peer_by_prefix(state, auth.org_id, prefix)
-        .await?
-        .scoped_to(workspace_id);
-    let manifest = manifest_for_peer(state, &peer).await?;
-    if let Some(tool) = manifest
-        .tools
-        .iter()
-        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(raw_tool))
-    {
-        if let Some(schema) = tool.get("inputSchema") {
-            return Ok(schema.clone());
-        }
-    }
-    let result = send_jsonrpc(state, &peer, "tools/get", json!({ "name": raw_tool })).await;
-    if let Ok(value) = result {
-        if let Some(schema) = value.get("inputSchema") {
-            return Ok(schema.clone());
-        }
-    }
-    anyhow::bail!("schema unavailable for tool '{namespaced}'")
 }
 
 pub async fn dispatch_notification(
@@ -832,9 +874,12 @@ async fn fetch_manifest(state: &AppState, peer: &Peer) -> anyhow::Result<PeerMan
     })
 }
 
-/// Maximum pages fetched per `paginated_list` call. A buggy peer returning an
+/// Maximum pages fetched per paginated list call. A buggy peer returning an
 /// infinite cursor would otherwise loop forever; this caps the damage.
-const MAX_PAGINATION_PAGES: usize = 50;
+///
+/// `pub(crate)` so the connector's `tools/list` loop uses the same cap rather
+/// than growing its own copy.
+pub(crate) const MAX_PAGINATION_PAGES: usize = 50;
 
 /// The cursor for the next page, or `None` when the peer signalled the last one.
 ///
@@ -844,7 +889,10 @@ const MAX_PAGINATION_PAGES: usize = 50;
 /// end pagination with an explicit `"nextCursor": null`, and `Value::get` returns
 /// `Some(Value::Null)` for that — so treating "key present" as "keep paging"
 /// re-requests the last page until the page cap and duplicates every item on it.
-fn next_cursor(result: &Value) -> Option<Value> {
+///
+/// `pub(crate)` so `connectors::mcp_client` reuses these semantics instead of
+/// adding a third copy of them.
+pub(crate) fn next_cursor(result: &Value) -> Option<Value> {
     result
         .get("nextCursor")
         .or_else(|| result.get("cursor"))
@@ -885,20 +933,146 @@ async fn paginated_list(
     Ok(out)
 }
 
+/// Issue one JSON-RPC call to a peer, reusing the MCP session IONe already
+/// negotiated for this peer handle.
+///
+/// Before the session cache this initialized *reactively on every call* and
+/// discarded the returned `MCP-Session-Id`: against a server that enforces the
+/// header, each call cost a failed request, an `initialize`, a
+/// `notifications/initialized` and a retry, and left one more orphaned session
+/// behind on the peer. Now the id is negotiated at most once per (peer,
+/// credential scope) and re-negotiated only when the peer says the session is
+/// gone.
 async fn send_jsonrpc(
     state: &AppState,
     peer: &Peer,
     method: &str,
     params: Value,
 ) -> anyhow::Result<Value> {
-    match send_jsonrpc_once(state, peer, method, params.clone(), None).await {
+    if method == "initialize" {
+        return send_jsonrpc_once(state, peer, method, params, None).await;
+    }
+    let key = PeerCacheKey::for_peer(peer);
+    // Before the lookup, not after the store: an id that has aged out has to be
+    // handed back to the peer with a DELETE, and a store would overwrite it
+    // first — turning the expiry into exactly the orphaned server-side session
+    // this cache exists to stop creating.
+    prune_expired_sessions(state);
+    let cached = cached_session_id(state, key);
+    match send_jsonrpc_once(state, peer, method, params.clone(), cached.as_deref()).await {
         Ok(value) => Ok(value),
-        Err(e) if method != "initialize" && looks_like_missing_session(&e) => {
+        Err(e) if looks_like_missing_session(&e) => {
+            // The peer has already released whatever session IONe was holding,
+            // so the entry is dropped without a DELETE. `remove_if` rather than
+            // `remove`, so a session another task negotiated in the meantime is
+            // not thrown away.
+            if let Some(stale) = cached {
+                state
+                    .peer_mcp_sessions
+                    .remove_if(&key, |_, session| session.id == stale);
+            }
             let session_id = initialize_peer_session(state, peer).await?;
+            store_session(state, key, &session_id);
             send_jsonrpc_once(state, peer, method, params, Some(&session_id)).await
         }
         Err(e) => Err(e),
     }
+}
+
+/// The live session id for this peer handle, or `None` when there is none.
+/// Expiry is `prune_expired_sessions`' job, which the caller runs first.
+///
+/// Keyed by `PeerCacheKey` — peer **plus credential scope** — not by peer alone.
+/// An MCP session is opened by an `initialize` carrying one specific bearer, and
+/// a conforming server binds it to the principal that authenticated. Sharing one
+/// id across workspaces would therefore either be rejected by the peer or, worse,
+/// let a workspace-B call ride the server-side identity workspace A established.
+/// This is the same argument that keys the manifest and slice caches, and the
+/// scope is the same resolution input `peer_tokens` derives the bearer from, so
+/// equal keys always imply equal credentials.
+fn cached_session_id(state: &AppState, key: PeerCacheKey) -> Option<String> {
+    state
+        .peer_mcp_sessions
+        .get(&key)
+        .map(|entry| entry.value().id.clone())
+}
+
+fn store_session(state: &AppState, key: PeerCacheKey, session_id: &str) {
+    state.peer_mcp_sessions.insert(
+        key,
+        PeerMcpSession {
+            id: session_id.to_string(),
+            established_at: Utc::now(),
+        },
+    );
+}
+
+/// Drop session ids past the TTL and tell each peer to release them.
+///
+/// This is the bound on the (workspace × peer) key space the session cache
+/// introduces, and it is also the only teardown point inside the federation
+/// service: it is where IONe stops using a session it opened, so it is where the
+/// streamable-HTTP `DELETE` belongs. Evicting without the DELETE would leave the
+/// orphaned server-side session this cache exists to stop creating.
+///
+/// Lazy, like `prune_expired_manifests` — it runs on the way out to a peer, so a
+/// peer that is never called again keeps one entry until the next outbound call
+/// anywhere. The operator-driven teardown (peer revoke / delete) lives in the
+/// peers route handler, not here.
+fn prune_expired_sessions(state: &AppState) {
+    let now = Utc::now();
+    let ttl = mcp_session_ttl_seconds();
+    let mut expired = Vec::new();
+    state.peer_mcp_sessions.retain(|key, session| {
+        let live = (now - session.established_at).num_seconds() <= ttl;
+        if !live {
+            expired.push((*key, session.id.clone()));
+        }
+        live
+    });
+    for (key, session_id) in expired {
+        let state = state.clone();
+        tokio::spawn(async move {
+            terminate_session(&state, key, &session_id).await;
+        });
+    }
+}
+
+/// `DELETE {peer}/mcp` for one expired session, under the credential the scope
+/// that opened it resolves to. Best-effort: a peer that is unreachable, or that
+/// does not allow client-driven termination, must not turn a local eviction into
+/// an error anyone sees.
+async fn terminate_session(state: &AppState, key: PeerCacheKey, session_id: &str) {
+    let peer = match PeerRepo::new(state.pool.clone()).get(key.peer_id).await {
+        Ok(Some(peer)) => match key.workspace_scope {
+            Some(workspace_id) => peer.scoped_to(workspace_id),
+            None => peer,
+        },
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(peer_id = %key.peer_id, error = %e, "mcp session teardown peer lookup failed");
+            return;
+        }
+    };
+    let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
+    if let Err(e) = crate::services::peer_tokens::send_mcp_session_delete(
+        &state.pool,
+        &state.http,
+        &peer,
+        &endpoint,
+        session_id,
+    )
+    .await
+    {
+        tracing::warn!(peer_id = %peer.id, error = %e, "mcp session DELETE failed");
+    }
+}
+
+fn mcp_session_ttl_seconds() -> i64 {
+    std::env::var("IONE_MCP_SESSION_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MCP_SESSION_TTL_SECONDS)
 }
 
 async fn send_jsonrpc_once(
@@ -925,6 +1099,15 @@ async fn send_jsonrpc_once(
     )
     .await?;
     let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        // Streamable HTTP, "Session Management": a server that has expired or
+        // never issued the session the request refers to answers 404. Tagged so
+        // `looks_like_missing_session` recognises it — the bare
+        // "peer returned HTTP 404" it used to produce matched nothing, so a
+        // conforming peer's expiry signal was surfaced as a hard failure
+        // instead of triggering a re-handshake.
+        anyhow::bail!("peer returned HTTP 404 ({MISSING_SESSION_MARKER})");
+    }
     if !status.is_success() {
         anyhow::bail!("peer returned HTTP {}", status.as_u16());
     }
@@ -985,17 +1168,73 @@ async fn initialize_peer_session(state: &AppState, peer: &Peer) -> anyhow::Resul
     Ok(session_id)
 }
 
+/// Tag `send_jsonrpc_once` puts on an HTTP 404 so the session layer can tell it
+/// apart from every other unsuccessful status.
+const MISSING_SESSION_MARKER: &str = "mcp session missing";
+
+/// Whether a failed call means "the session you presented does not exist".
+///
+/// Covers the two shapes a peer can use: a JSON-RPC error naming the header
+/// (what a server enforcing sessions returns for a request that carries none),
+/// and the transport-level HTTP 404 the streamable-HTTP spec defines for an
+/// expired or unknown session.
 fn looks_like_missing_session(error: &anyhow::Error) -> bool {
     let msg = error.to_string().to_ascii_lowercase();
-    msg.contains("mcp-session-id") || msg.contains("session not found")
+    msg.contains("mcp-session-id")
+        || msg.contains("session not found")
+        || msg.contains(MISSING_SESSION_MARKER)
 }
 
+/// Whether `raw_tool` is one the operator authorized on this peer.
+///
+/// `peers.tool_allowlist` is written by `POST /api/v1/peers/:id/authorize`,
+/// which is also what promotes the peer to Active, so an operator who authorizes
+/// a narrow list has stated the full set of tools any caller may invoke.
+///
+/// **An empty array means "no allowlist configured", not "nothing allowed."**
+/// `migrations/0016_peers_oauth.sql` defaults the column to `'[]'`, and nothing
+/// distinguishes that default from an operator who authorized zero tools — the
+/// column is `NOT NULL DEFAULT '[]'`, so there is no "unset" value to read. Every
+/// peer seeded directly (rather than through the authorize route) therefore
+/// carries `'[]'`, and reading that as fail-closed would deny every federated
+/// call made by such a peer. Fail-closed is the better posture and needs a
+/// schema change to reach — a nullable column, or a separate
+/// `allowlist_configured` flag — so "unset" and "empty" stop being the same
+/// bytes. Pinned by
+/// `tests/tool_allowlist_integration.rs::an_empty_allowlist_is_treated_as_unconfigured`.
+///
+/// A non-empty allowlist *is* enforced, on every federated invocation path.
+fn tool_is_allowlisted(peer: &Peer, raw_tool: &str) -> bool {
+    let Some(entries) = peer.tool_allowlist.as_array() else {
+        return true;
+    };
+    if entries.is_empty() {
+        return true;
+    }
+    entries
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|allowed| allowed == raw_tool)
+}
+
+/// Every federated `tools/call` funnels through here, so the allowlist check is
+/// repeated at the point of dispatch rather than only at the entry points.
+/// `route_tool_call_with_session` and `execute_pending_tool_call` both check
+/// earlier — they can attribute the denial to a workspace and a caller, which
+/// this cannot — but a future caller that forgets to still cannot invoke a tool
+/// the operator did not authorize.
 async fn invoke_peer_tool(
     state: &AppState,
     peer: &Peer,
     raw_tool: &str,
     args: Value,
 ) -> anyhow::Result<Value> {
+    if !tool_is_allowlisted(peer, raw_tool) {
+        anyhow::bail!(
+            "FORBIDDEN: tool '{raw_tool}' is not in peer '{}' allowlist",
+            peer.name
+        );
+    }
     send_jsonrpc(
         state,
         peer,

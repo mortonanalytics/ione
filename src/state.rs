@@ -8,7 +8,7 @@ use crate::{
     connectors::peer_session::PeerSessionRegistry,
     models::Peer,
     services::{
-        federation::{PeerManifest, SliceEntry},
+        federation::{PeerManifest, PeerMcpSession, SliceEntry},
         interaction_sink::{InteractionSink, InteractionWriterRx},
         ollama::OllamaClient,
         peer_governor::PeerGovernor,
@@ -81,6 +81,10 @@ pub struct AppState {
     pub default_workspace_id: Uuid,
     pub peer_manifest_cache: Arc<dashmap::DashMap<PeerCacheKey, PeerManifest>>,
     pub peer_slice_cache: Arc<dashmap::DashMap<PeerCacheKey, SliceEntry>>,
+    /// Outbound MCP session ids, one per peer handle. Keyed by `PeerCacheKey`
+    /// for the same reason the two caches above are: the id is bound to the
+    /// credential the `initialize` presented, so it may not cross a scope.
+    pub peer_mcp_sessions: Arc<dashmap::DashMap<PeerCacheKey, PeerMcpSession>>,
     pub peer_sessions: Arc<PeerSessionRegistry>,
     pub peer_governor: Arc<dashmap::DashMap<Uuid, Arc<PeerGovernor>>>,
     pub mcp_sessions: Arc<dashmap::DashMap<String, serde_json::Value>>,
@@ -122,6 +126,7 @@ impl AppState {
                 default_workspace_id,
                 peer_manifest_cache: Arc::new(dashmap::DashMap::new()),
                 peer_slice_cache: Arc::new(dashmap::DashMap::new()),
+                peer_mcp_sessions: Arc::new(dashmap::DashMap::new()),
                 peer_sessions: Arc::new(PeerSessionRegistry::default()),
                 peer_governor: Arc::new(dashmap::DashMap::new()),
                 mcp_sessions: Arc::new(dashmap::DashMap::new()),
