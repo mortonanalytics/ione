@@ -222,6 +222,39 @@ async fn provision_returns_secret_and_stores_ciphertext() {
     assert!(stored.is_some());
 }
 
+/// v1 section 3.5 documents the 200 ack as `{"ok", "duplicate", "signalIds"}`.
+/// The struct derived Serialize without a rename, so it emitted `signal_ids`
+/// while every other peer-facing payload is camelCase. Pin the wire key.
+#[tokio::test]
+#[ignore]
+async fn webhook_ack_uses_the_camel_case_key_from_the_contract() {
+    let (base, pool, _workspace_id, peer_id, secret) = setup_bound_peer().await;
+
+    let event = envelope(peer_id, "evt-ack-shape", "t-acme");
+    let resp = post_event(&base, peer_id, &secret, &event).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: Value = resp.json().await.expect("ack not JSON");
+    assert!(
+        body.get("signalIds").and_then(Value::as_array).is_some(),
+        "section 3.5: the ack must carry `signalIds`, got {body}"
+    );
+    assert!(
+        body.get("signal_ids").is_none(),
+        "the snake_case spelling must not be emitted, got {body}"
+    );
+
+    // A replay omits the key entirely rather than sending it null.
+    let replay = post_event(&base, peer_id, &secret, &event).await;
+    let replay_body: Value = replay.json().await.expect("replay ack not JSON");
+    assert_eq!(replay_body["duplicate"], true);
+    assert!(
+        replay_body.get("signalIds").is_none(),
+        "a duplicate ack must omit signalIds, got {replay_body}"
+    );
+    let _ = &pool;
+}
+
 #[tokio::test]
 #[ignore]
 async fn valid_event_replays_and_no_binding_do_not_poison_dedup() {

@@ -55,6 +55,7 @@ pub struct WebhookEnvelope {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebhookAckResponse {
     pub ok: bool,
     pub duplicate: bool,

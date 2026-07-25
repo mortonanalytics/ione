@@ -78,7 +78,7 @@ jobs:
                    observability_read_integration rbac_integration \
                    contract_api_routes contract_demo_workspace contract_errors \
                    contract_schema contract_v1_integration \
-                   peer_credential_integration; do
+                   peer_credential_integration stub_peer_conformance_integration; do
             echo "=== $p ==="
             cargo test --test "$p" -- --ignored --test-threads=1
           done
