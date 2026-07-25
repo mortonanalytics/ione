@@ -414,16 +414,18 @@ async fn ione_accepts_stub_peer_signed_webhook() {
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], true);
     assert_eq!(body["duplicate"], false);
-    // §3.5 documents this key as `signalIds`; `WebhookAckResponse` in
-    // src/routes/webhooks.rs carries no `rename_all = "camelCase"`, so IONe
-    // actually emits `signal_ids`. Accepting either keeps this test honest about
-    // "an accepted event reports the signals it created" without pinning the
-    // divergence in place — see the findings note in md/design/peer-conformance-kit.md.
+    // §3.5 freezes this key as `signalIds`, and `WebhookAckResponse` in
+    // src/routes/webhooks.rs carries `rename_all = "camelCase"` to match. Only the
+    // camelCase spelling is accepted here; the snake_case one is asserted absent so
+    // dropping the rename fails this test rather than sliding past it.
     let signal_ids = body
         .get("signalIds")
-        .or_else(|| body.get("signal_ids"))
         .and_then(Value::as_array)
-        .unwrap_or_else(|| panic!("§3.5: accepted webhook must report signal ids: {body}"));
+        .unwrap_or_else(|| panic!("§3.5: accepted webhook must report `signalIds`: {body}"));
+    assert!(
+        body.get("signal_ids").is_none(),
+        "§3.5: the snake_case spelling must not be emitted: {body}"
+    );
     assert_eq!(
         signal_ids.len(),
         1,

@@ -808,9 +808,12 @@ async fn signed_publication_created_webhook_fans_in_once_and_replays_are_suppres
     let ack: Value = response.json().await.expect("json");
     assert_eq!(ack["ok"], true);
     assert_eq!(ack["duplicate"], true, "a repeated event id is a duplicate");
+    // §3.5: `signal_ids` is `skip_serializing_if = "Option::is_none"`, so a duplicate
+    // omits the key rather than sending it null. Assert absence — a null-or-absent
+    // check would be unfalsifiable, since the null branch is unreachable.
     assert!(
-        ack.get("signalIds").map(Value::is_null).unwrap_or(true),
-        "a duplicate reports no new signals: {ack}"
+        ack.get("signalIds").is_none(),
+        "a duplicate ack must omit signalIds entirely: {ack}"
     );
 
     let signals: i64 =

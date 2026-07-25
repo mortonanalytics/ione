@@ -63,8 +63,17 @@ pub const DOCUMENT_DOWNLOAD_URL: &str =
     "https://files.stub-peer.test/reports/q2-compliance.pdf?sig=stub";
 
 /// `tools/list` is served in two pages so a consumer's `nextCursor` handling is
-/// exercised (§8.1). `resources/list` is deliberately a single page, because the
-/// four panel-discovery paths read page 1 only (§8.2).
+/// exercised (§8.1).
+///
+/// `resources/list` stays a single page. The original reason — "the four
+/// panel-discovery paths read page 1 only" — stopped being true on 2026-07-25
+/// (issue #18): all four now follow `nextCursor` via `src/services/peer_panels.rs`
+/// (§8.2). It stays single-page because paginating it here would buy no coverage
+/// and cost some: `tests/peer_ref_rendering_integration.rs` already drives all four
+/// panel paths across three pages with an explicit `nextCursor: null` terminator,
+/// while every consumer of this stub asserts against the *whole* canned resource
+/// set (`resources_for`) by URI, so splitting it would only add cursor bookkeeping
+/// between those assertions and the fixture.
 const TOOLS_PAGE_1_CURSOR: &str = "stub-tools-page-2";
 
 /// The two tools every profile serves, in `tools/list` page order.
