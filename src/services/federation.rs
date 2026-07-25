@@ -22,6 +22,12 @@ use crate::{
 };
 
 const MANIFEST_TTL_SECONDS: i64 = 300;
+/// How long a cached peer context slice may be served before it is refetched.
+/// Matches `MANIFEST_TTL_SECONDS`: the slice is peer-supplied payload, and the
+/// `resources/updated` eviction below is a peer courtesy, not a guarantee — a
+/// peer that never sends it would otherwise pin its body for the process
+/// lifetime.
+const SLICE_TTL_SECONDS: i64 = 300;
 const PENDING_TOOL_CALL_TTL_MINUTES: i64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +127,12 @@ pub async fn route_tool_call_with_session(
     let (prefix, raw_tool) = namespaced
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("federated tool name must be prefix:name"))?;
-    let peer = peer_by_prefix(state, auth.org_id, prefix).await?;
+    // Outbound auth for this call is resolved in the calling workspace's scope,
+    // so the peer sees this workspace's delegated token (#12) or per-(workspace,
+    // peer) credential (#19) rather than falling through to a peer-global one.
+    let peer = peer_by_prefix(state, auth.org_id, prefix)
+        .await?
+        .scoped_to(workspace_id);
     if let Err(err) =
         ensure_peer_bound_to_workspace(state, workspace_id, peer.id, auth.org_id).await
     {
@@ -350,10 +361,14 @@ pub async fn execute_pending_tool_call(
         .namespaced_tool
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("pending tool has invalid namespaced name"))?;
+    // The approved call is executed in the workspace it was enqueued for, so it
+    // presents that workspace's credential — the same bearer the unapproved
+    // path would have used.
     let peer = PeerRepo::new(state.pool.clone())
         .get(pending.peer_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("pending peer not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("pending peer not found"))?
+        .scoped_to(pending.workspace_id);
     if peer.status != crate::models::PeerStatus::Active {
         anyhow::bail!(
             "peer is not active (status: {:?}); execution blocked",
@@ -425,6 +440,11 @@ pub async fn refresh_manifest_if_changed(state: &AppState, peer_id: Uuid) -> any
     Ok(changed)
 }
 
+/// Boot-time manifest hydration. Deliberately peer-global: it runs before any
+/// request, over every peer regardless of which workspaces are bound to it, so
+/// there is no workspace whose credential it could legitimately present. The
+/// peer handles here stay unscoped and resolve on the peer-global OAuth / env
+/// tiers.
 pub async fn hydrate_manifest_cache(state: &AppState) {
     let peers = match PeerRepo::new(state.pool.clone()).list().await {
         Ok(peers) => peers,
@@ -460,7 +480,8 @@ pub async fn workspace_peer_manifest(
     let peer = PeerRepo::new(state.pool.clone())
         .get_for_org(peer_id, auth.org_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("peer not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("peer not found"))?
+        .scoped_to(workspace_id);
     manifest_for_peer(state, &peer).await
 }
 
@@ -533,8 +554,8 @@ pub async fn workspace_context_slices(
         .await?;
     let mut entries = Vec::new();
     for peer in peers {
-        let entry = if let Some(cached) = state.peer_slice_cache.get(&peer.id) {
-            cached.value().clone()
+        let entry = if let Some(cached) = fresh_cached_slice(state, peer.id) {
+            cached
         } else {
             let fetched = fetch_slice(state, &peer).await?;
             state.peer_slice_cache.insert(peer.id, fetched.clone());
@@ -545,15 +566,31 @@ pub async fn workspace_context_slices(
     Ok(entries)
 }
 
+/// The cached slice for `peer_id`, or `None` when it is absent or older than
+/// `SLICE_TTL_SECONDS`. Every read of `peer_slice_cache` goes through here so
+/// no path can serve an unbounded-age peer payload.
+fn fresh_cached_slice(state: &AppState, peer_id: Uuid) -> Option<SliceEntry> {
+    state
+        .peer_slice_cache
+        .get(&peer_id)
+        .map(|entry| entry.value().clone())
+        .filter(|entry| (Utc::now() - entry.fetched_at).num_seconds() <= SLICE_TTL_SECONDS)
+}
+
 pub async fn expand_tool_schema(
     state: &AppState,
+    workspace_id: Uuid,
     auth: &AuthContext,
     namespaced: &str,
 ) -> anyhow::Result<Value> {
     let (prefix, raw_tool) = namespaced
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("federated tool name must be prefix:name"))?;
-    let peer = peer_by_prefix(state, auth.org_id, prefix).await?;
+    // Schema expansion issues a real outbound `tools/get`, so it resolves auth
+    // in the same workspace scope the eventual `tools/call` will.
+    let peer = peer_by_prefix(state, auth.org_id, prefix)
+        .await?
+        .scoped_to(workspace_id);
     let manifest = manifest_for_peer(state, &peer).await?;
     if let Some(tool) = manifest
         .tools
@@ -961,10 +998,7 @@ pub async fn reindex_peer_catalog(
     let Some(prefix) = peer.tool_prefix.as_deref() else {
         return Ok(());
     };
-    let slice = state
-        .peer_slice_cache
-        .get(&peer.id)
-        .map(|entry| entry.value().clone());
+    let slice = fresh_cached_slice(state, peer.id);
     let repo = CatalogRepo::new(state.pool.clone());
 
     let mut desired: Vec<CatalogUpsert> = Vec::new();
