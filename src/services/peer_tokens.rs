@@ -27,13 +27,24 @@ struct RefreshTokenResp {
     expires_in: Option<i64>,
 }
 
+/// Outbound bearer precedence, highest first:
+///
+/// 1. the peer's brokered OAuth access token (`peers.access_token_ciphertext`),
+/// 2. the pre-broker static credential for `peer.workspace_scope` (issue #19),
+/// 3. the process-global `IONE_OAUTH_STATIC_BEARER` env fallback.
+///
+/// OAuth outranks the static credential deliberately: when #12 lands, a peer
+/// that gains a brokered token starts using it on the next request with no flag
+/// day and no operator action, and the now-dormant static credential can be
+/// deleted at leisure. All three produce the identical `Authorization: Bearer
+/// <credential>` header, so the peer cannot tell which mode IONe is in.
 pub async fn resolve_access_token(
     pool: &PgPool,
     http: &reqwest::Client,
     peer: &Peer,
 ) -> Result<String> {
     if peer.access_token_ciphertext.is_none() {
-        return static_bearer();
+        return pre_broker_bearer(pool, peer).await;
     }
     if token_is_fresh(peer) {
         return decrypt_access_token(peer);
@@ -49,7 +60,7 @@ pub async fn resolve_access_token_locked(
     peer: &Peer,
 ) -> Result<String> {
     if peer.access_token_ciphertext.is_none() {
-        return static_bearer();
+        return pre_broker_bearer(&state.pool, peer).await;
     }
     // Fast path: token is fresh — no need to take the lock.
     if token_is_fresh(peer) {
@@ -326,6 +337,29 @@ fn decrypt_access_token(peer: &Peer) -> Result<String> {
         .as_deref()
         .context("peer access token is unavailable")?;
     token_crypto::decrypt_token(ciphertext).context("failed to decrypt peer access token")
+}
+
+/// Precedence tiers 2 and 3: the per-(workspace, peer) static credential when
+/// this peer handle carries a workspace scope, else the process-global env
+/// bearer. Peer-global handles (`workspace_scope == None`) skip tier 2 — there
+/// is no workspace to resolve a credential for, and guessing one would present
+/// a credential the operator scoped to a different workspace.
+async fn pre_broker_bearer(pool: &PgPool, peer: &Peer) -> Result<String> {
+    match workspace_credential(pool, peer).await? {
+        Some(credential) => Ok(credential),
+        None => static_bearer(),
+    }
+}
+
+/// The pre-broker static credential for this peer handle's workspace scope, if
+/// the handle carries one and a credential is stored for it.
+pub async fn workspace_credential(pool: &PgPool, peer: &Peer) -> Result<Option<String>> {
+    let Some(workspace_id) = peer.workspace_scope else {
+        return Ok(None);
+    };
+    crate::repos::WorkspacePeerCredentialRepo::new(pool.clone())
+        .secret_for(workspace_id, peer.id)
+        .await
 }
 
 fn static_bearer() -> Result<String> {

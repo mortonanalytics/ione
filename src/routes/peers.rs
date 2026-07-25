@@ -287,7 +287,10 @@ pub async fn subscribe_peer(
         .get(peer_id)
         .await
         .map_err(AppError::Internal)?
-        .ok_or_else(|| AppError::BadRequest(format!("peer {} not found", peer_id)))?;
+        .ok_or_else(|| AppError::BadRequest(format!("peer {} not found", peer_id)))?
+        // Subscribe happens in this workspace's scope, so the whoami handshake
+        // below must present this workspace's pre-broker credential (#19).
+        .scoped_to(workspace_id);
 
     if peer.status != crate::models::PeerStatus::Active {
         return Err(AppError::BadRequest(format!(
@@ -355,7 +358,7 @@ pub(crate) async fn ensure_peer_in_org(
     Ok(())
 }
 
-async fn ensure_workspace_and_peer_in_org(
+pub(crate) async fn ensure_workspace_and_peer_in_org(
     state: &AppState,
     workspace_id: Uuid,
     peer_id: Uuid,

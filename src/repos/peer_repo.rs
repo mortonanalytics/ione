@@ -115,6 +115,7 @@ impl PeerRepo {
                 last_connected_at: row.get("last_connected_at"),
                 last_session_error: row.get("last_session_error"),
                 last_manifest_jsonb: row.get("last_manifest_jsonb"),
+                workspace_scope: None,
             };
             let secret = row.get("webhook_secret_ciphertext");
             (peer, secret)

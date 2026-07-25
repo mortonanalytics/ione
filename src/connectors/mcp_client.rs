@@ -160,15 +160,33 @@ impl McpClientConnector {
     async fn resolve_bearer_token(&self, force_refresh: bool) -> anyhow::Result<String> {
         if let (Some(pool), Some(peer_id)) = (&self.pool, self.peer_id) {
             if let Some(peer) = PeerRepo::new(pool.clone()).get(peer_id).await? {
-                return if force_refresh {
-                    crate::services::peer_tokens::refresh_access_token(pool, &self.http, &peer)
-                        .await
-                } else if peer.access_token_ciphertext.is_some() || self.bearer_token.is_empty() {
-                    crate::services::peer_tokens::resolve_access_token(pool, &self.http, &peer)
-                        .await
-                } else {
-                    Ok(self.bearer_token.clone())
+                // This connector polls one workspace, so its outbound auth is
+                // resolved in that workspace's scope (pre-broker credential, #19).
+                let peer = match self.workspace_id {
+                    Some(workspace_id) => peer.scoped_to(workspace_id),
+                    None => peer,
                 };
+                if force_refresh {
+                    return crate::services::peer_tokens::refresh_access_token(
+                        pool, &self.http, &peer,
+                    )
+                    .await;
+                }
+                if peer.access_token_ciphertext.is_some() || self.bearer_token.is_empty() {
+                    return crate::services::peer_tokens::resolve_access_token(
+                        pool, &self.http, &peer,
+                    )
+                    .await;
+                }
+                // The per-(workspace, peer) credential outranks the literal in
+                // connector config, so rotating it through the API takes effect
+                // without rewriting connector rows.
+                if let Some(credential) =
+                    crate::services::peer_tokens::workspace_credential(pool, &peer).await?
+                {
+                    return Ok(credential);
+                }
+                return Ok(self.bearer_token.clone());
             }
         }
         Ok(self.bearer_token.clone())

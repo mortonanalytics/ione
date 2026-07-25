@@ -155,7 +155,10 @@ pub async fn refresh_binding(
         .get(binding.peer_id)
         .await
         .map_err(RefreshError::Db)?
-        .ok_or(RefreshError::PeerGone)?;
+        .ok_or(RefreshError::PeerGone)?
+        // Refresh re-runs whoami for this binding's workspace, so it must present
+        // that workspace's pre-broker credential (#19).
+        .scoped_to(binding.workspace_id);
 
     let whoami = fetch_whoami(state, &peer)
         .await
