@@ -195,13 +195,21 @@ A duplicate is an idempotent success, not an error:
 | `foreign_tenant_id` | string | **yes** | length 1..=512 | **Enforced** — `webhooks.rs:231-233` |
 | `severity` | string \| absent | no | `routine` \| `flagged` \| `command`; absent or unknown ⇒ `routine` | **Enforced** — `Option<String>`, `webhooks.rs:45` |
 | `data` | object | **yes** | must be a JSON **object**; serialized length ≤ 102 400 bytes | **Enforced** — `webhooks.rs:234-245` |
-| `approval_required` | boolean | **yes** | no default — **omitting this field is a deserialization failure ⇒ 400** | **Enforced** — `webhooks.rs:48` (`bool`, not `Option<bool>`) |
+| `approval_required` | boolean | no | defaults `false` when absent | **Enforced** — `#[serde(default)]`, `webhooks.rs:48-55` |
 
-> **Divergence from the v0.1 playbook.** The playbook's prose reads as though
-> `approval_required` were optional. It is not: the Rust field is a bare `bool`
-> with no `#[serde(default)]`, so an envelope that omits it fails to deserialize
-> and returns `400 {"error":"webhook_rejected"}`. v1 freezes it as **required**.
-> See [Appendix A](#appendix-a--code-vs-playbook-divergences).
+> **Resolved against the v0.1 playbook.** The playbook reads as though
+> `approval_required` were optional. At freeze time the code disagreed — a bare
+> `bool` with no `#[serde(default)]`, so omitting it failed deserialization and
+> returned a bare `400 {"error":"webhook_rejected"}` carrying no `message` (§7.2
+> forbids one). v1 resolves this **in the playbook's favour: the field is
+> optional, defaulting to `false`.**
+>
+> This is security-neutral, not a relaxation. The policy floor in §3.5 is
+> escalate-only, so an absent field is exactly equivalent to an explicit
+> `false` — a value a peer may always send. Requiring the field therefore bought
+> no safety while costing peers an undiagnosable rejection. Amended 2026-07-25,
+> the freeze date, before any peer implemented against v1; it is a pre-adoption
+> correction, not a v2 break.
 
 `approval_required: true` routes the event through IONe's approval gateway.
 IONe enforces a policy floor: the flag may **escalate** but never **de-escalate**.
@@ -213,10 +221,20 @@ A `severity` of `flagged` or `command` is always gated regardless of the flag.
 |---|---|
 | Peer exists and `status = active` | 401 `webhook_unauthorized` |
 | Peer has a provisioned webhook secret | 401 `webhook_unauthorized` |
-| Signature valid | 401 `webhook_unauthorized` |
+| `X-IONe-Signature` **parses** per the §3.1 grammar | 400 `webhook_rejected` |
+| Signature digest **verifies** against the peer secret | 401 `webhook_unauthorized` |
+| Timestamps inside both replay windows (§3.2) | 400 `webhook_rejected` |
+| Envelope fields valid per §3.3 | 400 `webhook_rejected` |
 | An **active** `workspace_peer_bindings` row exists for `(peer_id, foreign_tenant_id)` | 400 `webhook_rejected`, and **no** dedup row is written — safe to retry once the operator adds the binding |
 
-**Enforcement status: Enforced.** `webhooks.rs:112-155`.
+> **400 vs 401.** A header that does not parse never reaches signature
+> verification, so *malformed grammar is 400, not 401*; only a well-formed
+> header whose digest fails to verify is 401. The freeze-time draft collapsed
+> these into a single "Signature valid → 401" row, which was ambiguous.
+> Clarified 2026-07-25 — this documents existing behavior and changes no code.
+
+**Enforcement status: Enforced.** Parser `webhooks.rs:174-195` (400);
+`verify_signature` `webhooks.rs:205-213` (401); handler `webhooks.rs:112-155`.
 
 ### 3.5 Webhook responses
 
@@ -829,13 +847,15 @@ would itself be additive.
 
 ## Appendix A — code vs. playbook divergences
 
-Recorded at freeze time. In every case **the code behavior is what v1 freezes**;
-the v0.1 playbook is superseded.
+Recorded at freeze time. **In all but one case the code behavior is what v1
+freezes** and the v0.1 playbook is superseded. The exception is divergence 2,
+where v1 instead adopts the playbook's reading and the code was amended to
+match — see the note in §3.3 for why.
 
 | # | Topic | Playbook (v0.1) says | Code actually does | Ref |
 |---|---|---|---|---|
 | 1 | `slice://` on IONe's own server | IONe exposes an "aggregated `slice://`" to MCP clients | `resources/list` advertises only `whoami://`; `resources/read` returns `-32602` for every other URI. `slice://` is peer→IONe only. | `src/mcp_server.rs:955-986` |
-| 2 | Webhook `approval_required` | Reads as optional | Bare `bool` with no `#[serde(default)]` — omitting it fails deserialization ⇒ 400 | `src/routes/webhooks.rs:48` |
+| 2 | Webhook `approval_required` | Reads as optional | **Was** a bare `bool` (omitting it ⇒ 400). **Resolved in the playbook's favour**: now `#[serde(default)]`, optional, defaults `false`. Security-neutral under the escalate-only floor. | `src/routes/webhooks.rs:48-55` |
 | 3 | Map metadata | `tile_url`, `bounds`, `attribution` read as co-required | Only non-empty `tile_url` is required; the rest are optional | `src/services/map_layers.rs:158-161` |
 | 4 | Chart metadata | `chart_type`, `x_axis`, `y_axis`, `series` required | In the flat form all four are **defaulted** (`line`/`bucket_start`/`value`/`["value"]`); a nested `metadata.spec`/`chart_spec` form also exists and accepts camelCase | `src/services/chart_panels.rs:326-400` |
 | 5 | Document `mime_type` | Only `metadata.mime_type` documented | Falls back `metadata.mime_type` → `metadata.mimeType` → resource `mimeType` | `src/services/document_panels.rs:165-181` |

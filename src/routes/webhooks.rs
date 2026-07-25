@@ -45,6 +45,12 @@ pub struct WebhookEnvelope {
     pub foreign_tenant_id: String,
     pub severity: Option<String>,
     pub data: Value,
+    /// Optional, defaults false. The ingress policy floor is escalate-only
+    /// (`env.approval_required || severity in {Flagged, Command}`), so omitting
+    /// this field is exactly equivalent to sending `false` — a value a peer may
+    /// always send. Making it required bought no safety and cost peers an
+    /// undebuggable 400, since webhook errors deliberately carry no message.
+    #[serde(default)]
     pub approval_required: bool,
 }
 

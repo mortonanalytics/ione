@@ -646,10 +646,12 @@ async fn envelope_validation_rejects_malformed_fields() {
 /// but never de-escalate, so `flagged`/`command` are gated regardless of the flag.
 #[tokio::test]
 #[ignore]
-async fn approval_required_is_mandatory_and_severity_escalates_the_policy_floor() {
+async fn approval_required_is_optional_and_severity_escalates_the_policy_floor() {
     let (base, pool, _workspace_id, peer_id, secret) = setup_bound_peer().await;
 
-    // §3.3: the field is required. An envelope omitting it is rejected.
+    // §3.3: the field is optional and defaults to false. Omitting it must be
+    // accepted and must behave identically to sending an explicit `false` --
+    // the escalate-only floor below is what actually protects the gateway.
     let mut missing = envelope(peer_id, "evt-no-flag", "t-acme");
     missing
         .as_object_mut()
@@ -658,16 +660,40 @@ async fn approval_required_is_mandatory_and_severity_escalates_the_policy_floor(
     let resp = post_event(&base, peer_id, &secret, &missing).await;
     assert_eq!(
         resp.status(),
-        StatusCode::BAD_REQUEST,
-        "§3.3: omitting approval_required is a deserialization failure"
+        StatusCode::OK,
+        "§3.3: omitting approval_required must be accepted and default to false"
     );
-    let seen: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM webhook_events_seen WHERE event_id = 'evt-no-flag'",
+    let defaulted: bool = sqlx::query_scalar(
+        "SELECT approval_required FROM signals WHERE evidence->>'event_id' = 'evt-no-flag'",
     )
     .fetch_one(&pool)
     .await
-    .expect("seen count");
-    assert_eq!(seen, 0, "a rejected envelope must not poison dedup");
+    .expect("signal for defaulted envelope");
+    assert!(
+        !defaulted,
+        "§3.3: an absent approval_required must default to false"
+    );
+
+    // Absent must not be a back door around the floor: omitting the field on a
+    // `flagged` event must still gate, exactly as an explicit `false` does.
+    let mut missing_flagged = envelope(peer_id, "evt-no-flag-flagged", "t-acme");
+    {
+        let obj = missing_flagged.as_object_mut().expect("object");
+        obj.remove("approval_required");
+        obj.insert("severity".into(), json!("flagged"));
+    }
+    let resp = post_event(&base, peer_id, &secret, &missing_flagged).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let escalated: bool = sqlx::query_scalar(
+        "SELECT approval_required FROM signals WHERE evidence->>'event_id' = 'evt-no-flag-flagged'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("signal for absent-flag flagged envelope");
+    assert!(
+        escalated,
+        "§3.3 policy floor: an absent approval_required must still escalate on severity"
+    );
 
     // The policy floor: severity escalates even when the peer sends `false`, and a
     // routine event with `false` is not spuriously escalated.
