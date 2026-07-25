@@ -120,9 +120,23 @@ authorization server:
 IONe stores delegated tokens per `(workspace, peer)` and refreshes them
 automatically. The resulting access token is presented per §1.
 
+> **`registration_endpoint` is required.** The discovery document **must**
+> include `registration_endpoint` (RFC 7591 dynamic client registration).
+> `PeerDiscovery` (`src/services/peer_oauth.rs:13`) deserializes it as a
+> non-optional field, so a peer that omits it fails the join with
+> `400 "invalid peer metadata"` before any authorization step — even though the
+> table above did not list it at freeze time. Recorded here because two
+> independent reviews hit it against otherwise-conforming fixtures.
+>
+> IONe currently ignores `issuer` and `revocation_endpoint` from the document.
+> Making `registration_endpoint` optional (falling back to CIMD or a
+> pre-registered client) is the better long-term fix and is tracked as a
+> follow-up; until then, publish it.
+
 **Enforcement status: Specified** for the peer's endpoint set (IONe fails the
 authorization flow rather than validating the peer's discovery document against
-the spec). **Enforced** for the resulting header shape.
+the spec), **except `registration_endpoint`, which is Enforced by
+deserialization**. **Enforced** for the resulting header shape.
 
 ---
 
