@@ -61,7 +61,8 @@ async fn fetch_whoami_body(
     body: &Value,
     mcp_session_id: Option<&str>,
 ) -> anyhow::Result<Value> {
-    let body: Value = crate::services::peer_tokens::send_mcp_request_with_session(
+    let request_id = body.get("id").cloned().unwrap_or(Value::Null);
+    let response = crate::services::peer_tokens::send_mcp_request_with_session(
         &state.pool,
         &state.http,
         peer,
@@ -70,9 +71,10 @@ async fn fetch_whoami_body(
         mcp_session_id,
     )
     .await?
-    .error_for_status()?
-    .json()
-    .await?;
+    .error_for_status()?;
+    // A spec-conforming peer may answer this POST with `text/event-stream`;
+    // `read_jsonrpc_reply` handles both framings and correlates by request id.
+    let body = crate::services::peer_tokens::read_jsonrpc_reply(response, &request_id).await?;
     if let Some(error) = body.get("error").filter(|error| !error.is_null()) {
         anyhow::bail!("peer MCP error: {}", error);
     }
@@ -84,6 +86,7 @@ async fn initialize_peer_session(
     peer: &Peer,
     endpoint: &str,
 ) -> anyhow::Result<String> {
+    let request_id = Value::from(1);
     let resp = crate::services::peer_tokens::send_mcp_request(
         &state.pool,
         &state.http,
@@ -91,7 +94,7 @@ async fn initialize_peer_session(
         endpoint,
         &json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": request_id,
             "method": "initialize",
             "params": { "protocolVersion": "2025-11-25", "capabilities": {} }
         }),
@@ -102,7 +105,8 @@ async fn initialize_peer_session(
         .get("MCP-Session-Id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let body: Value = resp.error_for_status()?.json().await?;
+    let resp = resp.error_for_status()?;
+    let body = crate::services::peer_tokens::read_jsonrpc_reply(resp, &request_id).await?;
     header_session
         .or_else(|| {
             body.get("result")

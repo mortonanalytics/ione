@@ -2669,12 +2669,20 @@ initTablePanel();
 
 const DOCUMENT_IFRAME_SANDBOX = 'allow-downloads allow-same-origin';
 const DOCUMENT_EMBED_TIMEOUT_MS = 3000;
+// Peer signed URLs are short-lived. Contract v1 §4.5 requires a `download_url`
+// to stay valid for at least 5 minutes after `resources/list`, so a ref older
+// than this is presumed expired and re-requested before it is used. IONe never
+// caches, proxies, or re-hosts the object itself — only the ref is refreshed.
+const DOCUMENT_REF_MAX_AGE_MS = 240000;
 
 let documentLoadedWorkspaceId = null;
 let documentItems = [];
 let documentActiveItem = null;
 let documentRequestController = null;
 let documentEmbedTimer = null;
+let documentRefsFetchedAt = 0;
+let documentRefRefreshInFlight = null;
+let documentRefRetriedId = null;
 
 function initDocumentPanel() {
   document.getElementById('document-connect-peer')?.addEventListener('click', () => switchTab('connectors'));
@@ -2690,6 +2698,8 @@ function resetDocumentPanel() {
   documentLoadedWorkspaceId = null;
   documentItems = [];
   documentActiveItem = null;
+  documentRefsFetchedAt = 0;
+  documentRefRetriedId = null;
   if (documentRequestController) {
     documentRequestController.abort();
     documentRequestController = null;
@@ -2710,6 +2720,7 @@ function resetDocumentPanel() {
 async function updateDocumentPanel(workspaceId) {
   documentLoadedWorkspaceId = workspaceId;
   documentActiveItem = null;
+  documentRefRetriedId = null;
   showDocumentState('loading');
   resetDocumentRender();
   const controller = replaceDocumentController();
@@ -2727,6 +2738,7 @@ async function updateDocumentPanel(workspaceId) {
   if (!activeWorkspace || activeWorkspace.id !== workspaceId || documentLoadedWorkspaceId !== workspaceId) return;
 
   documentItems = (data.peerDocuments || data.peer_documents || []).map(normalizeDocumentItem);
+  documentRefsFetchedAt = Date.now();
   const peerErrors = data.peerErrors || data.peer_errors || [];
   renderDocumentList(documentItems, peerErrors);
 
@@ -2828,19 +2840,170 @@ function formatBytes(value) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function selectDocument(item) {
-  documentActiveItem = item;
+/* Expired signed-URL handling.
+ *
+ * A peer's `download_url` is a short-lived signed URL owned by the peer. IONe
+ * neither proxies it nor stores the object it points at, so there is nothing to
+ * invalidate on expiry — the shell simply re-requests the *ref*: it re-runs
+ * GET /document-panels, which performs a live MCP `resources/list` fan-out and
+ * returns whatever URL the peer signs at that moment. Two triggers:
+ *
+ *   1. Pre-emptive — a ref older than DOCUMENT_REF_MAX_AGE_MS is refreshed
+ *      before it is embedded or followed.
+ *   2. Reactive — an embed that fails (dead URL, 403 on an expired signature,
+ *      peer-side deletion) is retried exactly once against a fresh ref. A ref
+ *      that comes back byte-identical is not an expiry, so that case degrades
+ *      to the existing "could not be displayed inline" fallback instead of
+ *      looping.
+ *
+ * A ref that has disappeared from the peer's listing is reported as gone; it is
+ * never served from a cached copy, because no copy exists.
+ */
+function documentRefsAreStale() {
+  return !documentRefsFetchedAt || (Date.now() - documentRefsFetchedAt) > DOCUMENT_REF_MAX_AGE_MS;
+}
+
+async function requestFreshDocumentRefs(workspaceId) {
+  if (documentRefRefreshInFlight) return documentRefRefreshInFlight;
+  documentRefRefreshInFlight = (async () => {
+    try {
+      const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/document-panels`, { skipErrorToast: true });
+      const items = (data.peerDocuments || data.peer_documents || []).map(normalizeDocumentItem);
+      documentItems = items;
+      documentRefsFetchedAt = Date.now();
+      return items;
+    } catch (_err) {
+      return null;
+    } finally {
+      documentRefRefreshInFlight = null;
+    }
+  })();
+  return documentRefRefreshInFlight;
+}
+
+// `undefined` = the ref could not be re-requested; `null` = the peer no longer
+// lists it; otherwise the freshly-signed ref.
+async function refreshDocumentRef(item) {
+  if (!activeWorkspace) return undefined;
+  const items = await requestFreshDocumentRefs(activeWorkspace.id);
+  if (!items) return undefined;
+  return items.find((candidate) => candidate.id === item.id) || null;
+}
+
+function applyDocumentRefToLinks(item) {
+  document
+    .querySelectorAll('#document-toolbar a, #document-link-card a, #document-frame-container a.document-fallback-link')
+    .forEach((link) => { link.href = item.downloadUrl; });
+}
+
+function setDocumentNotice(message) {
+  const notice = document.getElementById('document-notice');
+  if (!notice) return;
+  notice.textContent = message;
+  notice.hidden = false;
+}
+
+function hideDocumentNotice() {
+  const notice = document.getElementById('document-notice');
+  if (!notice) return;
+  notice.textContent = '';
+  notice.hidden = true;
+}
+
+function showDocumentRefGone(item) {
+  clearDocumentEmbed();
+  const toolbar = document.getElementById('document-toolbar');
+  if (toolbar) {
+    toolbar.innerHTML = '';
+    toolbar.hidden = true;
+  }
+  const card = document.getElementById('document-link-card');
+  if (card) {
+    card.innerHTML = '';
+    card.hidden = true;
+  }
+  setDocumentNotice(`${item.peerName || 'The peer'} no longer offers this document.`);
+}
+
+async function selectDocument(item) {
+  // The list rows close over the item they were rendered with; a ref refresh
+  // replaces those objects, so always resolve the current ref by id.
+  const current = documentItems.find((candidate) => candidate.id === item.id) || item;
+  documentActiveItem = current;
+  documentRefRetriedId = null;
   document.querySelectorAll('.document-row--active').forEach((row) => row.classList.remove('document-row--active'));
-  document.querySelector(`.document-row[data-document-id="${CSS.escape(item.id)}"]`)?.classList.add('document-row--active');
-  document.getElementById('document-title').textContent = item.name || 'Document';
-  document.getElementById('document-source-label').textContent = documentMeta(item);
+  document.querySelector(`.document-row[data-document-id="${CSS.escape(current.id)}"]`)?.classList.add('document-row--active');
+  document.getElementById('document-title').textContent = current.name || 'Document';
+  document.getElementById('document-source-label').textContent = documentMeta(current);
   resetDocumentRender();
 
-  if (isPdfDocument(item)) {
-    renderPdfDocument(item);
-  } else {
-    renderDocumentLinkCard(item);
+  let target = current;
+  if (documentRefsAreStale()) {
+    setDocumentNotice('Re-requesting the document link from the peer…');
+    const fresh = await refreshDocumentRef(current);
+    if (documentActiveItem?.id !== current.id) return;
+    if (fresh === null) {
+      showDocumentRefGone(current);
+      return;
+    }
+    if (fresh) {
+      target = fresh;
+      documentActiveItem = fresh;
+    }
+    hideDocumentNotice();
   }
+
+  if (isPdfDocument(target)) {
+    renderPdfDocument(target);
+  } else {
+    renderDocumentLinkCard(target);
+  }
+}
+
+async function handleDocumentEmbedFailure(item) {
+  if (documentRefRetriedId === item.id) {
+    showDocumentEmbedFallback(item);
+    return;
+  }
+  documentRefRetriedId = item.id;
+  clearDocumentEmbed();
+  setDocumentNotice('The document link may have expired — re-requesting it from the peer…');
+
+  const fresh = await refreshDocumentRef(item);
+  if (documentActiveItem?.id !== item.id) return;
+  if (fresh === null) {
+    showDocumentRefGone(item);
+    return;
+  }
+  if (!fresh || fresh.downloadUrl === item.downloadUrl) {
+    // Same ref back from the peer: the URL is current, so this is a rendering
+    // failure, not an expiry.
+    showDocumentEmbedFallback(item);
+    return;
+  }
+  documentActiveItem = fresh;
+  hideDocumentNotice();
+  renderPdfDocument(fresh);
+}
+
+function handleDocumentLinkClick(event, item) {
+  if (!documentRefsAreStale()) return;
+  event.preventDefault();
+  setDocumentNotice('Re-requesting the document link from the peer…');
+  refreshDocumentRef(item).then((fresh) => {
+    if (documentActiveItem?.id !== item.id) return;
+    if (fresh === null) {
+      showDocumentRefGone(item);
+      return;
+    }
+    if (!fresh) {
+      setDocumentNotice('Could not re-request the document link from the peer. Try again.');
+      return;
+    }
+    documentActiveItem = fresh;
+    applyDocumentRefToLinks(fresh);
+    setDocumentNotice('The document link was re-requested from the peer. Open it again.');
+  });
 }
 
 function isPdfDocument(item) {
@@ -2906,12 +3069,12 @@ function renderPdfDocument(item) {
       hasDocument = false;
     }
     if (!hasDocument) {
-      showDocumentEmbedFallback(item);
+      handleDocumentEmbedFailure(item);
       return;
     }
     if (live) live.textContent = `${item.name || 'Document'} loaded`;
   });
-  iframe.addEventListener('error', () => showDocumentEmbedFallback(item));
+  iframe.addEventListener('error', () => handleDocumentEmbedFailure(item));
 
   frameContainer.appendChild(iframe);
   if (live) live.textContent = `Loading ${item.name || 'document'}`;
@@ -2924,7 +3087,7 @@ function renderPdfDocument(item) {
       hasDocument = false;
     }
     if (!hasDocument && documentActiveItem?.id === item.id) {
-      showDocumentEmbedFallback(item);
+      handleDocumentEmbedFailure(item);
     }
   }, DOCUMENT_EMBED_TIMEOUT_MS);
 }
@@ -2942,11 +3105,7 @@ function renderDocumentToolbar(item) {
 
 function showDocumentEmbedFallback(item) {
   clearDocumentEmbed();
-  const notice = document.getElementById('document-notice');
-  if (notice) {
-    notice.textContent = 'This document could not be displayed inline.';
-    notice.hidden = false;
-  }
+  setDocumentNotice('This document could not be displayed inline.');
   renderDocumentLinkCard(item);
 }
 
@@ -2982,6 +3141,7 @@ function buildDocumentLink(item, label, className) {
   link.className = className;
   link.textContent = label;
   link.setAttribute('aria-label', `${label} ${item.name || 'document'} (opens in new tab)`);
+  link.addEventListener('click', (event) => handleDocumentLinkClick(event, item));
   return link;
 }
 

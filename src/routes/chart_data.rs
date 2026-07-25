@@ -10,7 +10,7 @@ use crate::{
     auth::{ensure_workspace_in_org, AuthContext},
     error::AppError,
     repos::WorkspacePeerBindingRepo,
-    services::chart_data::{fetch_chart_data, ChartDataResponse},
+    services::chart_data::{fetch_chart_data, ChartDataError, ChartDataResponse},
     state::AppState,
 };
 
@@ -49,6 +49,9 @@ pub async fn get_chart_data(
 
     let response = fetch_chart_data(&state, &peer, &uri)
         .await
-        .map_err(|err| AppError::ConnectorError(err.to_string()))?;
+        .map_err(|err| match err {
+            ChartDataError::TooLarge(msg) => AppError::PayloadTooLarge(msg),
+            ChartDataError::Unavailable(msg) => AppError::ConnectorError(msg),
+        })?;
     Ok(Json(response))
 }
