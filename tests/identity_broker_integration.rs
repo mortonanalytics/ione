@@ -1167,32 +1167,29 @@ async fn operator_authenticates_once_then_peer_mcp_carries_the_delegated_token()
     );
 }
 
-// ─── GAP C: RLS policies are present but inert ────────────────────────────────
+// ─── GAP C: RLS policies still do not bind the default connection role ────────
 
-/// AC-15 of md/design/identity-broker.md is NOT satisfied as deployed, and this
-/// test proves the actual state rather than the intended one.
+/// AC-15 of md/design/identity-broker.md is satisfied only for a deployment that
+/// connects as the restricted `ione_app` role. Under the default `ione`
+/// connection — every existing test, `docker compose`, CI, and the dev loop —
+/// the policies still do not filter anything, and this test proves the actual
+/// state rather than the intended one.
 ///
-/// Every identity table carries an org-isolation policy keyed on
-/// `current_setting('app.current_org_id', true)`. Three independent facts make
-/// those policies unreachable:
+/// Migration 0050 fixed two of the three original reasons: every org-scoped
+/// table now declares `FORCE ROW LEVEL SECURITY`, and a non-owner,
+/// non-BYPASSRLS role exists. What remains is the third: `ione` is SUPERUSER and
+/// holds BYPASSRLS, and Postgres lets such a role past the row-security system
+/// unconditionally — `FORCE` does not apply to it. So the guard on this
+/// connection is still the application-layer `WHERE org_id = $n` predicate,
+/// covered by `delegation_management_is_rbac_and_org_scoped` and the existing
+/// rbac/binding suites.
 ///
-///   1. nothing in `src/` ever sets `app.current_org_id` (no `SET LOCAL`
-///      anywhere), so the predicate would evaluate against NULL;
-///   2. no table declares `FORCE ROW LEVEL SECURITY`, and the application role
-///      owns every one of them, so PostgreSQL skips policy evaluation for it;
-///   3. the application role additionally holds `BYPASSRLS`.
+/// The positive half — the same policies filtering rows for real — lives in
+/// tests/rls_enforcement_integration.rs, which connects as `ione_app`.
 ///
-/// Setting the variable alone would therefore change nothing. Making AC-15 real
-/// needs a deployment change (a non-owner, non-BYPASSRLS application role plus
-/// grants), `FORCE ROW LEVEL SECURITY` on each table, and a transaction handle
-/// that sets the org context on every query — the `rls_context.rs` / `TxHandle`
-/// that the archived plan describes and that was never written. That is out of
-/// scope for issue #12 and is tracked as the "RLS activation" follow-up in
-/// md/design/identity-broker.md.
-///
-/// Until then, the real guard is the application-layer `WHERE org_id = $n`
-/// predicate on every repo query, which `delegation_management_is_rbac_and_org_scoped`
-/// and the existing rbac/binding suites cover.
+/// This test fails the moment the default role stops bypassing RLS, which is the
+/// point at which every unmigrated repository query becomes org-blind and the
+/// remaining migration work in md/design/identity-broker.md must be finished.
 #[tokio::test]
 #[ignore]
 async fn rls_policies_are_present_but_inert_as_deployed() {
@@ -1216,9 +1213,8 @@ async fn rls_policies_are_present_but_inert_as_deployed() {
                 .expect("policy count");
         assert!(policies > 0, "{table} has no RLS policy");
 
-        let (enabled, forced, owner_is_current): (bool, bool, bool) = sqlx::query_as(
-            "SELECT c.relrowsecurity, c.relforcerowsecurity,
-                    pg_get_userbyid(c.relowner) = current_user
+        let (enabled, forced): (bool, bool) = sqlx::query_as(
+            "SELECT c.relrowsecurity, c.relforcerowsecurity
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE n.nspname = 'public' AND c.relname = $1",
         )
@@ -1228,16 +1224,26 @@ async fn rls_policies_are_present_but_inert_as_deployed() {
         .expect("relation flags");
         assert!(enabled, "{table} does not have RLS enabled");
         assert!(
-            !forced,
-            "{table} now FORCEs RLS — revisit the AC-15 limitation"
-        );
-        assert!(
-            owner_is_current,
-            "{table} is no longer owned by the application role — revisit AC-15"
+            forced,
+            "{table} does not FORCE RLS — migration 0050 regressed"
         );
     }
 
-    // The application never sets the org context on its own pool.
+    // The default role bypasses regardless of FORCE, because it is SUPERUSER and
+    // holds BYPASSRLS. That is why activating RLS broke no existing suite.
+    let (superuser, bypassrls): (bool, bool) =
+        sqlx::query_as("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&f.pool)
+            .await
+            .expect("default role attributes");
+    assert!(
+        superuser || bypassrls,
+        "the default connection role no longer bypasses RLS — every unmigrated \
+         repository query is now org-blind; finish the AC-15 migration"
+    );
+
+    // Only the migrated repositories set the org context, and they set it with
+    // transaction scope, so nothing is left behind on an idle pooled connection.
     assert_eq!(
         read_table_data(&f.base, f.workspace_id, f.peer_id)
             .await
@@ -1272,7 +1278,7 @@ async fn rls_policies_are_present_but_inert_as_deployed() {
             .expect("count under foreign org context");
     assert_eq!(
         visible, 1,
-        "RLS is now enforced for the application role — AC-15 can be claimed and \
-         this test should be replaced with the positive assertion"
+        "RLS is now enforced for the default connection role — AC-15 can be \
+         claimed for the whole binary and this test should be replaced"
     );
 }

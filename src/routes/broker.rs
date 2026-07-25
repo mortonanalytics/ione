@@ -46,7 +46,7 @@ pub async fn list(
 ) -> Result<Json<Vec<crate::models::BrokerCredential>>, AppError> {
     crate::routes::mfa_gate(&ctx, &state.pool).await?;
     let rows = BrokerCredentialRepo::new(state.pool.clone())
-        .list_for_user(ctx.user_id)
+        .list_for_user(ctx.user_id, ctx.org_id)
         .await
         .map_err(AppError::Internal)?;
     Ok(Json(rows))
@@ -142,6 +142,7 @@ pub async fn callback(
         .map_err(AppError::Internal)?;
     repo.store_tokens(
         row.id,
+        row.org_id,
         &access_cipher,
         refresh_cipher.as_deref(),
         expires_at,
@@ -179,7 +180,7 @@ pub async fn refresh(
     crate::routes::mfa_gate(&ctx, &state.pool).await?;
     let repo = BrokerCredentialRepo::new(state.pool.clone());
     let row = repo
-        .find_for_user(ctx.user_id, id)
+        .find_for_user(ctx.user_id, id, ctx.org_id)
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound("broker connection not found".into()))?;
@@ -281,6 +282,7 @@ async fn exchange_refresh_token(
         .map_err(RefreshFailure::Internal)?;
     repo.store_tokens(
         row.id,
+        row.org_id,
         &access_cipher,
         refresh_cipher.as_deref(),
         expires_at,
@@ -330,14 +332,14 @@ pub async fn revoke(
     crate::routes::mfa_gate(&ctx, &state.pool).await?;
     let repo = BrokerCredentialRepo::new(state.pool.clone());
     let row = repo
-        .find_for_user(ctx.user_id, id)
+        .find_for_user(ctx.user_id, id, ctx.org_id)
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound("broker connection not found".into()))?;
 
     let upstream = revoke_upstream(&state, &row).await;
 
-    repo.delete(ctx.user_id, id)
+    repo.delete(ctx.user_id, id, ctx.org_id)
         .await
         .map_err(AppError::Internal)?;
 

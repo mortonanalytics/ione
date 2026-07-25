@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::WorkspacePeerDelegation;
+use crate::{models::WorkspacePeerDelegation, rls::org_scoped_tx};
 
 /// Non-secret columns. Neither ciphertext is ever part of a metadata SELECT.
 const DELEGATION_COLUMNS: &str = "id, org_id, workspace_id, peer_id, granted_by,
@@ -192,30 +192,40 @@ impl WorkspacePeerDelegationRepo {
         Ok(())
     }
 
+    /// Org-scoped: runs inside an `app.current_org_id` transaction, so the
+    /// `wpd_org_isolation` policy is a second guard behind the `org_id` predicate
+    /// when the process connects as a non-BYPASSRLS role.
     pub async fn get(
         &self,
         workspace_id: Uuid,
         peer_id: Uuid,
         org_id: Uuid,
     ) -> anyhow::Result<Option<WorkspacePeerDelegation>> {
-        sqlx::query_as::<_, WorkspacePeerDelegation>(&format!(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query_as::<_, WorkspacePeerDelegation>(&format!(
             "SELECT {DELEGATION_COLUMNS} FROM workspace_peer_delegations
              WHERE workspace_id = $1 AND peer_id = $2 AND org_id = $3"
         ))
         .bind(workspace_id)
         .bind(peer_id)
         .bind(org_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .context("failed to get workspace peer delegation")
+        .context("failed to get workspace peer delegation")?;
+        tx.commit()
+            .await
+            .context("failed to commit workspace peer delegation read")?;
+        Ok(row)
     }
 
+    /// Org-scoped; see [`WorkspacePeerDelegationRepo::get`].
     pub async fn delete(
         &self,
         workspace_id: Uuid,
         peer_id: Uuid,
         org_id: Uuid,
     ) -> anyhow::Result<bool> {
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         let result = sqlx::query(
             "DELETE FROM workspace_peer_delegations
              WHERE workspace_id = $1 AND peer_id = $2 AND org_id = $3",
@@ -223,14 +233,20 @@ impl WorkspacePeerDelegationRepo {
         .bind(workspace_id)
         .bind(peer_id)
         .bind(org_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("failed to delete workspace peer delegation")?;
+        tx.commit()
+            .await
+            .context("failed to commit workspace peer delegation delete")?;
         Ok(result.rows_affected() > 0)
     }
 
     /// The encrypted delegated token for (workspace, peer). Only the outbound
     /// MCP auth path in `services::peer_tokens` calls this.
+    ///
+    /// Not org-scoped: the caller resolves (workspace, peer) without an org id in
+    /// hand. Listed as uncovered under AC-15 in md/design/identity-broker.md.
     pub async fn material_for(
         &self,
         workspace_id: Uuid,
