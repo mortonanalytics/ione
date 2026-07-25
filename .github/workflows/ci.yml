@@ -89,7 +89,10 @@ jobs:
                    peer_credential_integration stub_peer_conformance_integration \
                    mcp_conformance_integration identity_broker_integration \
                    peer_ref_rendering_integration peer_lifecycle_e2e_integration \
-                   credential_presentation_integration; do
+                   credential_presentation_integration \
+                   tool_allowlist_integration mcp_session_integration \
+                   peer_join_followups_integration \
+                   whoami_and_error_mapping_integration; do
             echo "=== $p ==="
             # --include-ignored, not --ignored: the latter runs ONLY #[ignore]d
             # tests, so a suite whose tests are not ignore-gated (e.g.
