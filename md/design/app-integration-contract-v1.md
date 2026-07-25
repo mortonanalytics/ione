@@ -97,7 +97,7 @@ retries the original call **once**. A peer that does not use sessions may ignore
 |---|---|
 | `resources/read` for a chart panel | 5 s |
 | `resources/read` for a table panel | 5 s |
-| `resources/read` for `whoami://` | 8 s |
+| `resources/read` for `whoami://` | 3 s on the subscribe path (`bind_on_subscribe`); **no per-call timeout** on the binding-refresh path, which falls back to the 15 s HTTP client timeout |
 
 **Enforcement status: Enforced.** `src/services/chart_data.rs:21-27`,
 `src/services/table_data.rs:44-49`, and the whoami invocation contract in
@@ -680,10 +680,18 @@ Every IONe 4xx/5xx JSON response uses:
 | `hint` | string | optional |
 | `field` | string | optional, present on validation failures |
 
-Clients must branch on `error`, never on `message` text. Known kinds
-(non-exhaustive): `unauthorized`, `forbidden`, `demo_read_only`,
-`validation_failed`, `peer_unreachable`, `manifest_timeout`, `oauth_denied`,
-`oauth_token_expired`, `ollama_unreachable`, `nws_out_of_range`.
+Clients must branch on `error`, never on `message` text. Kinds a v1 peer may
+actually observe, all verified present in `src/`: `unauthorized`, `forbidden`,
+`demo_read_only`, `validation_failed`, `ollama_unreachable`,
+`nws_out_of_range`, `connector_error`, `broker_upstream`, `webhook_rejected`,
+`webhook_unauthorized`.
+
+> The freeze-time draft also listed `peer_unreachable`, `manifest_timeout`,
+> `oauth_denied`, and `oauth_token_expired`. **None of these are emitted
+> anywhere in `src/`** — they were aspirational. They are removed rather than
+> frozen: §9 clause 8 promises not to change existing discriminators, and
+> freezing four that do not exist would have committed IONe to inventing them.
+> A peer must not branch on them.
 
 **Enforcement status: Enforced.** `src/error.rs`;
 [ione-complete-contract.md](ione-complete-contract.md):125-132.
@@ -723,7 +731,13 @@ When a peer returns a JSON-RPC error, IONe maps on the **code**, not the message
 A peer that does not implement `resources/read` returns `-32601` and is reported
 as 502 (peer fault), not 404.
 
-**Enforcement status: Enforced.** `src/services/table_data.rs:88-100`.
+**Enforcement status: Enforced on the table path only.**
+`src/services/table_data.rs` maps `-32002` to 404 as described. The chart path
+(`src/services/chart_data.rs`) collapses **every** peer JSON-RPC error —
+including `-32002` — to `Unavailable` → **502**, so a not-found chart resource
+reports 502 rather than 404. A v1 peer must not depend on receiving 404 for a
+missing chart resource. Aligning the chart path is additive under §9 and is
+tracked as a follow-up.
 
 ---
 
@@ -763,10 +777,19 @@ The four panel-discovery paths follow `nextCursor` via
 | Table panels | `src/services/table_panels.rs` |
 | Document panels | `src/services/document_panels.rs` |
 
-Two paths still issue a **single** un-cursored list and are **not** covered:
+**Every `resources/list` call site paginates.** The peer-resource browser routes
+through `workspace_peer_manifest` → `fetch_manifest` → `paginated_list`, so it
+follows `nextCursor` too.
+
+Two **`tools/list`** call sites remain un-cursored and read only the first page:
 `fetch_manifest_over_mcp` (`src/routes/peers.rs`, serving
-`GET /api/v1/peers/:id/manifest`) and the peer-resource browser. A peer whose
-`resources/list` paginates will have only its first page reflected there.
+`GET /api/v1/peers/:id/manifest`, which is gated on `status = pending_allowlist`
+and used for allowlist review) and `default_streams`
+(`src/connectors/mcp_client.rs`, which derives one synthetic stream per readable
+tool). A peer exposing more than one page of **tools** will have only its first
+page reflected in those two places. The manifest path used for tool invocation
+(`federation.rs::fetch_manifest`) does paginate, so this affects allowlist
+review and stream derivation, not tool routing.
 
 **v1 requirement (Enforced** as of 2026-07-25, issue #18**):** a v1 peer **must**
 support cursor-based pagination on `resources/list`, and IONe follows `nextCursor`
