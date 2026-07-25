@@ -20,6 +20,15 @@ Every rule below carries an **enforcement status**:
 | **Specified** | Part of the v1 contract and relied upon by IONe's consumers, but not mechanically validated today. A peer that violates it will misrender or be dropped silently rather than get a clean error. |
 | **Peer-side** | An obligation on the peer that IONe cannot observe. Stated for interoperability. |
 
+> **On code citations.** "Enforced — *citation*" is this document's entire
+> verifiability story, so a citation that has drifted is not cosmetic. Prefer
+> **full path plus symbol** (`src/services/table_data.rs`
+> (`MAX_TABLE_ROWS`)) over a bare line range: line numbers rot on the next
+> refactor, and several basenames are ambiguous (`chart_panels.rs` and
+> `table_panels.rs` each exist under both `src/routes/` and `src/services/`).
+> Line ranges that remain are accurate as of the last audit but are indicative,
+> not normative — the symbol is what to search for.
+
 Where the frozen contract and the v0.1 playbook disagree, this document wins and
 the divergence is called out in [Appendix A](#appendix-a--code-vs-playbook-divergences).
 
@@ -165,7 +174,7 @@ X-IONe-Signature: t=<unix_seconds>,v1=<hmac_sha256_hex>
 | Signed bytes | `t_ascii ++ b"." ++ raw_request_body` | **Enforced** — `webhooks.rs:200-202` |
 | Algorithm | HMAC-SHA256, key = the provisioned `signingSecret` (its ASCII bytes) | **Enforced** — `webhooks.rs:199-203` |
 | Comparison | Constant-time | **Enforced** — `webhooks.rs:204` (`subtle::ConstantTimeEq`) |
-| Body cap | 256 KiB, rejected with **413** before the handler runs | **Enforced** — `src/routes/mod.rs:90-91` |
+| Body cap | 256 KiB, rejected with **413** before the handler runs | **Enforced** — `src/routes/mod.rs` (`/webhooks/peer/:peer_id` route, `DefaultBodyLimit`) |
 
 Sign the **raw bytes** you transmit. Re-serializing the body before signing will
 produce a mismatched digest.
@@ -304,7 +313,7 @@ Rules that hold for all four:
 - `ione_view` is matched as a raw string; there is no case-folding and no alias.
 
 **Enforcement status: Enforced.** `src/services/map_layers.rs:156`,
-`src/services/chart_panels.rs:328`, `src/services/table_panels.rs:204`,
+`src/services/chart_panels.rs:328`, `src/services/table_panels.rs` (`extract_table_panel`),
 `src/services/document_panels.rs:142`.
 
 ### 4.2 `ione_view: "map"`
@@ -392,10 +401,10 @@ Within a spec object, each key is accepted in snake_case **or** camelCase
 
 | Field | Type | Required | Default when the **flat** form is used | Enforcement |
 |---|---|---|---|---|
-| `chart_type` | string | no | `"line"` | **Enforced** — `chart_panels.rs:343` |
-| `x_axis` | string | no | `"bucket_start"` | **Enforced** — `chart_panels.rs:344` |
-| `y_axis` | string | no | `"value"` | **Enforced** — `chart_panels.rs:345` |
-| `series` | string[] | no | `["value"]`; an empty array falls back to `[y_axis]` | **Enforced** — `chart_panels.rs:346`, `380-390` |
+| `chart_type` | string | no | `"line"` | **Enforced** — `src/services/chart_panels.rs` (`ChartSpec` defaults) |
+| `x_axis` | string | no | `"bucket_start"` | **Enforced** — `src/services/chart_panels.rs` (`ChartSpec` defaults) |
+| `y_axis` | string | no | `"value"` | **Enforced** — `src/services/chart_panels.rs` (`ChartSpec` defaults) |
+| `series` | string[] | no | `["value"]`; an empty array falls back to `[y_axis]` | **Enforced** — `src/services/chart_panels.rs` (`ChartSpec` defaults) |
 
 Recommended `chart_type` values: `line`, `bar`, `area`, `scatter`, `histogram`,
 `gauge`, `qq`. **Enforcement status: Peer-side** — IONe does not validate the
@@ -445,8 +454,8 @@ compatibility rule — a peer already honoring the limit sees no change.
 
 | Field | Type | Required | Enforcement |
 |---|---|---|---|
-| `ione_view` | `"table"` | **yes** | **Enforced** — `table_panels.rs:204` |
-| `uri` | string | **yes** | non-empty — **Enforced** — `table_panels.rs:206-209` |
+| `ione_view` | `"table"` | **yes** | **Enforced** — `src/services/table_panels.rs` (`extract_table_panel`) |
+| `uri` | string | **yes** | non-empty — **Enforced** — `src/services/table_panels.rs` (`extract_table_panel`) |
 
 No other metadata field is required. `name` defaults to `"Peer table"`.
 
@@ -466,7 +475,7 @@ No other metadata field is required. `name` defaults to `"Peer table"`.
 `column.name`. A column omitting `type` normalizes to `string`. Permitted
 `type` values: `string`, `number`, `boolean`, `datetime`.
 
-**Table body limits — all Enforced** (`src/services/table_data.rs:8-10`):
+**Table body limits — all Enforced** (`src/services/table_data.rs` (`MAX_TABLE_RESOURCE_BYTES`, `MAX_TABLE_ROWS`, `MAX_TABLE_COLUMNS`)):
 
 | Limit | Value | On violation |
 |---|---|---|
@@ -494,7 +503,7 @@ No other metadata field is required. `name` defaults to `"Peer table"`.
 | Field | Type | Required | Notes | Enforcement |
 |---|---|---|---|---|
 | `download_url` | string | **yes** | Must parse as a URL, scheme must be **`https`**, and must pass IONe's SSRF guard. The guard blocks **link-local** hosts only; loopback and RFC 1918 private hosts over https are **deliberately allowed** so on-prem peers work (`url_guard.rs:33-36`). Dropped with a `warn!` otherwise. | **Enforced** — `document_panels.rs`, `url_guard.rs` |
-| `mime_type` | string | **yes** | Resolved from `metadata.mime_type`, else `metadata.mimeType`, else the resource's top-level `mimeType`. Dropped with a `warn!` if none resolve. | **Enforced** — `document_panels.rs:165-181` |
+| `mime_type` | string | **yes** | Resolved from `metadata.mime_type`, else `metadata.mimeType`, else the resource's top-level `mimeType`. Dropped with a `warn!` if none resolve. | **Enforced** — `src/services/document_panels.rs` (`resolve_mime_type`) |
 | `file_size_bytes` | integer | no | | **Enforced** as optional |
 | `last_modified` | string | no | | **Enforced** as optional |
 
@@ -858,11 +867,11 @@ conforming peer, fixed the same day (§8.1).
 
 | Surface | Limit | Enforcement |
 |---|---|---|
-| Webhook request body | 256 KiB → 413 | **Enforced** (`routes/mod.rs:90-91`) |
+| Webhook request body | 256 KiB → 413 | **Enforced** (`src/routes/mod.rs` (`DefaultBodyLimit`)) |
 | Webhook `data` field | 102 400 bytes serialized → 400 | **Enforced** (`webhooks.rs:240-245`) |
-| Table `resources/read` body | 2 MiB → 413 | **Enforced** (`table_data.rs:8`) |
-| Table rows | 5 000 → 413 | **Enforced** (`table_data.rs:9`) |
-| Table columns | 64 → 413 | **Enforced** (`table_data.rs:10`) |
+| Table `resources/read` body | 2 MiB → 413 | **Enforced** (`src/services/table_data.rs` (`MAX_TABLE_RESOURCE_BYTES`)) |
+| Table rows | 5 000 → 413 | **Enforced** (`src/services/table_data.rs` (`MAX_TABLE_ROWS`)) |
+| Table columns | 64 → 413 | **Enforced** (`src/services/table_data.rs` (`MAX_TABLE_COLUMNS`)) |
 | Chart `resources/read` body | 2 MiB → 413 | **Enforced** (`chart_data.rs`, §4.3) |
 | Context slice | 2 KiB | **Enforced as truncation** (§5.1) |
 | Catalog `description` | 512 chars | **Enforced as truncation** (`federation.rs:1282`) |
@@ -948,7 +957,7 @@ so a peer written against the freeze-time text stays conformant.
 | 1 | `slice://` on IONe's own server | IONe exposes an "aggregated `slice://`" to MCP clients | `resources/list` advertises only `whoami://`; `resources/read` returns `-32602` for every other URI. `slice://` is peer→IONe only. | `src/mcp_server.rs:955-986` |
 | 2 | Webhook `approval_required` | Reads as optional | **Was** a bare `bool` (omitting it ⇒ 400). **Resolved in the playbook's favour**: now `#[serde(default)]`, optional, defaults `false`. Security-neutral under the escalate-only floor. | `src/routes/webhooks.rs:48-55` |
 | 3 | Map metadata | `tile_url`, `bounds`, `attribution` read as co-required | Only non-empty `tile_url` is required; the rest are optional | `src/services/map_layers.rs:158-161` |
-| 4 | Chart metadata | `chart_type`, `x_axis`, `y_axis`, `series` required | In the flat form all four are **defaulted** (`line`/`bucket_start`/`value`/`["value"]`); a nested `metadata.spec`/`chart_spec` form also exists and accepts camelCase | `src/services/chart_panels.rs:326-400` |
+| 4 | Chart metadata | `chart_type`, `x_axis`, `y_axis`, `series` required | In the flat form all four are **defaulted** (`line`/`bucket_start`/`value`/`["value"]`); a nested `metadata.spec`/`chart_spec` form also exists and accepts camelCase | `src/services/chart_panels.rs` (`extract_chart_panel`) |
 | 5 | Document `mime_type` | Only `metadata.mime_type` documented | Falls back `metadata.mime_type` → `metadata.mimeType` → resource `mimeType` | `src/services/document_panels.rs:165-181` |
 | 6 | Chart body size | Not addressed | **Resolved 2026-07-25 (#18).** Was uncapped; now 2 MiB → 413, matching the table path | `src/services/chart_data.rs` |
 | 7 | `resources/list` pagination | Presented as uniform | **Resolved 2026-07-25 (#18).** Was manifest-only; all four panel paths now follow `nextCursor` via `peer_panels.rs`. A present-but-`null` cursor was also looping to the 50-page cap — fixed | `federation.rs`, `src/services/peer_panels.rs` |
