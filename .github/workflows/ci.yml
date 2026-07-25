@@ -59,7 +59,7 @@ jobs:
       - name: unit tests (lib + bin #[cfg(test)] modules)
         run: cargo test --lib --bins
       - name: unit + phase-1 tests (no DB needed)
-        run: cargo test --test phase01_chat
+        run: cargo test --test phase01_chat -- --include-ignored
       - name: integration tests (serial, live DB, IONE_SKIP_LIVE=1)
         run: |
           for p in phase02_conversations phase03_workspaces phase04_nws_connector \
@@ -85,7 +85,10 @@ jobs:
                    peer_ref_rendering_integration peer_lifecycle_e2e_integration \
                    credential_presentation_integration; do
             echo "=== $p ==="
-            cargo test --test "$p" -- --ignored --test-threads=1
+            # --include-ignored, not --ignored: the latter runs ONLY #[ignore]d
+            # tests, so a suite whose tests are not ignore-gated (e.g.
+            # phase_federation_hardening) silently ran zero of them.
+            cargo test --test "$p" -- --include-ignored --test-threads=1
           done
 
   build:
