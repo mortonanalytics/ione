@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -9,6 +9,19 @@ use crate::{
     repos::{PeerRepo, WorkspacePeerBindingRepo},
     state::AppState,
 };
+
+/// Contract v1 §6: a whoami value may be `null`, and a consumer must not treat a
+/// missing key and a null value as equivalent by rejecting one of them. Plain
+/// `#[serde(default)]` accepts an absent key but rejects an explicit `null`, so
+/// a peer emitting the legal `"foreign_roles": null` failed the whole whoami and
+/// was left a `pending` binding. Both spellings now mean "no roles"; a
+/// wrongly-typed value (a string, a non-string element) still fails.
+fn null_or_missing_as_empty_roles<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -19,7 +32,7 @@ pub struct WhoamiResponse {
     pub foreign_workspace_id: Option<String>,
     pub foreign_user_id: Option<String>,
     pub foreign_user_email: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_or_missing_as_empty_roles")]
     pub foreign_roles: Vec<String>,
 }
 
@@ -122,12 +135,17 @@ fn looks_like_missing_session(error: &anyhow::Error) -> bool {
     msg.contains("mcp-session-id") || msg.contains("session not found")
 }
 
+/// Wall-clock ceiling for one whoami read, covering all of `fetch_whoami`'s up-to-three
+/// requests (initialize, retry, read). Both the subscribe and the operator-facing refresh
+/// path use it: without it, refresh fell back to the 15 s HTTP client timeout per request.
+const WHOAMI_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub async fn bind_on_subscribe(
     state: &AppState,
     workspace_id: Uuid,
     peer: &Peer,
 ) -> anyhow::Result<WorkspacePeerBinding> {
-    let whoami = tokio::time::timeout(Duration::from_secs(3), fetch_whoami(state, peer))
+    let whoami = tokio::time::timeout(WHOAMI_TIMEOUT, fetch_whoami(state, peer))
         .await
         .ok()
         .and_then(Result::ok);
@@ -164,8 +182,9 @@ pub async fn refresh_binding(
         // that workspace's pre-broker credential (#19).
         .scoped_to(binding.workspace_id);
 
-    let whoami = fetch_whoami(state, &peer)
+    let whoami = tokio::time::timeout(WHOAMI_TIMEOUT, fetch_whoami(state, &peer))
         .await
+        .map_err(|_| RefreshError::Unreachable("whoami timed out".to_string()))?
         .map_err(|e| RefreshError::Unreachable(e.to_string()))?;
     let old = binding.foreign_tenant_id.clone();
     let result = binding_repo

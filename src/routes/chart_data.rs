@@ -50,6 +50,7 @@ pub async fn get_chart_data(
     let response = fetch_chart_data(&state, &peer, &uri)
         .await
         .map_err(|err| match err {
+            ChartDataError::NotFound(msg) => AppError::NotFound(msg),
             ChartDataError::TooLarge(msg) => AppError::PayloadTooLarge(msg),
             ChartDataError::Unavailable(msg) => AppError::ConnectorError(msg),
         })?;

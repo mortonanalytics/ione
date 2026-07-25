@@ -19,6 +19,7 @@ pub struct ChartDataResponse {
 
 #[derive(Debug)]
 pub enum ChartDataError {
+    NotFound(String),
     TooLarge(String),
     Unavailable(String),
 }
@@ -26,7 +27,9 @@ pub enum ChartDataError {
 impl fmt::Display for ChartDataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ChartDataError::TooLarge(msg) | ChartDataError::Unavailable(msg) => f.write_str(msg),
+            ChartDataError::NotFound(msg)
+            | ChartDataError::TooLarge(msg)
+            | ChartDataError::Unavailable(msg) => f.write_str(msg),
         }
     }
 }
@@ -90,8 +93,16 @@ async fn call_resources_read(
         })?;
 
     if let Some(err) = resp.get("error").filter(|v| !v.is_null()) {
+        let message = rpc_error_message(err);
+        // §7.3, same rule as the table path: map on the JSON-RPC error CODE, not the
+        // message. MCP "Resource not found" is -32002 → 404. Everything else (incl.
+        // -32601 "Method not found" = the peer doesn't implement resources/read) is a
+        // peer failure → 502.
+        if err.get("code").and_then(Value::as_i64) == Some(-32002) {
+            return Err(ChartDataError::NotFound(message));
+        }
         return Err(ChartDataError::Unavailable(format!(
-            "peer MCP error: {err}"
+            "peer MCP error: {message}"
         )));
     }
 
@@ -125,4 +136,13 @@ async fn call_resources_read(
         .ok_or_else(|| ChartDataError::Unavailable("chart resource missing rows".to_string()))?;
 
     Ok(ChartDataResponse { spec, rows })
+}
+
+fn rpc_error_message(value: &Value) -> String {
+    value
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
 }
