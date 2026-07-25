@@ -80,6 +80,28 @@ impl PeerSessionRegistry {
     }
 }
 
+/// Open a long-lived notification session for every Active peer.
+///
+/// Called at boot next to `hydrate_manifest_cache`, so peer SSE sessions come
+/// back after a restart instead of waiting for an operator to hit
+/// `POST /peers/:id/reconnect`. Each session runs its own reconnect/backoff
+/// loop, so a peer that is down at boot is retried rather than lost.
+pub async fn start_sessions_for_active_peers(state: &AppState) {
+    let peers = match PeerRepo::new(state.pool.clone()).list().await {
+        Ok(peers) => peers,
+        Err(e) => {
+            tracing::warn!(error = %e, "peer session hydration peer list failed");
+            return;
+        }
+    };
+    for peer in peers
+        .into_iter()
+        .filter(|peer| peer.status == crate::models::PeerStatus::Active)
+    {
+        state.peer_sessions.start(state.clone(), peer.id);
+    }
+}
+
 async fn run_session_task(state: AppState, peer_id: Uuid, state_tx: watch::Sender<SessionState>) {
     let idle_secs = std::env::var("IONE_PEER_SSE_IDLE_SECS")
         .ok()
@@ -119,6 +141,7 @@ async fn connect_and_read(
         .await?
         .ok_or_else(|| anyhow::anyhow!("peer not found"))?;
     let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
+    let request_id = crate::services::peer_tokens::next_request_id();
     let init = crate::services::peer_tokens::send_mcp_request(
         &state.pool,
         &state.http,
@@ -126,9 +149,12 @@ async fn connect_and_read(
         &endpoint,
         &json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": request_id,
             "method": "initialize",
-            "params": { "protocolVersion": "2025-11-25" }
+            "params": {
+                "protocolVersion": crate::services::peer_tokens::MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+            }
         }),
     )
     .await?
@@ -138,7 +164,7 @@ async fn connect_and_read(
         .get("MCP-Session-Id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let init_json: Value = init.json().await?;
+    let init_json = crate::services::peer_tokens::read_jsonrpc_reply(init, &request_id).await?;
     let session_id = header_session_id
         .or_else(|| {
             init_json
@@ -148,13 +174,24 @@ async fn connect_and_read(
                 .map(str::to_string)
         })
         .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))?;
+    crate::services::peer_tokens::send_initialized_notification(
+        &state.pool,
+        &state.http,
+        &peer,
+        &endpoint,
+        &session_id,
+    )
+    .await;
     let token = crate::services::peer_tokens::resolve_access_token_locked(state, &peer).await?;
     let mut request = state
         .http
         .get(&endpoint)
         .header(reqwest::header::ACCEPT, "text/event-stream")
         .header("MCP-Session-Id", session_id)
-        .header("MCP-Protocol-Version", "2025-11-25");
+        .header(
+            crate::services::peer_tokens::MCP_PROTOCOL_VERSION_HEADER,
+            crate::services::peer_tokens::MCP_PROTOCOL_VERSION,
+        );
     if !token.is_empty() {
         request = request.bearer_auth(token);
     }
@@ -184,13 +221,9 @@ async fn connect_and_read(
 }
 
 async fn handle_sse_line(state: &AppState, peer_id: Uuid, line: &str) -> anyhow::Result<()> {
-    let Some(data) = line.strip_prefix("data:") else {
+    let Some(data) = crate::services::peer_tokens::sse_data_payload(line) else {
         return Ok(());
     };
-    let data = data.trim();
-    if data.is_empty() {
-        return Ok(());
-    }
     let value: Value = serde_json::from_str(data)?;
     if value.get("method").is_some() {
         crate::services::federation::dispatch_notification(state, peer_id, value).await?;

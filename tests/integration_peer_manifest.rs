@@ -20,6 +20,23 @@ use wiremock::{
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
 const TEST_TOKEN_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
+/// A peer mock that echoes the JSON-RPC request id back on its reply, which
+/// JSON-RPC 2.0 requires of any server. IONe's outbound client allocates a
+/// unique id per request and correlates the reply against it, so a fixture that
+/// answers with a fixed id is not modelling a real MCP server.
+struct EchoJsonRpcId(Value);
+
+impl wiremock::Respond for EchoJsonRpcId {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body.get("id").cloned().unwrap_or(Value::Null),
+            "result": self.0,
+        }))
+    }
+}
+
 async fn spawn_app() -> (String, PgPool) {
     std::env::set_var("IONE_TOKEN_KEY", TEST_TOKEN_KEY);
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
@@ -110,15 +127,11 @@ async fn peer_manifest_returns_real_tool_list() {
     Mock::given(method("POST"))
         .and(path("/mcp"))
         .and(header("authorization", "Bearer peer-access-token"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "tools": [
-                    { "name": "list_survivors", "inputSchema": { "type": "object" } },
-                    { "name": "propose_artifact", "inputSchema": { "type": "object" } }
-                ]
-            }
+        .respond_with(EchoJsonRpcId(json!({
+            "tools": [
+                { "name": "list_survivors", "inputSchema": { "type": "object" } },
+                { "name": "propose_artifact", "inputSchema": { "type": "object" } }
+            ]
         })))
         .mount(&mock)
         .await;

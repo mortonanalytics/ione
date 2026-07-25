@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use reqwest::StatusCode;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
@@ -14,6 +17,122 @@ use crate::{
 };
 
 const REFRESH_SKEW_SECONDS: i64 = 60;
+
+/// MCP revision IONe's outbound client speaks. Sent as `MCP-Protocol-Version`
+/// on every POST (not just the SSE GET): a spec-conforming server is allowed to
+/// reject or misroute a request that omits it once a session is negotiated.
+pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// The `MCP-Protocol-Version` header name, as spelled by the streamable-HTTP transport.
+pub const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
+
+/// The streamable-HTTP transport lets a server answer a POST with either a plain
+/// JSON body or an SSE stream carrying the JSON-RPC reply. The client must
+/// advertise that it accepts both, or a conforming server may refuse the request.
+pub const MCP_ACCEPT: &str = "application/json, text/event-stream";
+
+/// Monotonic source of JSON-RPC request ids. Every outbound request gets its own
+/// id so a reply can be matched to the call that produced it; a hardcoded id
+/// makes an out-of-order or unrelated reply indistinguishable from the real one.
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate a fresh JSON-RPC request id.
+pub fn next_request_id() -> Value {
+    Value::from(NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Decode one SSE line into its `data:` payload, if it carries one.
+///
+/// Shared by the long-lived notification stream (which parses line-at-a-time off
+/// a byte stream) and by `read_jsonrpc_reply` (which parses a buffered POST
+/// body), so SSE framing is interpreted in exactly one place.
+pub fn sse_data_payload(line: &str) -> Option<&str> {
+    let data = line.strip_prefix("data:")?.trim();
+    (!data.is_empty()).then_some(data)
+}
+
+/// Read the JSON-RPC reply to a request whose id is `expected_id`.
+///
+/// A spec-conforming MCP server may answer a POST with `application/json` (one
+/// JSON-RPC object) or with `text/event-stream`, delivering the reply in a
+/// `data:` frame that may be preceded by unrelated server-initiated requests and
+/// notifications. Both are accepted here; the reply is selected by id so an
+/// unrelated message is never mis-attributed to this call.
+pub async fn read_jsonrpc_reply(resp: reqwest::Response, expected_id: &Value) -> Result<Value> {
+    let is_sse = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/event-stream")
+        })
+        .unwrap_or(false);
+    let body = resp
+        .text()
+        .await
+        .context("failed to read peer JSON-RPC response body")?;
+    if is_sse {
+        select_sse_reply(&body, expected_id)
+    } else {
+        let message: Value =
+            serde_json::from_str(&body).context("peer JSON-RPC response is not valid JSON")?;
+        match_reply_id(message, expected_id)
+    }
+}
+
+/// Pick the frame that answers our request out of an SSE-framed POST response.
+fn select_sse_reply(body: &str, expected_id: &Value) -> Result<Value> {
+    let mut null_id_error: Option<Value> = None;
+    for line in body.lines() {
+        let Some(data) = sse_data_payload(line) else {
+            continue;
+        };
+        let Ok(message) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        // Server-initiated requests and notifications share the stream; they are
+        // not the reply to this call.
+        if message.get("method").is_some() {
+            continue;
+        }
+        if message.get("id") == Some(expected_id) {
+            return Ok(message);
+        }
+        if null_id_error.is_none() && is_null_id_error(&message) {
+            null_id_error = Some(message);
+        }
+    }
+    null_id_error.with_context(|| {
+        format!("peer SSE response carried no JSON-RPC reply for request id {expected_id}")
+    })
+}
+
+fn match_reply_id(message: Value, expected_id: &Value) -> Result<Value> {
+    if message.get("id") == Some(expected_id) {
+        return Ok(message);
+    }
+    // JSON-RPC 2.0: a server that could not determine the request id answers
+    // with a null id. That reply is unambiguous, so it is surfaced rather than
+    // swallowed behind a correlation failure.
+    if is_null_id_error(&message) {
+        return Ok(message);
+    }
+    anyhow::bail!(
+        "peer JSON-RPC reply id {} does not match request id {expected_id}",
+        message.get("id").unwrap_or(&Value::Null)
+    )
+}
+
+fn is_null_id_error(message: &Value) -> bool {
+    message.get("id").map(Value::is_null).unwrap_or(true)
+        && message
+            .get("error")
+            .map(|error| !error.is_null())
+            .unwrap_or(false)
+}
 static PEER_GOVERNORS: Lazy<
     DashMap<uuid::Uuid, Arc<crate::services::peer_governor::PeerGovernor>>,
 > = Lazy::new(DashMap::new);
@@ -253,7 +372,11 @@ async fn send_with_token(
     token: &str,
     mcp_session_id: Option<&str>,
 ) -> Result<reqwest::Response> {
-    let mut request = http.post(endpoint).json(body);
+    let mut request = http
+        .post(endpoint)
+        .header(reqwest::header::ACCEPT, MCP_ACCEPT)
+        .header(MCP_PROTOCOL_VERSION_HEADER, MCP_PROTOCOL_VERSION)
+        .json(body);
     if !token.is_empty() {
         request = request.bearer_auth(token);
     }
@@ -261,6 +384,27 @@ async fn send_with_token(
         request = request.header("MCP-Session-Id", session_id);
     }
     request.send().await.context("HTTP send failed")
+}
+
+/// Send `notifications/initialized`, which the MCP lifecycle requires the client
+/// to send once `initialize` succeeds.
+///
+/// Best-effort by design: the notification carries no id and has no reply worth
+/// waiting on, and a peer that answers it with `-32601` (IONe's own server does)
+/// must not fail an otherwise-good handshake.
+pub async fn send_initialized_notification(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    peer: &Peer,
+    endpoint: &str,
+    mcp_session_id: &str,
+) {
+    let body = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    if let Err(e) =
+        send_mcp_request_with_session(pool, http, peer, endpoint, &body, Some(mcp_session_id)).await
+    {
+        tracing::warn!(peer_id = %peer.id, error = %e, "notifications/initialized send failed");
+    }
 }
 
 fn token_is_fresh(peer: &Peer) -> bool {
