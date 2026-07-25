@@ -841,22 +841,20 @@ async fn check_oauth(options: &Options) -> Surface {
     }
     // `PeerDiscovery` (src/services/peer_oauth.rs) deserializes
     // `registration_endpoint` as a plain `String` with no serde default, so a
-    // metadata document that omits it fails to parse and IONe's federation flow
-    // never begins. §2 lists no registration endpoint and the contract is frozen,
-    // so this is reported rather than failed — but it is the difference between
-    // passing this kit and being unable to federate.
-    surface.ok(
-        if metadata
+    // document that omits it fails to parse and the join dies with 400
+    // bad_request before any authorization step. §2 was amended on 2026-07-25 to
+    // declare it required, so this FAILs: a kit that PASSes a peer which cannot
+    // federate is worse than one that has no check at all.
+    surface.check(
+        metadata
             .get("registration_endpoint")
             .and_then(Value::as_str)
-            .is_some()
-        {
-            "metadata declares registration_endpoint, which IONe's discovery parser requires"
-        } else {
-            "note: metadata declares no 'registration_endpoint'. §2 does not list one, but IONe's \
-             PeerDiscovery deserializes it as required, so it cannot begin the OAuth flow against \
-             this document. Serve one (RFC 7591) or deploy with --pre-brokered credentials."
-        },
+            .is_some_and(|value| !value.trim().is_empty()),
+        "metadata declares registration_endpoint (§2, RFC 7591)",
+        "metadata is missing 'registration_endpoint' — §2 requires it. IONe's PeerDiscovery \
+         deserializes it as non-optional, so the join fails with 400 bad_request before the \
+         OAuth flow begins. Serve one (RFC 7591), or federate with a pre-brokered credential \
+         instead of OAuth.",
     );
     surface.check(
         string_array_contains(&metadata, "code_challenge_methods_supported", "S256"),
@@ -2471,6 +2469,90 @@ mod tests {
     // ── §6 whoami value shapes ────────────────────────────────────────────
 
     /// A peer whose only resource is the `whoami://` body handed in.
+    /// Serves an OAuth 2.1 discovery document, optionally omitting
+    /// `registration_endpoint`, so surface 2 can be exercised both ways.
+    async fn spawn_oauth_metadata_peer(with_registration: bool) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind metadata peer");
+        let addr = listener.local_addr().expect("metadata peer addr");
+        let base = format!("http://{addr}");
+
+        let mut metadata = json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/oauth/authorize"),
+            "token_endpoint": format!("{base}/oauth/token"),
+            "revocation_endpoint": format!("{base}/oauth/revoke"),
+            "code_challenge_methods_supported": ["S256"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+        });
+        if with_registration {
+            metadata["registration_endpoint"] = json!(format!("{base}/oauth/register"));
+        }
+
+        let metadata = Arc::new(metadata);
+        async fn serve(State(metadata): State<Arc<Value>>) -> Json<Value> {
+            Json((*metadata).clone())
+        }
+        async fn token() -> impl IntoResponse {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "unsupported_grant_type" })),
+            )
+        }
+
+        let router = Router::new()
+            .route(
+                "/.well-known/oauth-authorization-server",
+                axum::routing::get(serve),
+            )
+            .route("/oauth/token", post(token))
+            .with_state(metadata);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("{base}/mcp")
+    }
+
+    /// A peer that omits `registration_endpoint` cannot begin IONe's OAuth flow
+    /// (`PeerDiscovery` deserializes it as non-optional, so the join dies with
+    /// 400 bad_request). §2 declares it required, so the kit must FAIL rather
+    /// than PASS-with-a-note: telling a peer it conforms when it cannot federate
+    /// is the one outcome worse than having no check.
+    #[tokio::test]
+    async fn a_peer_without_registration_endpoint_fails_surface_two() {
+        let peer_url = spawn_oauth_metadata_peer(false).await;
+        let mut options = options_for(peer_url);
+        options.pre_brokered = false;
+        let surface = check_oauth(&options).await;
+        assert!(
+            surface.failures > 0,
+            "a document missing registration_endpoint must FAIL surface 2, got {:?}",
+            surface.lines
+        );
+        assert!(
+            surface
+                .lines
+                .iter()
+                .any(|line| line.contains("registration_endpoint")),
+            "the failure must name the missing field, got {:?}",
+            surface.lines
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_with_registration_endpoint_passes_surface_two() {
+        let peer_url = spawn_oauth_metadata_peer(true).await;
+        let mut options = options_for(peer_url);
+        options.pre_brokered = false;
+        let surface = check_oauth(&options).await;
+        assert_eq!(
+            surface.failures, 0,
+            "a complete discovery document must PASS surface 2, got {:?}",
+            surface.lines
+        );
+    }
+
     async fn spawn_whoami_peer(whoami: Value) -> String {
         async fn rpc(State(whoami): State<Arc<Value>>, Json(body): Json<Value>) -> Json<Value> {
             let id = body.get("id").cloned().unwrap_or(json!(1));
