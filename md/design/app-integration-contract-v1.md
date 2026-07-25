@@ -395,12 +395,11 @@ Each row is an object keyed by `x_axis` and by each entry of `series`.
 **Chart body size limit.** v1 requires a chart `resources/read` response to stay
 at or below **2 MiB**, matching the table limit.
 
-**Enforcement status: Specified, NOT enforced.** `src/services/chart_data.rs`
-applies a 5-second timeout but **no byte cap** — unlike `table_data.rs`. A peer
-returning an oversized chart body today will be buffered in full. Peers must not
-exceed the limit; IONe intends to enforce it, and doing so will be an
-**additive** change under the compatibility rule (a peer already honoring the
-limit sees no behavior change).
+**Enforcement status: Enforced** as of 2026-07-25 (issue #18).
+`src/services/chart_data.rs` caps the body at 2 MiB and maps the overflow to
+**413**, matching `table_data.rs`. At freeze time this path had a 5-second
+timeout but no byte cap; the gap was closed the same day. Additive under the
+compatibility rule — a peer already honoring the limit sees no change.
 
 ### 4.4 `ione_view: "table"`
 
@@ -757,15 +756,21 @@ never follow `nextCursor`:
 | Table panels | `src/services/table_panels.rs` |
 | Document panels | `src/services/document_panels.rs` |
 
-**v1 requirement (Specified, NOT enforced on these paths):** a v1 peer **must**
-support cursor-based pagination on `resources/list`, and IONe **will** follow
-`nextCursor` on all paths. Today, a peer that paginates its `resources/list` will
-have only its **first page** rendered in the map/chart/table/document panels,
-while the manifest (§8.1) sees up to 50 pages. Until IONe unifies these paths, a
-peer that needs all resources to render in panels should return them in one page.
+**v1 requirement (Enforced** as of 2026-07-25, issue #18**):** a v1 peer **must**
+support cursor-based pagination on `resources/list`, and IONe follows `nextCursor`
+on all four panel paths via `src/services/peer_panels.rs`, subject to the same
+50-page ceiling as the manifest path (§8.1).
 
-Making the panel paths follow `nextCursor` is an **additive** change: a peer
-already returning a single page is unaffected.
+At freeze time these four paths sent `params: null` and rendered only the
+**first page**, while the manifest saw up to 50. That was closed the same day, so
+a peer may now paginate `resources/list` freely and have every page rendered.
+Additive under the compatibility rule — a peer already returning a single page is
+unaffected.
+
+A `nextCursor` that is **absent, `null`, or the empty string** all terminate
+pagination identically. This is load-bearing: treating a present-but-`null`
+cursor as a continuation caused a 50× request-amplification loop against a
+conforming peer, fixed the same day (§8.1).
 
 ### 8.3 Size limits summary
 
@@ -776,10 +781,10 @@ already returning a single page is unaffected.
 | Table `resources/read` body | 2 MiB → 413 | **Enforced** (`table_data.rs:8`) |
 | Table rows | 5 000 → 413 | **Enforced** (`table_data.rs:9`) |
 | Table columns | 64 → 413 | **Enforced** (`table_data.rs:10`) |
-| Chart `resources/read` body | 2 MiB | **Specified, NOT enforced** (§4.3) |
+| Chart `resources/read` body | 2 MiB → 413 | **Enforced** (`chart_data.rs`, §4.3) |
 | Context slice | 2 KiB | **Enforced as truncation** (§5.1) |
 | Catalog `description` | 512 chars | **Enforced as truncation** (`federation.rs:1282`) |
-| Pagination pages per list call | 50 | **Enforced** on manifest paths only (§8.1) |
+| Pagination pages per list call | 50 | **Enforced** on manifest and panel paths (§8.1, §8.2) |
 
 ---
 
@@ -852,6 +857,10 @@ freezes** and the v0.1 playbook is superseded. The exception is divergence 2,
 where v1 instead adopts the playbook's reading and the code was amended to
 match — see the note in §3.3 for why.
 
+Divergences 2, 6 and 7 were **resolved in code on the freeze date** rather than
+left standing; each row records what changed. All three are additive under §9,
+so a peer written against the freeze-time text stays conformant.
+
 | # | Topic | Playbook (v0.1) says | Code actually does | Ref |
 |---|---|---|---|---|
 | 1 | `slice://` on IONe's own server | IONe exposes an "aggregated `slice://`" to MCP clients | `resources/list` advertises only `whoami://`; `resources/read` returns `-32602` for every other URI. `slice://` is peer→IONe only. | `src/mcp_server.rs:955-986` |
@@ -859,8 +868,8 @@ match — see the note in §3.3 for why.
 | 3 | Map metadata | `tile_url`, `bounds`, `attribution` read as co-required | Only non-empty `tile_url` is required; the rest are optional | `src/services/map_layers.rs:158-161` |
 | 4 | Chart metadata | `chart_type`, `x_axis`, `y_axis`, `series` required | In the flat form all four are **defaulted** (`line`/`bucket_start`/`value`/`["value"]`); a nested `metadata.spec`/`chart_spec` form also exists and accepts camelCase | `src/services/chart_panels.rs:326-400` |
 | 5 | Document `mime_type` | Only `metadata.mime_type` documented | Falls back `metadata.mime_type` → `metadata.mimeType` → resource `mimeType` | `src/services/document_panels.rs:165-181` |
-| 6 | Chart body size | Not addressed | No byte cap at all, unlike the table path's 2 MiB | `src/services/chart_data.rs` |
-| 7 | `resources/list` pagination | Presented as uniform | Only the manifest path follows `nextCursor`; the four panel paths send `params: null` and read page 1 | `federation.rs:683-717` vs. the four panel services |
+| 6 | Chart body size | Not addressed | **Resolved 2026-07-25 (#18).** Was uncapped; now 2 MiB → 413, matching the table path | `src/services/chart_data.rs` |
+| 7 | `resources/list` pagination | Presented as uniform | **Resolved 2026-07-25 (#18).** Was manifest-only; all four panel paths now follow `nextCursor` via `peer_panels.rs`. A present-but-`null` cursor was also looping to the 50-page cap — fixed | `federation.rs`, `src/services/peer_panels.rs` |
 
 ## Appendix B — executable conformance
 
