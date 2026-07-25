@@ -58,8 +58,14 @@ jobs:
         run: sqlx migrate run
       - name: unit tests (lib + bin #[cfg(test)] modules)
         run: cargo test --lib --bins
+      # NOT --include-ignored: phase01_chat::chat_endpoint_happy_path is
+      # #[ignore]d because it needs a live Ollama at OLLAMA_BASE_URL, and unlike
+      # the live tests in phase05/phase06 it has no IONE_SKIP_LIVE guard. The
+      # runner has no Ollama. #[ignore] in this repo marks two different things
+      # — needs-Postgres (CI has it) and needs-a-live-external-service (CI does
+      # not) — so it can only be lifted per suite, not globally.
       - name: unit + phase-1 tests (no DB needed)
-        run: cargo test --test phase01_chat -- --include-ignored
+        run: cargo test --test phase01_chat
       - name: integration tests (serial, live DB, IONE_SKIP_LIVE=1)
         run: |
           for p in phase02_conversations phase03_workspaces phase04_nws_connector \
