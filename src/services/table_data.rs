@@ -55,6 +55,7 @@ async fn call_resources_read(
     endpoint: &str,
     uri: &str,
 ) -> Result<TableDataResponse, TableDataError> {
+    let request_id = Value::from(1);
     let response = crate::services::peer_tokens::send_mcp_request(
         &state.pool,
         &state.http,
@@ -62,7 +63,7 @@ async fn call_resources_read(
         endpoint,
         &serde_json::json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": request_id,
             "method": "resources/read",
             "params": { "uri": uri }
         }),
@@ -72,18 +73,25 @@ async fn call_resources_read(
     .error_for_status()
     .map_err(|err| TableDataError::Unavailable(format!("peer returned error status: {err}")))?;
 
-    let body = response.bytes().await.map_err(|err| {
-        TableDataError::Unavailable(format!("failed to read peer response: {err}"))
-    })?;
-    if body.len() > MAX_TABLE_RESOURCE_BYTES {
+    // Reject an oversized body before buffering it, when the peer declares its
+    // length. The body itself is read by `read_jsonrpc_reply`, which also accepts
+    // the SSE-framed reply a spec-conforming peer may send; the payload-carrying
+    // `contents[0].text` is capped again below, so a chunked peer that hides its
+    // length still cannot push more than 2 MiB of table data through.
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_TABLE_RESOURCE_BYTES as u64)
+    {
         return Err(TableDataError::TooLarge(
             "table resource response is larger than 2 MiB".to_string(),
         ));
     }
 
-    let resp: Value = serde_json::from_slice(&body).map_err(|err| {
-        TableDataError::Unavailable(format!("failed to parse peer response: {err}"))
-    })?;
+    let resp = crate::services::peer_tokens::read_jsonrpc_reply(response, &request_id)
+        .await
+        .map_err(|err| {
+            TableDataError::Unavailable(format!("failed to parse peer response: {err}"))
+        })?;
     if let Some(err) = resp.get("error").filter(|v| !v.is_null()) {
         let message = rpc_error_message(err);
         // Map on the JSON-RPC error CODE, not the message: MCP "Resource not found"

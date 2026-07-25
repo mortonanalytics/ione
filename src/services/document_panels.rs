@@ -4,7 +4,7 @@ use anyhow::Context;
 use futures_util::future::join_all;
 use reqwest::Url;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{models::Peer, state::AppState, util::url_guard};
@@ -76,7 +76,7 @@ async fn fetch_documents_from_peer(
     let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
     let resources = match tokio::time::timeout(
         Duration::from_secs(5),
-        call_resources_list(&state, &peer, &endpoint),
+        crate::services::peer_panels::list_peer_resources(&state, &peer, &endpoint),
     )
     .await
     {
@@ -101,40 +101,6 @@ async fn fetch_documents_from_peer(
         .into_iter()
         .filter_map(|resource| extract_document_panel(&peer, resource))
         .collect())
-}
-
-async fn call_resources_list(
-    state: &AppState,
-    peer: &Peer,
-    endpoint: &str,
-) -> anyhow::Result<Vec<Value>> {
-    let resp: Value = crate::services::peer_tokens::send_mcp_request(
-        &state.pool,
-        &state.http,
-        peer,
-        endpoint,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "resources/list",
-            "params": null
-        }),
-    )
-    .await?
-    .error_for_status()
-    .context("peer returned error status")?
-    .json()
-    .await
-    .context("failed to parse peer response")?;
-
-    if let Some(err) = resp.get("error").filter(|v| !v.is_null()) {
-        anyhow::bail!("peer MCP error: {err}");
-    }
-
-    Ok(resp["result"]["resources"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default())
 }
 
 fn extract_document_panel(peer: &Peer, resource: Value) -> Option<DocumentPanelItem> {

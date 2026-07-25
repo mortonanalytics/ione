@@ -19,6 +19,7 @@ pub mod peer;
 pub mod peer_delegation;
 pub mod peer_governor;
 pub mod peer_oauth;
+pub mod peer_panels;
 pub mod peer_tokens;
 pub mod pipeline_bus;
 pub mod provisioning;
