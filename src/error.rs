@@ -56,6 +56,11 @@ pub enum AppError {
     #[error("connector error: {0}")]
     ConnectorError(String),
 
+    /// An upstream OAuth provider (a SaaS token endpoint, or a peer's
+    /// authorization server) rejected or failed a brokered token operation.
+    #[error("broker upstream error: {0}")]
+    BrokerUpstream(String),
+
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
 
@@ -198,6 +203,15 @@ impl IntoResponse for AppError {
                 })),
             )
                 .into_response(),
+            AppError::BrokerUpstream(msg) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": "broker_upstream",
+                    "message": msg,
+                    "hint": "The provider rejected the request. Reconnect the connection if this persists."
+                })),
+            )
+                .into_response(),
             AppError::PayloadTooLarge(msg) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Json(json!({
@@ -277,6 +291,7 @@ mod tests {
                 pull_command: "ollama pull llama3.2".into(),
             },
             AppError::ConnectorError("connector failed".into()),
+            AppError::BrokerUpstream("provider rejected refresh".into()),
             AppError::PayloadTooLarge("too much".into()),
             AppError::TooManyRequests("one export at a time".into()),
             AppError::WorkspaceBindingConflict {
