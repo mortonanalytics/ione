@@ -13,9 +13,11 @@
 //! can be lifted verbatim into a standalone crate by anyone who does not want to
 //! build IONe to run it.
 
+use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -223,8 +225,30 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
 
 // ─── MCP client (§1) ──────────────────────────────────────────────────────────
 
+/// The MCP revision IONe's outbound client declares, sent as
+/// `MCP-Protocol-Version` on every POST (`src/services/peer_tokens.rs`). A
+/// spec-conforming server may reject or misroute a request that omits it.
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
+
+/// Streamable HTTP — the MCP spec's default transport — lets a server answer a
+/// POST with either a plain JSON body or an SSE stream carrying the JSON-RPC
+/// reply. IONe advertises that it accepts both (`peer_tokens::MCP_ACCEPT`), and a
+/// strict server is entitled to answer **406** to a client that does not.
+const MCP_ACCEPT: &str = "application/json, text/event-stream";
+
+/// IONe wraps a chart or table `resources/read` in a 5-second timeout
+/// (`chart_data.rs`, `table_data.rs`); §1 freezes both.
+const PANEL_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `MAX_CHART_RESOURCE_BYTES` / `MAX_TABLE_RESOURCE_BYTES`, both 2 MiB (§8.3).
+const MAX_PANEL_RESOURCE_BYTES: usize = 2 * 1024 * 1024;
+
 struct RpcCall {
     http_status: u16,
+    /// `Content-Length` as the peer declared it, when it declared one. IONe's
+    /// chart and table paths reject on this **before** buffering the body.
+    declared_length: Option<u64>,
     body: Value,
 }
 
@@ -242,37 +266,102 @@ impl RpcCall {
     }
 }
 
+/// Why a `resources/read` did not yield a body.
+///
+/// The distinction is load-bearing for surface 5, which is Recommended rather
+/// than Required: only a peer that **answered** and said it does not serve the
+/// URI is declining an optional surface. An endpoint the kit could not get an
+/// answer out of, and one that answered with an unusable payload, are faults.
+enum ReadFailure {
+    /// Unreachable, redirected, non-2xx, or answering something that is not a
+    /// JSON-RPC reply to the request that was sent.
+    Transport(String),
+    /// The peer answered a JSON-RPC error for this URI: it does not serve it.
+    NotServed(String),
+    /// The peer answered successfully, but with a payload IONe cannot use.
+    Malformed(String),
+}
+
+impl fmt::Display for ReadFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReadFailure::Transport(message)
+            | ReadFailure::NotServed(message)
+            | ReadFailure::Malformed(message) => f.write_str(message),
+        }
+    }
+}
+
+/// A `resources/read` body, with the wire facts IONe's panel paths measure.
+struct ResourceBody {
+    json: Value,
+    mime: Option<String>,
+    /// `contents[0].text` in bytes — what `chart_data.rs` / `table_data.rs` cap.
+    text_len: usize,
+    declared_length: Option<u64>,
+    /// Wall time for the call, against the 5 s panel timeout of §1.
+    elapsed: Duration,
+}
+
 struct McpClient {
     http: reqwest::Client,
     url: String,
     token: Option<String>,
     session: Option<String>,
+    next_id: AtomicU64,
 }
 
 impl McpClient {
     fn new(options: &Options) -> McpClient {
         McpClient {
             http: reqwest::Client::builder()
+                // IONe's outbound peer client is `url_guard::guarded_client(15_000)`:
+                // a 15-second timeout with redirect following **disabled**. A peer
+                // whose MCP endpoint answers a 3xx works against a client that
+                // follows redirects and fails against IONe, so the kit must not
+                // follow them either.
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(15))
                 .build()
                 .expect("reqwest client"),
             url: options.url.trim_end_matches('/').to_string(),
             token: options.token.clone(),
             session: None,
+            next_id: AtomicU64::new(1),
         }
     }
 
-    async fn call(&self, method: &str, params: Value) -> Result<RpcCall, String> {
-        let mut request = self.http.post(&self.url).json(&json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params
-        }));
+    /// Allocate a fresh JSON-RPC request id, as `peer_tokens::next_request_id`
+    /// does. IONe's manifest path gives every outbound request its own id and
+    /// correlates the reply against it, so a peer that hardcodes a reply id is a
+    /// peer whose manifest refresh fails.
+    fn next_request_id(&self) -> Value {
+        Value::from(self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// A POST carrying the transport headers IONe always sends.
+    fn post(&self, body: &Value) -> reqwest::RequestBuilder {
+        let mut request = self
+            .http
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, MCP_ACCEPT)
+            .header(MCP_PROTOCOL_VERSION_HEADER, MCP_PROTOCOL_VERSION)
+            .json(body);
         // §1: credentials are always exactly `Authorization: Bearer <token>`.
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
+        request
+    }
+
+    async fn call(&self, method: &str, params: Value) -> Result<RpcCall, String> {
+        let id = self.next_request_id();
+        let mut request = self.post(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }));
         if let Some(session) = &self.session {
             request = request.header("MCP-Session-Id", session);
         }
@@ -281,43 +370,47 @@ impl McpClient {
             .await
             .map_err(|err| format!("{method} transport error: {err}"))?;
         let http_status = response.status().as_u16();
-        let text = response
-            .text()
+        reject_redirect(method, http_status)?;
+        let declared_length = response.content_length();
+        let body = read_jsonrpc_reply(response, &id)
             .await
-            .map_err(|err| format!("{method} body read failed: {err}"))?;
-        let body = serde_json::from_str(&text)
-            .map_err(|err| format!("{method} response is not JSON ({err}): {text}"))?;
-        Ok(RpcCall { http_status, body })
+            .map_err(|err| format!("{method} answered HTTP {http_status} but {err}"))?;
+        Ok(RpcCall {
+            http_status,
+            declared_length,
+            body,
+        })
     }
 
     /// `initialize` and adopt the returned session id (§1, session recovery).
     async fn initialize(&mut self) -> Result<RpcCall, String> {
-        let mut request = self.http.post(&self.url).json(&json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": { "protocolVersion": "2025-11-25", "capabilities": {} }
-        }));
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
-        let response = request
+        let id = self.next_request_id();
+        let response = self
+            .post(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "initialize",
+                "params": { "protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {} }
+            }))
             .send()
             .await
             .map_err(|err| format!("initialize transport error: {err}"))?;
         let http_status = response.status().as_u16();
+        reject_redirect("initialize", http_status)?;
         self.session = response
             .headers()
             .get("MCP-Session-Id")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let text = response
-            .text()
+        let declared_length = response.content_length();
+        let body = read_jsonrpc_reply(response, &id)
             .await
-            .map_err(|err| format!("initialize body read failed: {err}"))?;
-        let body = serde_json::from_str(&text)
-            .map_err(|err| format!("initialize response is not JSON ({err}): {text}"))?;
-        Ok(RpcCall { http_status, body })
+            .map_err(|err| format!("initialize answered HTTP {http_status} but {err}"))?;
+        Ok(RpcCall {
+            http_status,
+            declared_length,
+            body,
+        })
     }
 
     /// Follow `nextCursor` per §8.1, capped at IONe's `MAX_PAGINATION_PAGES`.
@@ -340,11 +433,7 @@ impl McpClient {
                 Some(page_items) => items.extend(page_items.iter().cloned()),
                 None => return Err(format!("{method} result is missing the '{field}' array")),
             }
-            cursor = result
-                .get("nextCursor")
-                .filter(|v| !v.is_null())
-                .cloned()
-                .or_else(|| result.get("cursor").filter(|v| !v.is_null()).cloned());
+            cursor = next_cursor(result);
             if cursor.is_none() {
                 return Ok((items, page));
             }
@@ -355,41 +444,179 @@ impl McpClient {
         ))
     }
 
-    /// `resources/read` returning `contents[0].text` parsed as JSON.
-    async fn read_json(&self, uri: &str) -> Result<Value, String> {
-        let call = self.call("resources/read", json!({ "uri": uri })).await?;
+    /// `resources/read`, with `contents[0].text` parsed as JSON.
+    async fn read_resource(&self, uri: &str) -> Result<ResourceBody, ReadFailure> {
+        let started = Instant::now();
+        let call = self
+            .call("resources/read", json!({ "uri": uri }))
+            .await
+            .map_err(ReadFailure::Transport)?;
+        let elapsed = started.elapsed();
         if !(200..300).contains(&call.http_status) {
-            return Err(format!(
+            return Err(ReadFailure::Transport(format!(
                 "resources/read {uri} answered HTTP {}; IONe calls error_for_status() before \
                  parsing, so a non-2xx status is reported as a peer fault (502) whatever the \
                  JSON-RPC body says (§7.3)",
                 call.http_status
-            ));
+            )));
         }
         if let Some(err) = call.error() {
-            return Err(format!(
+            return Err(ReadFailure::NotServed(format!(
                 "resources/read {uri} returned a JSON-RPC error: {err}"
-            ));
+            )));
         }
         let text = call
             .body
             .pointer("/result/contents/0/text")
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                format!("resources/read {uri} is missing result.contents[0].text (§1)")
+                ReadFailure::Malformed(format!(
+                    "resources/read {uri} is missing result.contents[0].text (§1)"
+                ))
             })?;
-        serde_json::from_str(text)
-            .map_err(|err| format!("resources/read {uri} text is not valid JSON: {err}"))
+        let json = serde_json::from_str(text).map_err(|err| {
+            ReadFailure::Malformed(format!(
+                "resources/read {uri} text is not valid JSON: {err}"
+            ))
+        })?;
+        Ok(ResourceBody {
+            json,
+            mime: call
+                .body
+                .pointer("/result/contents/0/mimeType")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            text_len: text.len(),
+            declared_length: call.declared_length,
+            elapsed,
+        })
     }
+}
 
-    async fn read_mime(&self, uri: &str) -> Result<String, String> {
-        let call = self.call("resources/read", json!({ "uri": uri })).await?;
-        call.body
-            .pointer("/result/contents/0/mimeType")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| format!("resources/read {uri} is missing result.contents[0].mimeType"))
+/// The cursor for the next page, or `None` when the peer signalled the last one.
+///
+/// The rule in `src/services/federation.rs::next_cursor` and
+/// `src/services/peer_panels.rs::next_cursor`, term for term: `nextCursor` is the
+/// spec spelling and `cursor` an accepted alias, and §8.1 makes all three of
+/// absent, `null` and the **empty string** terminate identically. The alias is
+/// resolved *before* the filters, so a present-but-null `nextCursor` still
+/// terminates when a stale `cursor` key sits beside it.
+fn next_cursor(result: &Value) -> Option<Value> {
+    result
+        .get("nextCursor")
+        .or_else(|| result.get("cursor"))
+        .filter(|value| !value.is_null())
+        .filter(|value| value.as_str() != Some(""))
+        .cloned()
+}
+
+/// IONe never follows a redirect to a peer (`url_guard::guarded_client` sets
+/// `redirect::Policy::none()`), so name the 3xx instead of reporting the redirect
+/// body as malformed JSON-RPC.
+fn reject_redirect(method: &str, http_status: u16) -> Result<(), String> {
+    if (300..400).contains(&http_status) {
+        return Err(format!(
+            "{method} answered HTTP {http_status}, a redirect. IONe's outbound peer client is \
+             built with redirect following disabled, so it sees the 3xx and fails. Serve MCP at \
+             the exact URL registered as peers.mcp_url."
+        ));
     }
+    Ok(())
+}
+
+/// Read the JSON-RPC reply to a request whose id is `expected_id`.
+///
+/// Mirrors `src/services/peer_tokens.rs::read_jsonrpc_reply`. A spec-conforming
+/// MCP server may answer a POST with `application/json` (one JSON-RPC object) or
+/// with `text/event-stream`, delivering the reply in a `data:` frame that may be
+/// preceded by unrelated server-initiated requests and notifications. Both are
+/// accepted; the reply is selected by id so an unrelated message is never
+/// mis-attributed to this call.
+async fn read_jsonrpc_reply(
+    response: reqwest::Response,
+    expected_id: &Value,
+) -> Result<Value, String> {
+    let is_sse = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/event-stream")
+        })
+        .unwrap_or(false);
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("the body could not be read: {err}"))?;
+    if is_sse {
+        select_sse_reply(&body, expected_id)
+    } else {
+        let message: Value = serde_json::from_str(&body)
+            .map_err(|err| format!("the body is not JSON ({err}): {body}"))?;
+        match_reply_id(message, expected_id)
+    }
+}
+
+/// Decode one SSE line into its `data:` payload, if it carries one.
+fn sse_data_payload(line: &str) -> Option<&str> {
+    let data = line.strip_prefix("data:")?.trim();
+    (!data.is_empty()).then_some(data)
+}
+
+/// Pick the frame that answers our request out of an SSE-framed POST response.
+fn select_sse_reply(body: &str, expected_id: &Value) -> Result<Value, String> {
+    let mut null_id_error: Option<Value> = None;
+    for line in body.lines() {
+        let Some(data) = sse_data_payload(line) else {
+            continue;
+        };
+        let Ok(message) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        // Server-initiated requests and notifications share the stream; they are
+        // not the reply to this call.
+        if message.get("method").is_some() {
+            continue;
+        }
+        if message.get("id") == Some(expected_id) {
+            return Ok(message);
+        }
+        if null_id_error.is_none() && is_null_id_error(&message) {
+            null_id_error = Some(message);
+        }
+    }
+    null_id_error.ok_or_else(|| {
+        format!("its SSE stream carried no JSON-RPC reply for request id {expected_id}")
+    })
+}
+
+fn match_reply_id(message: Value, expected_id: &Value) -> Result<Value, String> {
+    if message.get("id") == Some(expected_id) {
+        return Ok(message);
+    }
+    // JSON-RPC 2.0: a server that could not determine the request id answers
+    // with a null id. That reply is unambiguous, so it is surfaced rather than
+    // swallowed behind a correlation failure.
+    if is_null_id_error(&message) {
+        return Ok(message);
+    }
+    Err(format!(
+        "its JSON-RPC reply id {} does not match the request id {expected_id}. IONe gives every \
+         outbound request its own id and correlates the reply against it \
+         (src/services/peer_tokens.rs), so echo the id you were sent.",
+        message.get("id").unwrap_or(&Value::Null)
+    ))
+}
+
+fn is_null_id_error(message: &Value) -> bool {
+    message.get("id").map(Value::is_null).unwrap_or(true)
+        && message
+            .get("error")
+            .map(|error| !error.is_null())
+            .unwrap_or(false)
 }
 
 // ─── Surface 1 — MCP server endpoint (§1) ─────────────────────────────────────
@@ -612,6 +839,25 @@ async fn check_oauth(options: &Options) -> Surface {
             format!("metadata is missing '{field}' — §2 requires it"),
         );
     }
+    // `PeerDiscovery` (src/services/peer_oauth.rs) deserializes
+    // `registration_endpoint` as a plain `String` with no serde default, so a
+    // metadata document that omits it fails to parse and IONe's federation flow
+    // never begins. §2 lists no registration endpoint and the contract is frozen,
+    // so this is reported rather than failed — but it is the difference between
+    // passing this kit and being unable to federate.
+    surface.ok(
+        if metadata
+            .get("registration_endpoint")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            "metadata declares registration_endpoint, which IONe's discovery parser requires"
+        } else {
+            "note: metadata declares no 'registration_endpoint'. §2 does not list one, but IONe's \
+             PeerDiscovery deserializes it as required, so it cannot begin the OAuth flow against \
+             this document. Serve one (RFC 7591) or deploy with --pre-brokered credentials."
+        },
+    );
     surface.check(
         string_array_contains(&metadata, "code_challenge_methods_supported", "S256"),
         "PKCE S256 is advertised",
@@ -841,7 +1087,7 @@ async fn receive_webhook(
 
 /// Re-implements IONe's §3.1 verification: grammar, hex length, signing input.
 ///
-/// Two places where the kit deliberately matches `src/routes/webhooks.rs`
+/// Three places where the kit deliberately matches `src/routes/webhooks.rs`
 /// rather than the contract's prose:
 ///
 ///   * whitespace around a key or value is trimmed, as `parse_signature` does,
@@ -849,7 +1095,11 @@ async fn receive_webhook(
 ///   * the digest is compared case-insensitively, because production decodes it
 ///     with `hex::decode`, which accepts `A-F`. The contract's §3.1 table calls
 ///     lowercase "Enforced"; it is not. Rejecting uppercase here would fail a
-///     peer IONe accepts, which is the failure mode this kit exists to prevent.
+///     peer IONe accepts, which is the failure mode this kit exists to prevent;
+///   * the HMAC covers the **raw** `t=` text, as `webhooks.rs` signs
+///     `sig.timestamp_raw.as_bytes()`. Canonicalizing it through `i64` first
+///     would report a digest mismatch for a peer sending a non-canonical but
+///     parseable `t` (`t=01753440000`, `t=+1753440000`) that IONe accepts.
 fn verify_signature_header(header: &str, secret: &str, body: &[u8]) -> Result<i64, String> {
     let mut timestamp: Option<&str> = None;
     let mut digest: Option<&str> = None;
@@ -870,11 +1120,11 @@ fn verify_signature_header(header: &str, secret: &str, body: &[u8]) -> Result<i6
             }
         }
     }
-    let timestamp = timestamp.ok_or("X-IONe-Signature has no 't=' component (§3.1)")?;
+    let timestamp_raw = timestamp.ok_or("X-IONe-Signature has no 't=' component (§3.1)")?;
     let digest = digest.ok_or("X-IONe-Signature has no 'v1=' component (§3.1)")?;
-    let timestamp: i64 = timestamp
-        .parse()
-        .map_err(|_| format!("t='{timestamp}' is not a base-10 integer of unix seconds (§3.1)"))?;
+    let timestamp: i64 = timestamp_raw.parse().map_err(|_| {
+        format!("t='{timestamp_raw}' is not a base-10 integer of unix seconds (§3.1)")
+    })?;
     if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!(
             "v1 must be exactly 64 hex characters decoding to 32 bytes, got {} characters (§3.1)",
@@ -884,7 +1134,7 @@ fn verify_signature_header(header: &str, secret: &str, body: &[u8]) -> Result<i6
 
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac accepts any key size");
-    mac.update(timestamp.to_string().as_bytes());
+    mac.update(timestamp_raw.as_bytes());
     mac.update(b".");
     mac.update(body);
     let expected = hex::encode(mac.finalize().into_bytes());
@@ -1077,16 +1327,35 @@ async fn check_view_metadata(client: &McpClient, resources: Option<&[Value]>) ->
 
 fn check_map_resource(surface: &mut Surface, uri: &str, metadata: &Value) {
     match metadata.get("tile_url").and_then(Value::as_str) {
-        Some(tile_url) if !tile_url.is_empty() => {
-            surface.ok(format!("{uri}: map layer renders (tile_url '{tile_url}')"))
-        }
-        Some(_) => surface.fail(format!(
+        Some("") => surface.fail(format!(
             "{uri}: tile_url is empty, so the layer is dropped (§4.2)"
         )),
+        // `map_layers.rs` hands `tile_url` to MapLibre verbatim and never proxies
+        // tiles, so it runs the same https-only SSRF guard the document path runs
+        // on `download_url` and drops the whole layer when it fails.
+        Some(tile_url) => match validate_panel_url(tile_url, "tile_url") {
+            Ok(()) => surface.ok(format!("{uri}: map layer renders (tile_url '{tile_url}')")),
+            Err(err) => surface.fail(format!(
+                "{uri}: {err} (§4.2). IONe drops the entire layer with a warn! and no \
+                 operator-visible diagnostic, so this resource never renders."
+            )),
+        },
         None => surface.fail(format!(
             "{uri}: tile_url is required and must be a non-empty XYZ template; IONe does not \
              proxy tiles, so it must be reachable from the operator's browser (§4.2)"
         )),
+    }
+    // §4.2 freezes `vector_url` as pass-through that v1 does not render, so
+    // `map_layers.rs` validates it to the same bar but only **strips** it — the
+    // layer survives. Informational here for the same reason: it is not a
+    // rendering failure.
+    if let Some(vector_url) = metadata.get("vector_url").and_then(Value::as_str) {
+        if let Err(err) = validate_panel_url(vector_url, "vector_url") {
+            surface.ok(format!(
+                "{uri}: {err} (§4.2). IONe strips vector_url to null and keeps the layer, so the \
+                 map still renders — but the field does not reach any consumer."
+            ));
+        }
     }
     if let Some(opacity) = metadata.get("opacity").and_then(Value::as_f64) {
         if !(0.0..=1.0).contains(&opacity) {
@@ -1134,15 +1403,15 @@ async fn check_chart_resource(
         ));
     }
 
-    match client.read_json(uri).await {
+    match client.read_resource(uri).await {
         Ok(body) => {
-            if !body.get("spec").map(Value::is_object).unwrap_or(false) {
+            if !body.json.get("spec").map(Value::is_object).unwrap_or(false) {
                 surface.fail(format!(
                     "{uri}: chart body is missing the 'spec' object (§4.3)"
                 ));
                 return;
             }
-            let Some(rows) = body.get("rows").and_then(Value::as_array) else {
+            let Some(rows) = body.json.get("rows").and_then(Value::as_array) else {
                 surface.fail(format!(
                     "{uri}: chart body is missing the 'rows' array (§4.3)"
                 ));
@@ -1154,33 +1423,71 @@ async fn check_chart_resource(
                 ));
                 return;
             }
-            let size = body.to_string().len();
-            if size > 2 * 1024 * 1024 {
-                surface.fail(format!(
-                    "{uri}: chart body is {size} bytes. v1 requires ≤ 2 MiB; IONe does not \
-                     enforce it yet, and beginning to is an additive change (§4.3)"
-                ));
+            if let Err(err) = check_panel_budget(uri, "chart", &body, "src/services/chart_data.rs")
+            {
+                surface.fail(err);
                 return;
             }
             surface.ok(format!(
-                "{uri}: chart panel renders ({} row(s), {size} bytes)",
-                rows.len()
+                "{uri}: chart panel renders ({} row(s), {} bytes in {} ms)",
+                rows.len(),
+                body.text_len,
+                body.elapsed.as_millis()
             ));
         }
         Err(err) => surface.fail(format!("{uri}: {err}")),
     }
 }
 
+/// The two budgets IONe applies to a chart or table `resources/read`, measured
+/// the way it measures them.
+///
+/// Size is checked against the **declared `Content-Length` before buffering** and
+/// against **`contents[0].text` after** — `chart_data.rs` and `table_data.rs` both
+/// do exactly this pair, and neither measures a re-serialization of the parsed
+/// value. Time is the 5-second `tokio::time::timeout` wrapping the whole read.
+fn check_panel_budget(
+    uri: &str,
+    kind: &str,
+    body: &ResourceBody,
+    source: &str,
+) -> Result<(), String> {
+    if body.elapsed > PANEL_READ_TIMEOUT {
+        return Err(format!(
+            "{uri}: resources/read took {:.1} s. IONe wraps a {kind} read in a 5-second timeout \
+             (§1, {source}) and reports the panel unavailable past it.",
+            body.elapsed.as_secs_f64()
+        ));
+    }
+    let declared = body
+        .declared_length
+        .map(|len| len.to_string())
+        .unwrap_or_else(|| "undeclared".to_string());
+    if body.text_len > MAX_PANEL_RESOURCE_BYTES
+        || body
+            .declared_length
+            .is_some_and(|len| len > MAX_PANEL_RESOURCE_BYTES as u64)
+    {
+        return Err(format!(
+            "{uri}: the {kind} resources/read exceeds 2 MiB — contents[0].text is {} bytes and \
+             the response declared Content-Length {declared}. IONe caps both (§4.3, §4.4, §8.3, \
+             {source}) and maps the overflow to 413.",
+            body.text_len
+        ));
+    }
+    Ok(())
+}
+
 async fn check_table_resource(surface: &mut Surface, client: &McpClient, uri: &str) {
-    match client.read_json(uri).await {
+    match client.read_resource(uri).await {
         Ok(body) => {
-            let Some(schema) = body.get("schema").and_then(Value::as_array) else {
+            let Some(schema) = body.json.get("schema").and_then(Value::as_array) else {
                 surface.fail(format!(
                     "{uri}: table body is missing the 'schema' array (§4.4)"
                 ));
                 return;
             };
-            let Some(rows) = body.get("rows").and_then(Value::as_array) else {
+            let Some(rows) = body.json.get("rows").and_then(Value::as_array) else {
                 surface.fail(format!(
                     "{uri}: table body is missing the 'rows' array (§4.4)"
                 ));
@@ -1210,11 +1517,21 @@ async fn check_table_resource(surface: &mut Surface, client: &McpClient, uri: &s
                         return;
                     }
                 }
-                if let Some(kind) = column.get("type").and_then(Value::as_str) {
-                    if !matches!(kind, "string" | "number" | "boolean" | "datetime") {
+                // A column omitting `type` normalizes to "string" (§4.4), but a
+                // present `type` that is not a string is a hard error in
+                // `table_data.rs` ("table schema column type must be a string"),
+                // so `and_then(as_str)` must not be allowed to skip the check.
+                match column.get("type") {
+                    None => {}
+                    Some(Value::String(kind))
+                        if matches!(
+                            kind.as_str(),
+                            "string" | "number" | "boolean" | "datetime"
+                        ) => {}
+                    Some(other) => {
                         surface.fail(format!(
-                            "{uri}: column type '{kind}' is not string|number|boolean|datetime \
-                             (§4.4)"
+                            "{uri}: column type {other} is not one of the four permitted strings \
+                             string|number|boolean|datetime (§4.4)"
                         ));
                         return;
                     }
@@ -1226,18 +1543,17 @@ async fn check_table_resource(surface: &mut Surface, client: &McpClient, uri: &s
                 ));
                 return;
             }
-            let size = body.to_string().len();
-            if size > 2 * 1024 * 1024 {
-                surface.fail(format!(
-                    "{uri}: table body is {size} bytes, over MAX_TABLE_RESOURCE_BYTES = 2 MiB → \
-                     413 (§4.4)"
-                ));
+            if let Err(err) = check_panel_budget(uri, "table", &body, "src/services/table_data.rs")
+            {
+                surface.fail(err);
                 return;
             }
             surface.ok(format!(
-                "{uri}: table panel renders ({} column(s), {} row(s), {size} bytes)",
+                "{uri}: table panel renders ({} column(s), {} row(s), {} bytes in {} ms)",
                 schema.len(),
-                rows.len()
+                rows.len(),
+                body.text_len,
+                body.elapsed.as_millis()
             ));
         }
         Err(err) => surface.fail(format!("{uri}: {err}")),
@@ -1249,8 +1565,11 @@ fn check_document_resource(surface: &mut Surface, uri: &str, resource: &Value, m
         surface.fail(format!("{uri}: download_url is required (§4.5)"));
         return;
     };
-    if let Err(err) = validate_document_url(download_url) {
-        surface.fail(format!("{uri}: {err}"));
+    if let Err(err) = validate_panel_url(download_url, "download_url") {
+        surface.fail(format!(
+            "{uri}: {err} (§4.5). IONe drops the panel with a warn! and no operator-visible \
+             diagnostic."
+        ));
         return;
     }
     let mime = metadata
@@ -1267,13 +1586,18 @@ fn check_document_resource(surface: &mut Surface, uri: &str, resource: &Value, m
     }
 }
 
-/// Mirrors `src/services/document_panels.rs` + `src/util/url_guard.rs`: https
-/// only, and link-local blocked for every scheme.
-fn validate_document_url(raw: &str) -> Result<(), String> {
-    let url = Url::parse(raw).map_err(|err| format!("download_url '{raw}' is not a URL: {err}"))?;
+/// The one URL bar every peer-supplied panel URL is held to.
+///
+/// `map_layers::validate_layer_url` and `document_panels::validate_document_url`
+/// are the same two lines — reject any scheme but `https`, then delegate to
+/// `url_guard::ensure_safe_url`, whose only host rule that can bite an https URL
+/// is the link-local block. Loopback and RFC 1918 hosts over https are
+/// deliberately allowed so on-prem peers work.
+fn validate_panel_url(raw: &str, label: &str) -> Result<(), String> {
+    let url = Url::parse(raw).map_err(|err| format!("{label} '{raw}' is not a URL: {err}"))?;
     let host = url
         .host()
-        .ok_or_else(|| format!("download_url '{raw}' has no host (§4.5)"))?;
+        .ok_or_else(|| format!("{label} '{raw}' has no host"))?;
     let link_local = match host {
         Host::Ipv4(ip) => Ipv4Addr::is_link_local(&ip),
         Host::Ipv6(ip) => (Ipv6Addr::segments(&ip)[0] & 0xffc0) == 0xfe80,
@@ -1281,13 +1605,13 @@ fn validate_document_url(raw: &str) -> Result<(), String> {
     };
     if link_local {
         return Err(format!(
-            "download_url '{raw}' targets a link-local host; IONe's SSRF guard drops it (§4.5)"
+            "{label} '{raw}' targets a link-local host, which IONe's SSRF guard blocks"
         ));
     }
     if url.scheme() != "https" {
         return Err(format!(
-            "download_url '{raw}' uses scheme '{}'; §4.5 requires https, including for on-prem \
-             hosts. IONe drops the panel with a warn! and no operator-visible diagnostic.",
+            "{label} '{raw}' uses scheme '{}'; https is required, including for on-prem hosts \
+             (loopback and private addresses over https are allowed)",
             url.scheme()
         ));
     }
@@ -1301,13 +1625,16 @@ async fn check_slice(client: &McpClient, peer_answered: bool) -> Surface {
 
     // Surface 5 is Recommended, not Required: §5.2 has IONe synthesize a
     // schema_version "0" slice for a peer that serves none, which is why the
-    // contract's surface table grades it that way. A peer that declines the
-    // surface is conforming, so its absence is a SKIP. Everything below —
-    // schema_version, summary, size, sentinels — still FAILs, because a peer
-    // that *does* serve slice:// has to serve a valid one.
-    let body = match client.read_json("slice://").await {
+    // contract's surface table grades it that way. A peer that *declines* the
+    // surface — answering a JSON-RPC error for slice:// — is conforming, so that
+    // is the only SKIP. A transport fault is not a decline, and neither is a
+    // malformed body: an endpoint that cannot answer, or that answers with
+    // something unusable, is broken and must be reported as broken. Everything
+    // below — schema_version, summary, size, sentinels — still FAILs, because a
+    // peer that does serve slice:// has to serve a valid one.
+    let body = match client.read_resource("slice://").await {
         Ok(body) => body,
-        Err(err) if peer_answered => {
+        Err(ReadFailure::NotServed(err)) if peer_answered => {
             surface.skip(format!(
                 "{err}. Surface 5 is Recommended, not Required: §5.2 lets IONe fall back to a \
                  synthesized schema_version \"0\" slice. But then your capability description is \
@@ -1315,24 +1642,43 @@ async fn check_slice(client: &McpClient, peer_answered: bool) -> Surface {
             ));
             return surface;
         }
-        Err(err) => {
+        Err(ReadFailure::NotServed(err)) => {
             surface.fail(format!(
                 "{err}. The endpoint answered no MCP listing either (see surface 1), so this is \
                  not a peer declining an optional surface."
             ));
             return surface;
         }
+        Err(ReadFailure::Transport(err)) => {
+            surface.fail(format!(
+                "{err}. That is a transport fault, not a peer declining an optional surface: \
+                 §5.2's synthesized-slice fallback covers a peer that answers \"no such \
+                 resource\", not an endpoint the kit could not get an answer out of."
+            ));
+            return surface;
+        }
+        Err(ReadFailure::Malformed(err)) => {
+            surface.fail(format!(
+                "{err}. The peer answered slice:// successfully, so it is serving the surface — \
+                 it is serving a body IONe cannot use, which §5.2's fallback does not cover."
+            ));
+            return surface;
+        }
     };
 
-    match client.read_mime("slice://").await {
-        Ok(mime) => surface.check(
+    match &body.mime {
+        Some(mime) => surface.check(
             mime == "application/vnd.ione.slice+json",
             "mimeType is application/vnd.ione.slice+json",
             format!("mimeType is '{mime}', expected application/vnd.ione.slice+json (§5)"),
         ),
-        Err(err) => surface.fail(err),
+        None => surface.fail(
+            "resources/read slice:// is missing result.contents[0].mimeType, expected \
+             application/vnd.ione.slice+json (§5)",
+        ),
     }
 
+    let body = body.json;
     surface.check(
         body.get("schema_version").and_then(Value::as_str) == Some("1"),
         "schema_version is \"1\" (peer-authored)",
@@ -1390,7 +1736,7 @@ async fn check_slice(client: &McpClient, peer_answered: bool) -> Surface {
 async fn check_whoami(client: &McpClient) -> Surface {
     let mut surface = Surface::new(6, "whoami:// resource", "§6");
 
-    let body = match client.read_json("whoami://").await {
+    let body = match client.read_resource("whoami://").await {
         Ok(body) => body,
         Err(err) => {
             surface.fail(format!(
@@ -1401,16 +1747,19 @@ async fn check_whoami(client: &McpClient) -> Surface {
         }
     };
 
-    match client.read_mime("whoami://").await {
-        Ok(mime) => surface.check(
+    match &body.mime {
+        Some(mime) => surface.check(
             mime == "application/vnd.ione.whoami+json",
             "mimeType is application/vnd.ione.whoami+json",
             format!("mimeType is '{mime}', expected application/vnd.ione.whoami+json (§6)"),
         ),
-        Err(err) => surface.fail(err),
+        None => surface.fail(
+            "resources/read whoami:// is missing result.contents[0].mimeType, expected \
+             application/vnd.ione.whoami+json (§6)",
+        ),
     }
 
-    let Some(object) = body.as_object() else {
+    let Some(object) = body.json.as_object() else {
         surface.fail("contents[0].text must parse to a JSON object (§6)");
         return surface;
     };
@@ -1446,8 +1795,44 @@ async fn check_whoami(client: &McpClient) -> Surface {
         ),
     }
 
+    // §6 grades a peer's own field completeness Peer-side, but the value *shapes*
+    // are not optional: `WhoamiResponse` (src/services/workspace_peer_binding.rs)
+    // is a typed deserializer, so one wrongly-typed value fails the whole whoami
+    // and leaves the operator a 'pending' binding to complete by hand.
+    for key in [
+        "peer_id",
+        "foreign_tenant_name",
+        "foreign_workspace_id",
+        "foreign_user_id",
+        "foreign_user_email",
+    ] {
+        match object.get(key) {
+            None | Some(Value::String(_)) | Some(Value::Null) => {}
+            Some(other) => surface.fail(format!(
+                "{key} must be a string or null, got {other}. IONe deserializes whoami into a \
+                 typed struct, so one wrongly-typed value fails the entire response (§6)."
+            )),
+        }
+    }
+
     match object.get("foreign_roles") {
-        Some(Value::Array(_)) | Some(Value::Null) | None => {}
+        // Absence is already reported by the seven-key check above.
+        None => {}
+        Some(Value::Array(roles)) => surface.check(
+            roles.iter().all(Value::is_string),
+            format!("foreign_roles is an array of {} role name(s)", roles.len()),
+            "foreign_roles must contain only strings; a non-string entry fails the whole whoami \
+             deserialization (§6)",
+        ),
+        // The one field where §6's "a value may be null" and IONe's code
+        // disagree: `#[serde(default)] Vec<String>` accepts an *absent* key and
+        // rejects an explicit `null`.
+        Some(Value::Null) => surface.fail(
+            "foreign_roles is null. §6 permits a null value in general, but IONe deserializes \
+             this field as `#[serde(default)] Vec<String>`, which accepts an absent key and \
+             rejects an explicit null — the whole whoami then fails and the operator is left a \
+             'pending' binding. Send [] for 'no roles'.",
+        ),
         Some(other) => surface.fail(format!(
             "foreign_roles must be an array of role names (it may be empty), got {other} (§6)"
         )),
@@ -1519,6 +1904,11 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    use axum::response::IntoResponse;
 
     const PEER_ID: &str = "3f0c1f2e-0000-4000-8000-000000000001";
 
@@ -1602,19 +1992,23 @@ mod tests {
 
     const SECRET: &str = "whsec-conformance";
 
-    fn signature_header(timestamp: i64, body: &[u8], uppercase: bool) -> String {
+    /// Sign exactly the `t=` bytes a sender would transmit, as `webhooks.rs` does.
+    fn signature_header_with_raw_t(raw_t: &str, body: &[u8]) -> String {
         type HmacSha256 = Hmac<Sha256>;
         let mut mac = HmacSha256::new_from_slice(SECRET.as_bytes()).expect("hmac key");
-        mac.update(timestamp.to_string().as_bytes());
+        mac.update(raw_t.as_bytes());
         mac.update(b".");
         mac.update(body);
-        let digest = hex::encode(mac.finalize().into_bytes());
-        let digest = if uppercase {
-            digest.to_ascii_uppercase()
-        } else {
-            digest
-        };
-        format!("t={timestamp},v1={digest}")
+        format!("t={raw_t},v1={}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    fn signature_header(timestamp: i64, body: &[u8], uppercase: bool) -> String {
+        let header = signature_header_with_raw_t(&timestamp.to_string(), body);
+        if !uppercase {
+            return header;
+        }
+        let (prefix, digest) = header.split_once(",v1=").expect("v1 component");
+        format!("{prefix},v1={}", digest.to_ascii_uppercase())
     }
 
     /// The control for the two cases below.
@@ -1653,6 +2047,24 @@ mod tests {
             verify_signature_header(&spaced, SECRET, body),
             Ok(timestamp)
         );
+    }
+
+    /// `webhooks.rs:207` signs `sig.timestamp_raw.as_bytes()` — the `t=` bytes as
+    /// they arrived — and parses `t` to an `i64` only for the replay window. A
+    /// peer emitting a non-canonical but parseable `t` is therefore accepted by
+    /// IONe, so a kit that canonicalizes through `i64` before hashing reports a
+    /// digest mismatch against a peer that is in fact fine.
+    #[test]
+    fn a_non_canonical_timestamp_verifies_because_production_signs_the_raw_text() {
+        let body = br#"{"id":"evt-1"}"#;
+        let timestamp = Utc::now().timestamp();
+        for raw_t in [format!("0{timestamp}"), format!("+{timestamp}")] {
+            assert_eq!(
+                verify_signature_header(&signature_header_with_raw_t(&raw_t, body), SECRET, body),
+                Ok(timestamp),
+                "t='{raw_t}' is what IONe hashes and accepts"
+            );
+        }
     }
 
     /// Accepting either case is not accepting anything: a wrong digest, and a
@@ -1790,5 +2202,372 @@ mod tests {
             Status::Fail
         );
         assert_eq!(check_slice(&client, false).await.status(), Status::Fail);
+    }
+
+    // ── §8.1 cursor termination ───────────────────────────────────────────
+
+    /// The rule both production loops implement, asserted on the pure function
+    /// so the wire test below is about request *count*, not about parsing.
+    #[test]
+    fn next_cursor_terminates_on_absent_null_and_empty_exactly_as_production_does() {
+        for terminal in [
+            json!({ "resources": [] }),
+            json!({ "resources": [], "nextCursor": null }),
+            json!({ "resources": [], "nextCursor": "" }),
+            json!({ "resources": [], "cursor": null }),
+            json!({ "resources": [], "cursor": "" }),
+            // The alias is resolved before the filters, so a present-but-null
+            // `nextCursor` terminates even with a stale `cursor` beside it —
+            // which is what federation.rs and peer_panels.rs do.
+            json!({ "resources": [], "nextCursor": null, "cursor": "stale" }),
+        ] {
+            assert_eq!(next_cursor(&terminal), None, "{terminal} must terminate");
+        }
+        assert_eq!(
+            next_cursor(&json!({ "nextCursor": "page-2" })),
+            Some(json!("page-2"))
+        );
+        assert_eq!(
+            next_cursor(&json!({ "cursor": "page-2" })),
+            Some(json!("page-2"))
+        );
+    }
+
+    /// A peer whose final `resources/list` page terminates with `"nextCursor": ""`,
+    /// counting how many times it is asked.
+    async fn spawn_empty_cursor_peer() -> (String, Arc<AtomicUsize>) {
+        async fn rpc(
+            State(listings): State<Arc<AtomicUsize>>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            let id = body.get("id").cloned().unwrap_or(json!(1));
+            let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+            let cursor = body.pointer("/params/cursor").and_then(Value::as_str);
+            let result = match method {
+                "initialize" => json!({ "protocolVersion": "2025-11-25" }),
+                "tools/list" => json!({ "tools": [{ "name": "probe" }] }),
+                "resources/list" => {
+                    listings.fetch_add(1, Ordering::Relaxed);
+                    match cursor {
+                        None => json!({
+                            "resources": [{ "uri": "peer://page-1" }],
+                            "nextCursor": "page-2"
+                        }),
+                        // §8.1: the empty string terminates exactly as an absent
+                        // or null cursor does.
+                        Some(_) => json!({
+                            "resources": [{ "uri": "peer://page-2" }],
+                            "nextCursor": ""
+                        }),
+                    }
+                }
+                "resources/read" => {
+                    return Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32002, "message": "resource not found" }
+                    }))
+                }
+                "tools/call" => json!({ "content": [] }),
+                _ => {
+                    return Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32601, "message": "method not found" }
+                    }))
+                }
+            };
+            Json(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        }
+
+        let listings = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub peer");
+        let addr = listener.local_addr().expect("stub peer addr");
+        let router = Router::new()
+            .route("/mcp", post(rpc))
+            .with_state(listings.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (format!("http://{addr}/mcp"), listings)
+    }
+
+    /// §8.1 freezes absent, `null` **and the empty string** as identical
+    /// terminators, and both production loops filter all three. A kit that
+    /// filtered only `null` re-requested the last page to the 50-page cap and
+    /// then hard-failed — one conforming behavior turning into three FAILs
+    /// (surfaces 1, 4 and 5), because `resources` is only populated on `Ok`.
+    #[tokio::test]
+    async fn an_empty_string_next_cursor_terminates_after_exactly_two_requests() {
+        let (url, listings) = spawn_empty_cursor_peer().await;
+        let options = options_for(url);
+        let mut client = McpClient::new(&options);
+
+        let (surface, resources) = check_mcp_endpoint(&mut client).await;
+        assert_eq!(
+            surface.status(),
+            Status::Pass,
+            "an empty-string nextCursor is a conforming terminator: {:?}",
+            surface.lines
+        );
+        assert_eq!(
+            resources.as_deref().map(<[Value]>::len),
+            Some(2),
+            "both pages must be collected exactly once: {resources:?}"
+        );
+        assert_eq!(
+            listings.load(Ordering::Relaxed),
+            2,
+            "exactly two resources/list requests, not 50"
+        );
+        assert_eq!(
+            check_view_metadata(&client, resources.as_deref())
+                .await
+                .status(),
+            Status::Skip,
+            "surface 4 must not cascade off a pagination misread"
+        );
+    }
+
+    // ── SSE-framed transport ──────────────────────────────────────────────
+
+    /// A peer speaking the MCP spec's default streamable-HTTP transport: it
+    /// refuses a request that does not advertise `text/event-stream`, requires
+    /// `MCP-Protocol-Version`, and answers each POST with an SSE stream whose
+    /// reply frame is preceded by an unrelated server-initiated notification.
+    async fn spawn_sse_framed_peer() -> String {
+        async fn rpc(headers: HeaderMap, Json(body): Json<Value>) -> axum::response::Response {
+            let accepts_sse = headers
+                .get(axum::http::header::ACCEPT)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.contains("text/event-stream"))
+                .unwrap_or(false);
+            if !accepts_sse {
+                return (
+                    StatusCode::NOT_ACCEPTABLE,
+                    "Accept must include text/event-stream",
+                )
+                    .into_response();
+            }
+            if !headers.contains_key(MCP_PROTOCOL_VERSION_HEADER) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "MCP-Protocol-Version header is required",
+                )
+                    .into_response();
+            }
+            let id = body.get("id").cloned().unwrap_or(Value::Null);
+            let reply = match body.get("method").and_then(Value::as_str).unwrap_or("") {
+                "initialize" => json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "protocolVersion": MCP_PROTOCOL_VERSION }
+                }),
+                "tools/list" => json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "tools": [{ "name": "probe" }] }
+                }),
+                "resources/list" => json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "resources": [{ "uri": "peer://sse-1" }] }
+                }),
+                "resources/read" => json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": { "code": -32002, "message": "resource not found" }
+                }),
+                "tools/call" => json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [] } }),
+                _ => json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": { "code": -32601, "message": "method not found" }
+                }),
+            };
+            let notification = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": { "level": "info", "data": "unrelated" }
+            });
+            let stream = format!(
+                "event: message\ndata: {notification}\n\nevent: message\ndata: {reply}\n\n"
+            );
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                stream,
+            )
+                .into_response()
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub peer");
+        let addr = listener.local_addr().expect("stub peer addr");
+        let router = Router::new().route("/mcp", post(rpc));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    /// Streamable HTTP is the MCP spec's default transport and IONe supports it
+    /// end to end (`peer_tokens::read_jsonrpc_reply`). A kit that POSTs without
+    /// `Accept`/`MCP-Protocol-Version` and then `serde_json::from_str`s the body
+    /// tells such a peer that its `initialize` "is not JSON" and fails four of
+    /// its six surfaces.
+    #[tokio::test]
+    async fn an_sse_framed_peer_passes_surface_one() {
+        let options = options_for(spawn_sse_framed_peer().await);
+        let mut client = McpClient::new(&options);
+        let (surface, resources) = check_mcp_endpoint(&mut client).await;
+        assert_eq!(
+            surface.status(),
+            Status::Pass,
+            "an SSE-framed peer is conforming: {:?}",
+            surface.lines
+        );
+        assert_eq!(
+            resources.as_deref().map(<[Value]>::len),
+            Some(1),
+            "the reply frame must be selected out of the stream: {resources:?}"
+        );
+    }
+
+    // ── §4.2 map layer URLs ───────────────────────────────────────────────
+
+    fn map_resource(tile_url: &str, vector_url: Option<&str>) -> Value {
+        let mut metadata = json!({ "ione_view": "map", "tile_url": tile_url });
+        if let Some(vector_url) = vector_url {
+            metadata["vector_url"] = json!(vector_url);
+        }
+        json!({ "uri": "peer://map", "name": "Displacement", "metadata": metadata })
+    }
+
+    /// The map extractor is pure metadata, exactly as `map_layers.rs` is, so this
+    /// client's endpoint is never contacted.
+    fn offline_client() -> McpClient {
+        McpClient::new(&options_for("http://127.0.0.1:9/mcp".to_string()))
+    }
+
+    /// §4.2 (issue #18): `map_layers.rs` runs `validate_layer_url` and **drops the
+    /// whole layer** when it fails. A kit that only checked "non-empty string"
+    /// told a peer serving plaintext tiles that its map renders.
+    #[tokio::test]
+    async fn an_unsafe_tile_url_fails_surface_four_because_the_layer_is_dropped() {
+        for tile_url in [
+            "http://tiles.example.com/{z}/{x}/{y}.png",
+            "javascript:alert(1)",
+            "https://169.254.169.254/{z}/{x}/{y}.png",
+        ] {
+            let resources = vec![map_resource(tile_url, None)];
+            let surface = check_view_metadata(&offline_client(), Some(&resources)).await;
+            assert_eq!(
+                surface.status(),
+                Status::Fail,
+                "tile_url '{tile_url}' is dropped by IONe: {:?}",
+                surface.lines
+            );
+        }
+    }
+
+    // ── §6 whoami value shapes ────────────────────────────────────────────
+
+    /// A peer whose only resource is the `whoami://` body handed in.
+    async fn spawn_whoami_peer(whoami: Value) -> String {
+        async fn rpc(State(whoami): State<Arc<Value>>, Json(body): Json<Value>) -> Json<Value> {
+            let id = body.get("id").cloned().unwrap_or(json!(1));
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "contents": [{
+                    "uri": "whoami://",
+                    "mimeType": "application/vnd.ione.whoami+json",
+                    "text": whoami.to_string()
+                }]}
+            }))
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub peer");
+        let addr = listener.local_addr().expect("stub peer addr");
+        let router = Router::new()
+            .route("/mcp", post(rpc))
+            .with_state(Arc::new(whoami));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    fn conforming_whoami() -> Value {
+        json!({
+            "peer_id": "stub",
+            "foreign_tenant_id": "tenant-abc",
+            "foreign_tenant_name": "Tenant",
+            "foreign_workspace_id": null,
+            "foreign_user_id": "user-1",
+            "foreign_user_email": null,
+            "foreign_roles": ["operator"]
+        })
+    }
+
+    /// The control: nulls in the fields IONe types as `Option<String>` are fine,
+    /// exactly as §6 says.
+    #[tokio::test]
+    async fn a_whoami_with_null_optional_scopes_passes() {
+        let options = options_for(spawn_whoami_peer(conforming_whoami()).await);
+        let surface = check_whoami(&McpClient::new(&options)).await;
+        assert_eq!(
+            surface.status(),
+            Status::Pass,
+            "§6: a null value where the scope does not exist is conforming: {:?}",
+            surface.lines
+        );
+    }
+
+    /// `foreign_roles` is the one §6 field where an explicit `null` is not
+    /// interchangeable with an absent key: IONe types it `#[serde(default)]
+    /// Vec<String>`, so a null fails the whole whoami and the operator gets a
+    /// 'pending' binding. A kit that waved it through passed a peer that cannot
+    /// bind.
+    #[tokio::test]
+    async fn a_null_foreign_roles_fails_because_ione_cannot_deserialize_it() {
+        for bad in [json!(null), json!([1, 2]), json!("operator")] {
+            let mut whoami = conforming_whoami();
+            whoami["foreign_roles"] = bad.clone();
+            let options = options_for(spawn_whoami_peer(whoami).await);
+            let surface = check_whoami(&McpClient::new(&options)).await;
+            assert_eq!(
+                surface.status(),
+                Status::Fail,
+                "foreign_roles = {bad} breaks IONe's whoami deserialization: {:?}",
+                surface.lines
+            );
+        }
+    }
+
+    /// §4.2 is deliberately asymmetric: an unsafe `vector_url` is **stripped** and
+    /// the layer survives, because v1 does not render the field. Failing the
+    /// surface for it would fail a peer whose map IONe renders.
+    #[tokio::test]
+    async fn an_unsafe_vector_url_is_informational_because_the_layer_survives() {
+        let resources = vec![map_resource(
+            "https://tiles.example.com/{z}/{x}/{y}.png",
+            Some("http://tiles.example.com/displacement.pmtiles"),
+        )];
+        let surface = check_view_metadata(&offline_client(), Some(&resources)).await;
+        assert_eq!(
+            surface.status(),
+            Status::Pass,
+            "an unrendered optional field must not cost a valid tile layer: {:?}",
+            surface.lines
+        );
+        assert!(
+            surface
+                .lines
+                .iter()
+                .any(|line| line.contains("strips vector_url")),
+            "the strip must still be reported: {:?}",
+            surface.lines
+        );
     }
 }
