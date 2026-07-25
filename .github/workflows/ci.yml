@@ -79,7 +79,8 @@ jobs:
                    contract_api_routes contract_demo_workspace contract_errors \
                    contract_schema contract_v1_integration \
                    peer_credential_integration stub_peer_conformance_integration \
-                   mcp_conformance_integration identity_broker_integration; do
+                   mcp_conformance_integration identity_broker_integration \
+                   peer_ref_rendering_integration peer_lifecycle_e2e_integration; do
             echo "=== $p ==="
             cargo test --test "$p" -- --ignored --test-threads=1
           done
