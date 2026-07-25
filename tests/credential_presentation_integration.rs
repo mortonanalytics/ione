@@ -1302,3 +1302,294 @@ async fn catalog_reindex_keeps_sample_queries_when_the_slice_cache_is_cold() {
         );
     }
 }
+
+/// A stub that serves a real `slice://` document until the test makes
+/// `resources/read` fail. That is a peer which *supports* slices and has one bad
+/// minute — a different thing from a peer that has no slice at all, and the
+/// distinction the catalog has to make before it lets a slice overwrite
+/// `sample_queries`. `tools/list` keeps answering, so the peer-global manifest
+/// stays fresh and the reindex path really does try the slice read.
+struct FlakySlicePeer {
+    mcp_url: String,
+    slice_fails: Arc<AtomicBool>,
+}
+
+impl FlakySlicePeer {
+    fn fail_slice_reads(&self) {
+        self.slice_fails.store(true, Ordering::SeqCst);
+    }
+}
+
+async fn spawn_flaky_slice_peer() -> FlakySlicePeer {
+    let slice_fails = Arc::new(AtomicBool::new(false));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind peer");
+    let addr: SocketAddr = listener.local_addr().expect("peer addr");
+
+    let fails = Arc::clone(&slice_fails);
+    let mcp = move |axum::Json(body): axum::Json<Value>| {
+        let fails = Arc::clone(&fails);
+        async move {
+            let id = body.get("id").cloned().unwrap_or(Value::Null);
+            let method = body
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if method == "resources/read" && fails.load(Ordering::SeqCst) {
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(json!({ "error": "slice temporarily unavailable" })),
+                );
+            }
+            let result = match method.as_str() {
+                "tools/list" => json!({
+                    "tools": [{
+                        "name": "probe",
+                        "description": "catalog probe",
+                        "inputSchema": { "type": "object", "properties": { "target": { "type": "string" } } }
+                    }]
+                }),
+                "resources/list" => json!({ "resources": [] }),
+                "resources/read" => json!({
+                    "contents": [{
+                        "uri": "slice://",
+                        "mimeType": "application/vnd.ione.slice+json",
+                        "text": json!({
+                            "schema_version": "1",
+                            "sample_queries": { "probe": ["how many probes are open?"] }
+                        }).to_string()
+                    }]
+                }),
+                _ => json!({ "ok": true }),
+            };
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
+            )
+        }
+    };
+
+    let app = axum::Router::new().route("/mcp", axum::routing::post(mcp));
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("peer server error");
+    });
+    FlakySlicePeer {
+        mcp_url: format!("http://{addr}/mcp"),
+        slice_fails,
+    }
+}
+
+/// The indexed `sample_queries` for `flaky:probe`, plus the two columns that say
+/// whether the row was rewritten.
+async fn catalog_probe_row(pool: &PgPool, peer_id: Uuid) -> (Vec<String>, String, DateTime<Utc>) {
+    sqlx::query_as(
+        "SELECT sample_queries, content_hash, updated_at FROM peer_catalog_entries
+         WHERE peer_id = $1 AND namespaced_name = 'flaky:probe'",
+    )
+    .bind(peer_id)
+    .fetch_one(pool)
+    .await
+    .expect("catalog row for flaky:probe")
+}
+
+/// A slice is authoritative — including for removals — only when the peer
+/// actually authored it. The reindex path's fallback body (a synthesized summary
+/// plus a tool index, and no `sample_queries`) is not the peer's answer, so
+/// letting it reach the catalog turns one failed `resources/read` into a wipe of
+/// every row's `sample_queries`, a flipped `content_hash`, and a full rewrite —
+/// exactly what the cold-cache case above exists to prevent.
+#[tokio::test]
+#[ignore]
+async fn catalog_reindex_keeps_sample_queries_when_the_slice_read_fails() {
+    let (pool, state) = spawn_state().await;
+    let org_id = default_org_id(&pool).await;
+    let workspace_id = default_workspace_id(&pool).await;
+    let stub = spawn_flaky_slice_peer().await;
+    let issuer_id = insert_trust_issuer(&pool, org_id, "https://iss-flaky-slice.test").await;
+    let peer_id = insert_active_peer(
+        &pool,
+        org_id,
+        "Flaky Slice Peer",
+        "flaky",
+        &stub.mcp_url,
+        issuer_id,
+    )
+    .await;
+    insert_active_binding(&pool, workspace_id, peer_id).await;
+
+    // One scheduler tick while `slice://` is healthy: the peer's own
+    // `sample_queries` land in the catalog.
+    ione::services::federation::refresh_manifest_if_changed(&state, peer_id)
+        .await
+        .expect("first manifest refresh");
+    let (queries, hash, updated_at) = catalog_probe_row(&pool, peer_id).await;
+    assert_eq!(
+        queries,
+        vec!["how many probes are open?".to_string()],
+        "the peer-authored slice should have seeded sample_queries"
+    );
+
+    // `slice://` starts failing. Two more ticks — each with the slice cache aged
+    // out, which is the steady state at a 300s TTL — must change nothing.
+    stub.fail_slice_reads();
+    for pass in 1..=2 {
+        state.peer_slice_cache.clear();
+        ione::services::federation::refresh_manifest_if_changed(&state, peer_id)
+            .await
+            .expect("manifest refresh with a failing slice read");
+        let (failed_queries, failed_hash, failed_updated_at) =
+            catalog_probe_row(&pool, peer_id).await;
+        assert_eq!(
+            failed_queries, queries,
+            "pass {pass}: a transient slice:// failure wiped the indexed sample_queries"
+        );
+        assert_eq!(
+            failed_hash, hash,
+            "pass {pass}: content_hash churned on a transient slice:// failure"
+        );
+        assert_eq!(
+            failed_updated_at, updated_at,
+            "pass {pass}: the row was rewritten on a transient slice:// failure"
+        );
+    }
+}
+
+// ─── scheduler tick vs. the workspace-scoped manifest cache ───────────────────
+
+/// A stub whose `tools/list` answer changes only when the test bumps its
+/// generation, so "the peer's contract changed" and "the scheduler ticked" are
+/// independent events. It counts `tools/list` requests, because re-issuing them
+/// is the cost an over-eager eviction imposes.
+struct VersionedPeer {
+    mcp_url: String,
+    generation: Arc<AtomicUsize>,
+    tools_list_hits: Arc<AtomicUsize>,
+}
+
+impl VersionedPeer {
+    fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn tools_list_hits(&self) -> usize {
+        self.tools_list_hits.load(Ordering::SeqCst)
+    }
+}
+
+async fn spawn_versioned_peer() -> VersionedPeer {
+    let generation = Arc::new(AtomicUsize::new(0));
+    let tools_list_hits = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind peer");
+    let addr: SocketAddr = listener.local_addr().expect("peer addr");
+
+    let generations = Arc::clone(&generation);
+    let hits = Arc::clone(&tools_list_hits);
+    let mcp = move |axum::Json(body): axum::Json<Value>| {
+        let generations = Arc::clone(&generations);
+        let hits = Arc::clone(&hits);
+        async move {
+            let id = body.get("id").cloned().unwrap_or(Value::Null);
+            let result = match body.get("method").and_then(Value::as_str).unwrap_or("") {
+                "tools/list" => {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    json!({
+                        "tools": [{
+                            "name": format!("probe-gen{}", generations.load(Ordering::SeqCst)),
+                            "description": "generation probe",
+                            "inputSchema": { "type": "object", "properties": {} }
+                        }]
+                    })
+                }
+                "resources/list" => json!({ "resources": [] }),
+                _ => json!({ "ok": true }),
+            };
+            axum::Json(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        }
+    };
+
+    let app = axum::Router::new().route("/mcp", axum::routing::post(mcp));
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("peer server error");
+    });
+    VersionedPeer {
+        mcp_url: format!("http://{addr}/mcp"),
+        generation,
+        tools_list_hits,
+    }
+}
+
+/// `refresh_manifest_if_changed` runs from the scheduler every
+/// `IONE_POLL_INTERVAL_SECS` (default 60), well inside `MANIFEST_TTL_SECONDS`
+/// (300). Dropping the workspace-scoped entries on every one of those calls
+/// collapses their lifetime to the poll interval and re-issues every
+/// workspace's `tools/list` + `resources/list` once a minute, scaling with
+/// (workspaces × peers). The drop is warranted only when the peer's contract
+/// actually changed — which is the case the *second* half of this test pins, so
+/// the fix cannot be "never evict".
+#[tokio::test]
+#[ignore]
+async fn workspace_scoped_manifests_survive_an_unchanged_refresh_and_drop_on_a_changed_one() {
+    let (pool, state) = spawn_state().await;
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+    let workspace_id = default_workspace_id(&pool).await;
+    let stub = spawn_versioned_peer().await;
+    let issuer_id = insert_trust_issuer(&pool, org_id, "https://iss-versioned.test").await;
+    let peer_id = insert_active_peer(
+        &pool,
+        org_id,
+        "Versioned Peer",
+        "vers",
+        &stub.mcp_url,
+        issuer_id,
+    )
+    .await;
+    insert_active_binding(&pool, workspace_id, peer_id).await;
+    let auth = tool_caller(org_id, user_id);
+    let scoped_key = PeerCacheKey::for_workspace(peer_id, workspace_id);
+
+    // Baseline tick, so the next one has a peer-global entry to compare against.
+    ione::services::federation::refresh_manifest_if_changed(&state, peer_id)
+        .await
+        .expect("baseline peer-global refresh");
+
+    // The workspace reads under its own credential, producing the entry the
+    // eviction targets.
+    ione::services::federation::workspace_peer_manifest(&state, workspace_id, peer_id, &auth)
+        .await
+        .expect("workspace manifest");
+    assert!(
+        state.peer_manifest_cache.contains_key(&scoped_key),
+        "the workspace read should have cached a workspace-scoped entry"
+    );
+    let hits_after_warmup = stub.tools_list_hits();
+
+    // A tick over a peer that did not change anything.
+    let changed = ione::services::federation::refresh_manifest_if_changed(&state, peer_id)
+        .await
+        .expect("unchanged refresh");
+    assert!(!changed, "the peer's manifest did not change");
+    assert!(
+        state.peer_manifest_cache.contains_key(&scoped_key),
+        "an unchanged manifest refresh evicted the workspace-scoped entry"
+    );
+    ione::services::federation::workspace_peer_manifest(&state, workspace_id, peer_id, &auth)
+        .await
+        .expect("workspace manifest after an unchanged refresh");
+    assert_eq!(
+        stub.tools_list_hits(),
+        hits_after_warmup + 1,
+        "only the peer-global refresh should have gone out; the workspace read must still be cache-served"
+    );
+
+    // The peer's contract changes: the workspace's copy may now contradict it.
+    stub.bump_generation();
+    let changed = ione::services::federation::refresh_manifest_if_changed(&state, peer_id)
+        .await
+        .expect("changed refresh");
+    assert!(changed, "the peer's manifest changed");
+    assert!(
+        !state.peer_manifest_cache.contains_key(&scoped_key),
+        "a changed manifest must drop the workspace-scoped entry"
+    );
+}
