@@ -13,6 +13,14 @@
 -- The third reason — the application must set `app.current_org_id` per
 -- transaction — is fixed in code by `src/rls.rs::org_scoped_tx`.
 --
+-- NOTE for readers of the earlier migrations: 0019 through 0048 carry header
+-- comments describing their RLS policies as inert, and those comments are now
+-- out of date. They are deliberately NOT edited — sqlx checksums applied
+-- migrations, so amending one breaks `sqlx migrate run` for every existing
+-- database. This migration is the authoritative statement of what changed;
+-- md/design/identity-broker.md documents the exact coverage boundary, including
+-- what is still bypassed under the default `ione` connection.
+--
 -- `ione_app` is deliberately OPT-IN. `DATABASE_URL`, docker-compose, and CI keep
 -- connecting as `ione`, which still bypasses RLS because it is SUPERUSER, so the
 -- dev loop and every existing test are unaffected. Only the repository methods
