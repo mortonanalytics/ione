@@ -433,9 +433,9 @@ pub async fn reject_pending_tool_call(
 /// hydration, the scheduler, and `tools/list_changed` notifications all land
 /// here), so the handle stays unscoped and the entry it writes is the
 /// peer-global one. The per-workspace entries cannot be refreshed here — each
-/// needs its own credential — so they are dropped instead: whatever changed on
-/// the peer may have changed their view too, and the next read re-fetches under
-/// the right credential.
+/// needs its own credential — so, *when the peer's contract actually changed*,
+/// they are dropped instead: whatever changed on the peer may have changed their
+/// view too, and the next read re-fetches under the right credential.
 pub async fn refresh_manifest_if_changed(state: &AppState, peer_id: Uuid) -> anyhow::Result<bool> {
     let peer = PeerRepo::new(state.pool.clone())
         .get(peer_id)
@@ -449,7 +449,26 @@ pub async fn refresh_manifest_if_changed(state: &AppState, peer_id: Uuid) -> any
         .get(&key)
         .map(|entry| manifest_contract_hash(entry.value()));
     let changed = old_hash.as_deref() != Some(new_hash.as_str());
-    evict_workspace_scoped_manifests(state, peer_id);
+    if changed {
+        // Gated, because this runs on every scheduler tick
+        // (`IONE_POLL_INTERVAL_SECS`, default 60) and the entries it drops live
+        // for `MANIFEST_TTL_SECONDS` (300): evicting unconditionally collapses
+        // their lifetime to the poll interval and re-issues every workspace's
+        // `tools/list` + `resources/list` once a minute.
+        //
+        // The gate does not weaken the isolation guarantee, because isolation is
+        // not what this eviction provides. No workspace-scoped entry can ever be
+        // served to another workspace or to a peer-global reader — that is
+        // enforced by `PeerCacheKey` carrying the credential scope, on every
+        // read, whether or not anything is evicted here. What the eviction
+        // provides is *freshness*: it keeps a workspace's copy from outliving a
+        // manifest change it would contradict. An unchanged contract hash is a
+        // just-completed round trip proving the contract those entries were
+        // built against still holds, so there is no contradiction to resolve;
+        // and `manifest_for_peer` still bounds each entry at
+        // `MANIFEST_TTL_SECONDS` independently of this call.
+        evict_workspace_scoped_manifests(state, peer_id);
+    }
     state.peer_manifest_cache.insert(key, new_manifest.clone());
     prune_expired_manifests(state);
     PeerRepo::new(state.pool.clone())
@@ -571,17 +590,35 @@ pub async fn force_refresh_manifest(
     Ok(manifest)
 }
 
+/// The peer's own answer to `resources/read slice://`, or `Err` when the peer
+/// did not answer one.
+///
+/// The distinction matters to every caller that treats the slice as
+/// authoritative: `Ok` means the peer spoke about its slice — including
+/// `Ok(json!({}))` for a body it declined to fill in — while `Err` means the read
+/// failed and the peer said nothing. `fetch_slice` papers over `Err` with a
+/// synthesized stand-in for display purposes; `catalog_slice_for_peer` must not,
+/// because a stand-in carries no `sample_queries` and would read as the peer
+/// having removed them.
+async fn peer_authored_slice(state: &AppState, peer: &Peer) -> anyhow::Result<Value> {
+    let value = send_jsonrpc(state, peer, "resources/read", json!({ "uri": "slice://" })).await?;
+    Ok(value
+        .get("contents")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|content| content.get("text"))
+        .and_then(Value::as_str)
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or_else(|| json!({})))
+}
+
+/// A context slice for `peer`, falling back to a manifest-derived stand-in when
+/// the peer's `slice://` read fails. Callers that render the slice want *some*
+/// body; callers that write peer-authored text into durable state want
+/// `peer_authored_slice` instead.
 pub async fn fetch_slice(state: &AppState, peer: &Peer) -> anyhow::Result<SliceEntry> {
-    let result = send_jsonrpc(state, peer, "resources/read", json!({ "uri": "slice://" })).await;
-    let body = match result {
-        Ok(value) => value
-            .get("contents")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .and_then(|content| content.get("text"))
-            .and_then(Value::as_str)
-            .and_then(|text| serde_json::from_str(text).ok())
-            .unwrap_or_else(|| json!({})),
+    let body = match peer_authored_slice(state, peer).await {
+        Ok(body) => body,
         Err(_) => {
             let manifest = manifest_for_peer(state, peer).await?;
             json!({
@@ -1154,8 +1191,9 @@ pub async fn reindex_peer_catalog(
 /// entry, i.e. the caller has just completed a peer-global round trip and the
 /// peer is known reachable. So the scheduler's manifest tick refreshes the
 /// slice alongside the manifest, while a reindex driven from a stored manifest
-/// never becomes an outbound call. A failed fetch is not fatal — the caller
-/// falls back to the already-indexed values.
+/// never becomes an outbound call. Only a slice the peer actually authored is
+/// returned; a failed read is not fatal and yields `None`, so the caller falls
+/// back to the already-indexed values.
 async fn catalog_slice_for_peer(state: &AppState, peer: &Peer) -> Option<SliceEntry> {
     let key = PeerCacheKey::global(peer.id);
     if let Some(cached) = fresh_cached_slice(state, key) {
@@ -1172,14 +1210,24 @@ async fn catalog_slice_for_peer(state: &AppState, peer: &Peer) -> Option<SliceEn
     if !manifest_is_fresh {
         return None;
     }
-    match fetch_slice(state, peer).await {
-        Ok(entry) => {
+    // `peer_authored_slice`, not `fetch_slice`: the latter never fails on a bad
+    // `slice://` read, it substitutes a manifest-derived stand-in that carries no
+    // `sample_queries`. Indexing that stand-in would read as the peer having
+    // removed every sample query, so one transient error would wipe them,
+    // flip `content_hash`, and rewrite every row.
+    match peer_authored_slice(state, peer).await {
+        Ok(body) => {
+            let entry = SliceEntry {
+                peer_id: peer.id,
+                body,
+                fetched_at: Utc::now(),
+            };
             state.peer_slice_cache.insert(key, entry.clone());
             prune_expired_slices(state);
             Some(entry)
         }
         Err(e) => {
-            tracing::warn!(peer_id = %peer.id, error = %e, "catalog slice fetch failed; keeping indexed sample queries");
+            tracing::warn!(peer_id = %peer.id, error = %e, "catalog slice read failed; keeping indexed sample queries");
             None
         }
     }
@@ -1221,8 +1269,10 @@ fn build_catalog_upsert(
     );
     let schema_field_names = catalog_schema_field_names(item);
     let namespaced_name = format!("{prefix}:{raw_name}");
-    // A slice is authoritative when present, including for removals. Only its
-    // absence falls back to what is already indexed.
+    // `slice` is peer-authored by construction (`catalog_slice_for_peer` passes
+    // nothing else), so it is authoritative when present, including for
+    // removals. Its absence — the peer did not answer — falls back to what is
+    // already indexed.
     let sample_queries = match slice {
         Some(slice) => catalog_sample_queries(slice, raw_name),
         None => indexed.get(&namespaced_name).cloned().unwrap_or_default(),
