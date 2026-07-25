@@ -1163,7 +1163,13 @@ async fn mcp_client_poll_uses_binding_foreign_workspace_id_when_active() {
 
 #[tokio::test]
 #[ignore]
-async fn mcp_client_poll_falls_back_when_binding_inactive_or_missing() {
+/// TT-A06 regression: with no Active binding the poll must fail closed.
+///
+/// This previously asserted a fallback to peer-wide `list_workspaces` enumeration,
+/// which was the C-1 cross-workspace read leak fixed in 003a2fd. The binding is the
+/// only authority for poll scope, so a pending/missing binding must yield an error
+/// and — critically — must not enumerate or read any foreign workspace.
+async fn mcp_client_poll_fails_closed_when_binding_inactive_or_missing() {
     for status in [Some("pending"), None] {
         let (base, pool) = spawn_app().await;
         let org_id = default_org_id(&pool).await;
@@ -1197,16 +1203,27 @@ async fn mcp_client_poll_falls_back_when_binding_inactive_or_missing() {
             .await
             .expect("poll");
 
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "poll without an Active binding must fail closed (binding status {status:?})"
+        );
+        let body: Value = resp.json().await.expect("poll response not JSON");
+        assert_eq!(body["error"], "connector_error");
+
+        // The security-critical half: no unscoped enumeration, no foreign reads.
         let list_workspaces_calls = requests_for_tool(&mcp, "list_workspaces");
         let survivor_calls = requests_for_tool(&mcp, "list_survivors");
-        assert_eq!(list_workspaces_calls.len(), 1);
-        let called_workspaces: Vec<String> = survivor_calls
-            .iter()
-            .filter_map(|call| call["params"]["arguments"]["workspace_id"].as_str())
-            .map(str::to_string)
-            .collect();
-        assert_eq!(called_workspaces, vec!["remote-a", "remote-b"]);
+        assert!(
+            list_workspaces_calls.is_empty(),
+            "fail-closed poll must not enumerate peer workspaces (binding status {status:?}), got {} call(s)",
+            list_workspaces_calls.len()
+        );
+        assert!(
+            survivor_calls.is_empty(),
+            "fail-closed poll must not read any foreign workspace (binding status {status:?}), got {} call(s)",
+            survivor_calls.len()
+        );
     }
 }
 
