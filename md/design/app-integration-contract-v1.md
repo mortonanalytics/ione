@@ -310,12 +310,20 @@ Rules that hold for all four:
 
 | Field | Type | Required | Notes | Enforcement |
 |---|---|---|---|---|
-| `tile_url` | string | **yes** | XYZ raster template, non-empty. Dropped if absent or empty. IONe does **not** proxy tiles — must be browser-reachable. | **Enforced** — `map_layers.rs:158-161` |
+| `tile_url` | string | **yes** | XYZ raster template, non-empty. Scheme must be **`https`**, and it must pass the same SSRF guard as `download_url` (link-local blocked; loopback/private allowed for on-prem). Dropped with a `warn!` otherwise, leaving the rest of the peer's layers intact. IONe does **not** proxy tiles — must be browser-reachable. | **Enforced** — `map_layers.rs`, `url_guard.rs` |
 | `bounds` | `[west, south, east, north]` | no | Passed through verbatim, any JSON value accepted | **Specified** (shape not validated) |
 | `attribution` | string | no | Rendered as **text**; HTML is not interpreted | **Enforced** as optional |
 | `layer_name` | string | no | Overrides resource `name` in layer controls | **Enforced** as optional |
 | `opacity` | number | no | `0.0`–`1.0`; omitted ⇒ opaque. Range not clamped. | **Specified** |
-| `vector_url` | string | no | Pass-through only; **v1 does not render it** | **Enforced** as optional |
+| `vector_url` | string | no | Pass-through only; **v1 does not render it**. Validated to the same bar as `tile_url`; if unsafe it is **stripped to `null`** and the layer survives (an unrendered optional field must not cost a valid tile layer). | **Enforced** as optional |
+
+> **Scheme tightening, 2026-07-25 (issue #18).** At freeze time `tile_url` and
+> `vector_url` accepted any non-empty string — including `javascript:` and
+> plaintext `http:` — and were handed straight to MapLibre. Both are now
+> https-only and SSRF-guarded. Under §9 this is a **breaking** change for a peer
+> that served tiles over plaintext `http:`, so it is recorded here explicitly
+> rather than as an additive clarification. Loopback and private hosts over
+> https keep working, so on-prem peers are unaffected.
 
 > **Divergence.** The v0.1 playbook lists `bounds` and `attribution` alongside
 > `tile_url` in a way that reads as required. In code, **only `tile_url` is
@@ -462,7 +470,7 @@ No other metadata field is required. `name` defaults to `"Peer table"`.
 
 | Field | Type | Required | Notes | Enforcement |
 |---|---|---|---|---|
-| `download_url` | string | **yes** | Must parse as a URL, scheme must be **`https`**, and must pass IONe's SSRF guard (no link-local/loopback/private targets). Dropped with a `warn!` otherwise. | **Enforced** — `document_panels.rs:151-163`, `192-199` |
+| `download_url` | string | **yes** | Must parse as a URL, scheme must be **`https`**, and must pass IONe's SSRF guard. The guard blocks **link-local** hosts only; loopback and RFC 1918 private hosts over https are **deliberately allowed** so on-prem peers work (`url_guard.rs:33-36`). Dropped with a `warn!` otherwise. | **Enforced** — `document_panels.rs`, `url_guard.rs` |
 | `mime_type` | string | **yes** | Resolved from `metadata.mime_type`, else `metadata.mimeType`, else the resource's top-level `mimeType`. Dropped with a `warn!` if none resolve. | **Enforced** — `document_panels.rs:165-181` |
 | `file_size_bytes` | integer | no | | **Enforced** as optional |
 | `last_modified` | string | no | | **Enforced** as optional |
@@ -739,15 +747,14 @@ v1 uses MCP-standard opaque cursors.
 logs a truncation warning. A peer whose full listing exceeds 50 pages will be
 **silently truncated** from IONe's view. Size pages accordingly.
 
-**Enforcement status: Enforced, but only on two paths** —
-`tools/list` and `resources/list` during manifest refresh
-(`src/services/federation.rs:683-717`, `paginated_list`).
+**Enforcement status: Enforced** on `tools/list` and `resources/list` during
+manifest refresh (`src/services/federation.rs`, `paginated_list`) and, as of
+2026-07-25, on the four panel-discovery paths (§8.2).
 
-### 8.2 Paths that do NOT paginate today
+### 8.2 Panel-discovery pagination
 
-The four panel-discovery paths issue a **single** `resources/list` with
-`params: null` and read `result.resources` directly. They never send a cursor and
-never follow `nextCursor`:
+The four panel-discovery paths follow `nextCursor` via
+`src/services/peer_panels.rs`:
 
 | Path | Source |
 |---|---|
@@ -755,6 +762,11 @@ never follow `nextCursor`:
 | Chart panels | `src/services/chart_panels.rs` |
 | Table panels | `src/services/table_panels.rs` |
 | Document panels | `src/services/document_panels.rs` |
+
+Two paths still issue a **single** un-cursored list and are **not** covered:
+`fetch_manifest_over_mcp` (`src/routes/peers.rs`, serving
+`GET /api/v1/peers/:id/manifest`) and the peer-resource browser. A peer whose
+`resources/list` paginates will have only its first page reflected there.
 
 **v1 requirement (Enforced** as of 2026-07-25, issue #18**):** a v1 peer **must**
 support cursor-based pagination on `resources/list`, and IONe follows `nextCursor`

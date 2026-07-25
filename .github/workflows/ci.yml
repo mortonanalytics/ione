@@ -56,6 +56,8 @@ jobs:
         run: cargo install sqlx-cli --no-default-features --features native-tls,postgres --version ^0.8 --locked
       - name: run migrations
         run: sqlx migrate run
+      - name: unit tests (src/ #[cfg(test)] modules)
+        run: cargo test --lib
       - name: unit + phase-1 tests (no DB needed)
         run: cargo test --test phase01_chat
       - name: integration tests (serial, live DB, IONE_SKIP_LIVE=1)
