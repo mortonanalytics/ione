@@ -1,7 +1,19 @@
 # IONe App Integration Playbook
 
+> **SUPERSEDED (2026-07-25) by [app-integration-contract-v1.md](app-integration-contract-v1.md).**
+>
+> The frozen v1 contract is the normative source for schemas, limits,
+> enforcement status, and the compatibility rule. This playbook remains useful as
+> narrative background on *why* each surface exists, but where the two disagree,
+> **v1 wins** — several rules here diverge from what the code actually does
+> (`approval_required` is required, not optional; only `tile_url` is required for
+> map resources; chart metadata fields are all defaulted; IONe does not serve an
+> aggregated `slice://`). Those divergences are catalogued in v1 Appendix A.
+>
+> Build against the v1 contract. Read this for context.
+
 **Date:** 2026-05-12
-**Status:** Contract document for client apps plugging into IONe.
+**Status:** Superseded by the frozen v1 contract; retained as background narrative.
 **Audience:** Morton Analytics internal developers building client apps (GroundPulse, TerraYield, bearingLineDash, future apps); external OSS developers federating their own apps to an IONe deployment.
 **Parent:** [md/design/ione-substrate.md](ione-substrate.md)
 
