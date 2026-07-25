@@ -18,10 +18,19 @@ use crate::{
         PendingPeerToolCallRepo, WorkspacePeerBindingRepo,
     },
     routes::webhooks::WebhookEnvelope,
-    state::AppState,
+    state::{AppState, PeerCacheKey},
 };
 
 const MANIFEST_TTL_SECONDS: i64 = 300;
+/// How long a manifest entry is kept after it stops being servable fresh.
+///
+/// `manifest_for_peer` still serves an over-TTL entry, marked `stale`, when the
+/// peer is unreachable, so entries cannot be dropped at `MANIFEST_TTL_SECONDS`
+/// without losing the degraded-mode fallback. They are dropped here instead,
+/// which is what bounds the (workspace × peer) key space the scoped cache key
+/// introduces: a workspace that stops reading a peer costs one entry for at most
+/// an hour rather than for the process lifetime.
+const MANIFEST_RETENTION_SECONDS: i64 = 3600;
 /// How long a cached peer context slice may be served before it is refetched.
 /// Matches `MANIFEST_TTL_SECONDS`: the slice is peer-supplied payload, and the
 /// `resources/updated` eviction below is a peer courtesy, not a guarantee — a
@@ -418,21 +427,31 @@ pub async fn reject_pending_tool_call(
     Ok(false)
 }
 
+/// Refresh the **peer-global** manifest and re-index the catalog from it.
+///
+/// Runs over a peer regardless of which workspaces are bound to it (boot
+/// hydration, the scheduler, and `tools/list_changed` notifications all land
+/// here), so the handle stays unscoped and the entry it writes is the
+/// peer-global one. The per-workspace entries cannot be refreshed here — each
+/// needs its own credential — so they are dropped instead: whatever changed on
+/// the peer may have changed their view too, and the next read re-fetches under
+/// the right credential.
 pub async fn refresh_manifest_if_changed(state: &AppState, peer_id: Uuid) -> anyhow::Result<bool> {
     let peer = PeerRepo::new(state.pool.clone())
         .get(peer_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("peer not found"))?;
+    let key = PeerCacheKey::global(peer_id);
     let new_manifest = fetch_manifest(state, &peer).await?;
     let new_hash = manifest_contract_hash(&new_manifest);
     let old_hash = state
         .peer_manifest_cache
-        .get(&peer_id)
+        .get(&key)
         .map(|entry| manifest_contract_hash(entry.value()));
     let changed = old_hash.as_deref() != Some(new_hash.as_str());
-    state
-        .peer_manifest_cache
-        .insert(peer_id, new_manifest.clone());
+    evict_workspace_scoped_manifests(state, peer_id);
+    state.peer_manifest_cache.insert(key, new_manifest.clone());
+    prune_expired_manifests(state);
     PeerRepo::new(state.pool.clone())
         .set_last_manifest(peer_id, &serde_json::to_value(&new_manifest)?)
         .await?;
@@ -440,11 +459,38 @@ pub async fn refresh_manifest_if_changed(state: &AppState, peer_id: Uuid) -> any
     Ok(changed)
 }
 
+/// Drop every workspace-scoped manifest entry for one peer, leaving the
+/// peer-global entry alone.
+fn evict_workspace_scoped_manifests(state: &AppState, peer_id: Uuid) {
+    state
+        .peer_manifest_cache
+        .retain(|key, _| key.peer_id != peer_id || key.workspace_scope.is_none());
+}
+
+/// Drop manifest entries no read can still serve, fresh or stale.
+fn prune_expired_manifests(state: &AppState) {
+    let now = Utc::now();
+    state.peer_manifest_cache.retain(|_, manifest| {
+        (now - manifest.fetched_at).num_seconds() <= MANIFEST_RETENTION_SECONDS
+    });
+}
+
+/// Drop slice entries past `SLICE_TTL_SECONDS`. Nothing serves a stale slice, so
+/// the retention window is the TTL itself.
+fn prune_expired_slices(state: &AppState) {
+    let now = Utc::now();
+    state
+        .peer_slice_cache
+        .retain(|_, entry| (now - entry.fetched_at).num_seconds() <= SLICE_TTL_SECONDS);
+}
+
 /// Boot-time manifest hydration. Deliberately peer-global: it runs before any
 /// request, over every peer regardless of which workspaces are bound to it, so
 /// there is no workspace whose credential it could legitimately present. The
 /// peer handles here stay unscoped and resolve on the peer-global OAuth / env
-/// tiers.
+/// tiers, and `peers.last_manifest_jsonb` — which only ever stores a
+/// peer-global fetch — rehydrates under the peer-global key, so no workspace
+/// read can be answered from it.
 pub async fn hydrate_manifest_cache(state: &AppState) {
     let peers = match PeerRepo::new(state.pool.clone()).list().await {
         Ok(peers) => peers,
@@ -456,7 +502,9 @@ pub async fn hydrate_manifest_cache(state: &AppState) {
     for peer in peers {
         if let Some(cached) = peer.last_manifest_jsonb.clone() {
             if let Ok(manifest) = serde_json::from_value::<PeerManifest>(cached) {
-                state.peer_manifest_cache.insert(peer.id, manifest);
+                state
+                    .peer_manifest_cache
+                    .insert(PeerCacheKey::global(peer.id), manifest);
             }
         }
         if peer.status == crate::models::PeerStatus::Active {
@@ -500,6 +548,8 @@ pub async fn workspace_peer_resources(
     }))
 }
 
+/// Admin-triggered refresh. Peer-global for the same reason
+/// `refresh_manifest_if_changed` is: the request names a peer, not a workspace.
 pub async fn force_refresh_manifest(
     state: &AppState,
     peer_id: Uuid,
@@ -510,7 +560,11 @@ pub async fn force_refresh_manifest(
         .await?
         .ok_or_else(|| anyhow::anyhow!("peer not found"))?;
     let manifest = fetch_manifest(state, &peer).await?;
-    state.peer_manifest_cache.insert(peer_id, manifest.clone());
+    evict_workspace_scoped_manifests(state, peer_id);
+    state
+        .peer_manifest_cache
+        .insert(PeerCacheKey::global(peer_id), manifest.clone());
+    prune_expired_manifests(state);
     PeerRepo::new(state.pool.clone())
         .set_last_manifest(peer_id, &serde_json::to_value(&manifest)?)
         .await?;
@@ -554,11 +608,15 @@ pub async fn workspace_context_slices(
         .await?;
     let mut entries = Vec::new();
     for peer in peers {
-        let entry = if let Some(cached) = fresh_cached_slice(state, peer.id) {
+        // `list_active_peers_for_workspace` tags every handle, so the fetch —
+        // and therefore the cache entry — is scoped to this workspace.
+        let key = PeerCacheKey::for_peer(&peer);
+        let entry = if let Some(cached) = fresh_cached_slice(state, key) {
             cached
         } else {
             let fetched = fetch_slice(state, &peer).await?;
-            state.peer_slice_cache.insert(peer.id, fetched.clone());
+            state.peer_slice_cache.insert(key, fetched.clone());
+            prune_expired_slices(state);
             fetched
         };
         entries.push(entry);
@@ -566,13 +624,14 @@ pub async fn workspace_context_slices(
     Ok(entries)
 }
 
-/// The cached slice for `peer_id`, or `None` when it is absent or older than
+/// The cached slice for `key`, or `None` when it is absent or older than
 /// `SLICE_TTL_SECONDS`. Every read of `peer_slice_cache` goes through here so
-/// no path can serve an unbounded-age peer payload.
-fn fresh_cached_slice(state: &AppState, peer_id: Uuid) -> Option<SliceEntry> {
+/// no path can serve an unbounded-age peer payload, and the key carries the
+/// credential scope so no path can serve another workspace's payload either.
+fn fresh_cached_slice(state: &AppState, key: PeerCacheKey) -> Option<SliceEntry> {
     state
         .peer_slice_cache
-        .get(&peer_id)
+        .get(&key)
         .map(|entry| entry.value().clone())
         .filter(|entry| (Utc::now() - entry.fetched_at).num_seconds() <= SLICE_TTL_SECONDS)
 }
@@ -643,7 +702,12 @@ pub async fn dispatch_notification(
         }
         "notifications/resources/list_changed" | "resources/list_changed" | "resources/updated" => {
             refresh_manifest_if_changed(state, peer_id).await?;
-            state.peer_slice_cache.remove(&peer_id);
+            // Every scope's slice is invalidated, not just the peer-global one:
+            // the notification says the peer's resources changed, and each
+            // workspace's copy can only be re-fetched with its own credential.
+            state
+                .peer_slice_cache
+                .retain(|key, _| key.peer_id != peer_id);
         }
         _ => dispatch_domain_notification(state, peer_id, notification).await?,
     }
@@ -664,8 +728,20 @@ fn manifest_contract_hash(manifest: &PeerManifest) -> String {
     }))
 }
 
+/// The manifest for one peer handle, cached under that handle's credential
+/// scope.
+///
+/// `peers.last_manifest_jsonb` is a single peer-global column, so it is written
+/// and read **only** for a peer-global handle. A workspace-scoped manifest is
+/// the peer's answer to that workspace's credential; persisting it would make it
+/// the boot-time answer for every workspace, and reading it as a workspace's
+/// degraded-mode fallback would hand that workspace a listing fetched under a
+/// credential it was never granted. A workspace-scoped fetch that fails with a
+/// cold cache therefore surfaces the error instead.
 async fn manifest_for_peer(state: &AppState, peer: &Peer) -> anyhow::Result<PeerManifest> {
-    if let Some(entry) = state.peer_manifest_cache.get(&peer.id) {
+    let key = PeerCacheKey::for_peer(peer);
+    let peer_global = key.workspace_scope.is_none();
+    if let Some(entry) = state.peer_manifest_cache.get(&key) {
         let mut manifest = entry.value().clone();
         manifest.stale = (Utc::now() - manifest.fetched_at).num_seconds() > MANIFEST_TTL_SECONDS;
         if !manifest.stale {
@@ -674,23 +750,29 @@ async fn manifest_for_peer(state: &AppState, peer: &Peer) -> anyhow::Result<Peer
     }
     match fetch_manifest(state, peer).await {
         Ok(manifest) => {
-            state.peer_manifest_cache.insert(peer.id, manifest.clone());
-            PeerRepo::new(state.pool.clone())
-                .set_last_manifest(peer.id, &serde_json::to_value(&manifest)?)
-                .await?;
+            state.peer_manifest_cache.insert(key, manifest.clone());
+            prune_expired_manifests(state);
+            if peer_global {
+                PeerRepo::new(state.pool.clone())
+                    .set_last_manifest(peer.id, &serde_json::to_value(&manifest)?)
+                    .await?;
+            }
             Ok(manifest)
         }
         Err(e) => {
-            if let Some(cached) = state.peer_manifest_cache.get(&peer.id) {
+            if let Some(cached) = state.peer_manifest_cache.get(&key) {
                 let mut manifest = cached.value().clone();
                 manifest.stale = true;
                 return Ok(manifest);
+            }
+            if !peer_global {
+                return Err(e);
             }
             if let Some(last_good) = peer.last_manifest_jsonb.clone() {
                 let mut manifest: PeerManifest =
                     serde_json::from_value(last_good).context("stored peer manifest is invalid")?;
                 manifest.stale = true;
-                state.peer_manifest_cache.insert(peer.id, manifest.clone());
+                state.peer_manifest_cache.insert(key, manifest.clone());
                 return Ok(manifest);
             }
             Err(e)
@@ -987,9 +1069,15 @@ pub fn namespaced_tools_from_manifest(peer: &Peer, manifest: &PeerManifest) -> V
 /// manifest-refresh path. Tools and resources become `peer_catalog_entries`
 /// rows keyed by the invocation-form `namespaced_name` (`<tool_prefix>:<raw>`,
 /// the same string `route_tool_call` splits). Peer-supplied text is sanitized
-/// at index time (FCS-M2); `sample_queries` are pulled best-effort from the
-/// cached peer slice (empty if absent). `org_id` comes from `peers.org_id`,
-/// never the org-blind manifest cache (FCS-H2).
+/// at index time (FCS-M2). `org_id` comes from `peers.org_id`, never the
+/// org-blind manifest cache (FCS-H2).
+///
+/// `sample_queries` come from the peer-global context slice — see
+/// `catalog_slice_for_peer` — and, when no slice is available, from the values
+/// already indexed. Deriving them from an absent cache entry instead would
+/// empty them on every tick the slice happens to be cold, flip `content_hash`,
+/// and rewrite every row twice per slice lifetime, which is exactly what the
+/// `content_hash` delta in `catalog_repo` exists to avoid.
 pub async fn reindex_peer_catalog(
     state: &AppState,
     peer: &Peer,
@@ -998,14 +1086,24 @@ pub async fn reindex_peer_catalog(
     let Some(prefix) = peer.tool_prefix.as_deref() else {
         return Ok(());
     };
-    let slice = fresh_cached_slice(state, peer.id);
+    let slice = catalog_slice_for_peer(state, peer).await;
+    let indexed_sample_queries = if slice.is_some() {
+        HashMap::new()
+    } else {
+        indexed_sample_queries(state, peer).await?
+    };
     let repo = CatalogRepo::new(state.pool.clone());
 
     let mut desired: Vec<CatalogUpsert> = Vec::new();
     for tool in &manifest.tools {
-        if let Some(entry) =
-            build_catalog_upsert(peer, prefix, CatalogEntryKind::Tool, tool, slice.as_ref())
-        {
+        if let Some(entry) = build_catalog_upsert(
+            peer,
+            prefix,
+            CatalogEntryKind::Tool,
+            tool,
+            slice.as_ref(),
+            &indexed_sample_queries,
+        ) {
             desired.push(entry);
         }
     }
@@ -1016,6 +1114,7 @@ pub async fn reindex_peer_catalog(
             CatalogEntryKind::Resource,
             resource,
             slice.as_ref(),
+            &indexed_sample_queries,
         ) {
             desired.push(entry);
         }
@@ -1043,12 +1142,73 @@ pub async fn reindex_peer_catalog(
     Ok(())
 }
 
+/// The peer-global context slice to draw `sample_queries` from, or `None` when
+/// none is available without inventing a peer round trip.
+///
+/// Only the peer-global slice may feed the catalog: `peer_catalog_entries` rows
+/// are org-scoped, and a workspace-scoped slice is the peer's answer to one
+/// workspace's credential — promoting it to org-wide catalog text would leak it
+/// to every other workspace in the org.
+///
+/// A fetch is attempted only when the peer-global manifest cache holds a fresh
+/// entry, i.e. the caller has just completed a peer-global round trip and the
+/// peer is known reachable. So the scheduler's manifest tick refreshes the
+/// slice alongside the manifest, while a reindex driven from a stored manifest
+/// never becomes an outbound call. A failed fetch is not fatal — the caller
+/// falls back to the already-indexed values.
+async fn catalog_slice_for_peer(state: &AppState, peer: &Peer) -> Option<SliceEntry> {
+    let key = PeerCacheKey::global(peer.id);
+    if let Some(cached) = fresh_cached_slice(state, key) {
+        return Some(cached);
+    }
+    if peer.workspace_scope.is_some() {
+        return None;
+    }
+    let manifest_is_fresh = state
+        .peer_manifest_cache
+        .get(&key)
+        .map(|entry| (Utc::now() - entry.value().fetched_at).num_seconds() <= MANIFEST_TTL_SECONDS)
+        .unwrap_or(false);
+    if !manifest_is_fresh {
+        return None;
+    }
+    match fetch_slice(state, peer).await {
+        Ok(entry) => {
+            state.peer_slice_cache.insert(key, entry.clone());
+            prune_expired_slices(state);
+            Some(entry)
+        }
+        Err(e) => {
+            tracing::warn!(peer_id = %peer.id, error = %e, "catalog slice fetch failed; keeping indexed sample queries");
+            None
+        }
+    }
+}
+
+/// `sample_queries` already stored for this peer, by `namespaced_name`.
+async fn indexed_sample_queries(
+    state: &AppState,
+    peer: &Peer,
+) -> anyhow::Result<HashMap<String, Vec<String>>> {
+    let rows: Vec<(String, Vec<String>)> = sqlx::query_as(
+        "SELECT namespaced_name, sample_queries FROM peer_catalog_entries
+         WHERE org_id = $1 AND peer_id = $2",
+    )
+    .bind(peer.org_id)
+    .bind(peer.id)
+    .fetch_all(&state.pool)
+    .await
+    .context("failed to read indexed catalog sample queries")?;
+    Ok(rows.into_iter().collect())
+}
+
 fn build_catalog_upsert(
     peer: &Peer,
     prefix: &str,
     kind: CatalogEntryKind,
     item: &Value,
     slice: Option<&SliceEntry>,
+    indexed: &HashMap<String, Vec<String>>,
 ) -> Option<CatalogUpsert> {
     let raw_name = item.get("name").and_then(Value::as_str)?;
     if raw_name.contains(':') {
@@ -1060,8 +1220,13 @@ fn build_catalog_upsert(
             .unwrap_or(""),
     );
     let schema_field_names = catalog_schema_field_names(item);
-    let sample_queries = catalog_sample_queries(slice, raw_name);
     let namespaced_name = format!("{prefix}:{raw_name}");
+    // A slice is authoritative when present, including for removals. Only its
+    // absence falls back to what is already indexed.
+    let sample_queries = match slice {
+        Some(slice) => catalog_sample_queries(slice, raw_name),
+        None => indexed.get(&namespaced_name).cloned().unwrap_or_default(),
+    };
     let content_hash =
         catalog_content_hash(raw_name, &description, &sample_queries, &schema_field_names);
     Some(CatalogUpsert {
@@ -1090,11 +1255,12 @@ fn catalog_schema_field_names(item: &Value) -> Vec<String> {
     keys
 }
 
-/// Best-effort `sample_queries` from the cached peer slice. The slice body may
-/// carry `{"sample_queries": {"<raw_name>": ["q1", ...]}}`; absent → empty.
-fn catalog_sample_queries(slice: Option<&SliceEntry>, raw_name: &str) -> Vec<String> {
+/// `sample_queries` for one tool from a peer slice. The slice body may carry
+/// `{"sample_queries": {"<raw_name>": ["q1", ...]}}`; absent → empty.
+fn catalog_sample_queries(slice: &SliceEntry, raw_name: &str) -> Vec<String> {
     slice
-        .and_then(|s| s.body.get("sample_queries"))
+        .body
+        .get("sample_queries")
         .and_then(|sq| sq.get(raw_name))
         .and_then(Value::as_array)
         .map(|arr| {

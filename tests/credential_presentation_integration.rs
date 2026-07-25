@@ -41,7 +41,7 @@ use ione::auth::AuthContext;
 use ione::connectors::mcp_client::McpClientConnector;
 use ione::connectors::ConnectorImpl;
 use ione::services::federation::{PeerManifest, SliceEntry};
-use ione::state::AppState;
+use ione::state::{AppState, PeerCacheKey};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::net::TcpListener;
@@ -377,9 +377,20 @@ async fn give_peer_refreshable_oauth(pool: &PgPool, peer_id: Uuid, access: Optio
     .expect("set peer oauth grant");
 }
 
-fn cache_manifest(state: &AppState, peer_id: Uuid, tool: &str, approval_required: bool) {
+/// Pre-seed the manifest a workspace's federation calls will read. Keyed by
+/// (peer, workspace) because that is the scope the fetch would have run in —
+/// these tests are about which bearer reaches the peer, not about the cache, so
+/// they short-circuit the fetch. The tests that are about the cache
+/// (`workspace_*_is_not_served_*`) deliberately do not use this helper.
+fn cache_manifest(
+    state: &AppState,
+    peer_id: Uuid,
+    workspace_id: Uuid,
+    tool: &str,
+    approval_required: bool,
+) {
     state.peer_manifest_cache.insert(
-        peer_id,
+        PeerCacheKey::for_workspace(peer_id, workspace_id),
         PeerManifest {
             peer_id,
             tools: vec![json!({
@@ -458,7 +469,7 @@ async fn federated_tool_call_presents_workspace_static_credential() {
     let f = fixture().await;
     let secret = "fed-workspace-key-abc";
     insert_workspace_credential(&f.pool, f.workspace_id, f.peer_id, secret).await;
-    cache_manifest(&f.state, f.peer_id, "probe", false);
+    cache_manifest(&f.state, f.peer_id, f.workspace_id, "probe", false);
 
     let result = ione::services::federation::route_tool_call(
         &f.state,
@@ -498,7 +509,7 @@ async fn federated_tool_call_presents_delegated_token() {
         Some(Utc::now() + Duration::hours(1)),
     )
     .await;
-    cache_manifest(&f.state, f.peer_id, "probe", false);
+    cache_manifest(&f.state, f.peer_id, f.workspace_id, "probe", false);
 
     ione::services::federation::route_tool_call(
         &f.state,
@@ -524,7 +535,11 @@ async fn federated_tool_call_credential_does_not_leak_to_another_workspace() {
 
     let secret = "workspace-a-only-fed-key";
     insert_workspace_credential(&f.pool, f.workspace_id, f.peer_id, secret).await;
-    cache_manifest(&f.state, f.peer_id, "probe", false);
+    // Both workspaces get their own manifest entry, because the cache is keyed
+    // by (peer, workspace): this test is about the bearer, so neither call
+    // should be doing a manifest fetch at all.
+    cache_manifest(&f.state, f.peer_id, f.workspace_id, "probe", false);
+    cache_manifest(&f.state, f.peer_id, other_workspace, "probe", false);
 
     ione::services::federation::route_tool_call(
         &f.state,
@@ -571,7 +586,7 @@ async fn approved_peer_tool_execution_presents_workspace_credential() {
     let f = fixture().await;
     let secret = "approved-exec-workspace-key";
     insert_workspace_credential(&f.pool, f.workspace_id, f.peer_id, secret).await;
-    cache_manifest(&f.state, f.peer_id, "danger", true);
+    cache_manifest(&f.state, f.peer_id, f.workspace_id, "danger", true);
 
     let pending = ione::services::federation::route_tool_call(
         &f.state,
@@ -635,7 +650,7 @@ async fn unauthorized_delegated_token_is_not_retried_with_the_peer_global_token(
         Some(Utc::now() + Duration::hours(1)),
     )
     .await;
-    cache_manifest(&f.state, f.peer_id, "probe", false);
+    cache_manifest(&f.state, f.peer_id, f.workspace_id, "probe", false);
     f.peer.reject_with_401();
 
     let err = ione::services::federation::route_tool_call(
@@ -681,7 +696,7 @@ async fn unauthorized_workspace_credential_is_not_retried_with_the_peer_global_t
     let secret = "workspace-cred-that-gets-401";
     insert_workspace_credential(&f.pool, f.workspace_id, f.peer_id, secret).await;
     give_peer_refreshable_oauth(&f.pool, f.peer_id, None).await;
-    cache_manifest(&f.state, f.peer_id, "probe", false);
+    cache_manifest(&f.state, f.peer_id, f.workspace_id, "probe", false);
     f.peer.reject_with_401();
 
     let err = ione::services::federation::route_tool_call(
@@ -770,7 +785,7 @@ async fn slice_cache_does_not_serve_an_entry_older_than_its_ttl() {
 
     // Fresh entries are still served from cache without touching the peer.
     f.state.peer_slice_cache.insert(
-        f.peer_id,
+        PeerCacheKey::for_workspace(f.peer_id, f.workspace_id),
         SliceEntry {
             peer_id: f.peer_id,
             body: json!({ "summary": "still-fresh" }),
@@ -791,7 +806,7 @@ async fn slice_cache_does_not_serve_an_entry_older_than_its_ttl() {
 
     // One second past the TTL is stale, and the peer is re-read.
     f.state.peer_slice_cache.insert(
-        f.peer_id,
+        PeerCacheKey::for_workspace(f.peer_id, f.workspace_id),
         SliceEntry {
             peer_id: f.peer_id,
             body: json!({ "summary": "stale-and-never-evicted" }),
@@ -816,9 +831,474 @@ async fn slice_cache_does_not_serve_an_entry_older_than_its_ttl() {
     let cached = f
         .state
         .peer_slice_cache
-        .get(&f.peer_id)
+        .get(&PeerCacheKey::for_workspace(f.peer_id, f.workspace_id))
         .expect("slice re-cached")
         .value()
         .clone();
     assert_eq!(cached.body["summary"], json!("fresh-from-peer"));
+}
+
+// ─── cache scope: one peer, two workspaces, two answers ───────────────────────
+
+/// A stub peer that answers `tools/list`, `resources/list` and `slice://`
+/// **differently per bearer**, which is the whole reason per-(workspace, peer)
+/// delegation exists. Nothing here pre-seeds a cache: every assertion below goes
+/// through the real fetch path, because a pre-seeded cache is exactly what hid
+/// the peer-id-only cache key.
+struct ScopedPeer {
+    mcp_url: String,
+    unauthorized: Arc<AtomicBool>,
+}
+
+impl ScopedPeer {
+    fn reject_with_401(&self) {
+        self.unauthorized.store(true, Ordering::SeqCst);
+    }
+}
+
+async fn spawn_bearer_scoped_peer() -> ScopedPeer {
+    let unauthorized = Arc::new(AtomicBool::new(false));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind peer");
+    let addr: SocketAddr = listener.local_addr().expect("peer addr");
+
+    let reject = Arc::clone(&unauthorized);
+    let mcp = move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
+        let reject = Arc::clone(&reject);
+        async move {
+            if reject.load(Ordering::SeqCst) {
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(json!({ "error": "unauthorized" })),
+                );
+            }
+            let label = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .unwrap_or("anonymous")
+                .to_string();
+            let id = body.get("id").cloned().unwrap_or(Value::Null);
+            let result = match body.get("method").and_then(Value::as_str).unwrap_or("") {
+                "tools/list" => json!({
+                    "tools": [{
+                        "name": format!("tool-{label}"),
+                        "description": "scoped probe",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    }]
+                }),
+                "resources/list" => json!({ "resources": [{ "uri": format!("res://{label}") }] }),
+                "resources/read" => json!({
+                    "contents": [{
+                        "uri": "slice://",
+                        "mimeType": "application/vnd.ione.slice+json",
+                        "text": json!({
+                            "schema_version": "1",
+                            "summary": format!("slice-{label}")
+                        }).to_string()
+                    }]
+                }),
+                _ => json!({ "ok": true }),
+            };
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
+            )
+        }
+    };
+
+    let app = axum::Router::new().route("/mcp", axum::routing::post(mcp));
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("peer server error");
+    });
+    ScopedPeer {
+        mcp_url: format!("http://{addr}/mcp"),
+        unauthorized,
+    }
+}
+
+struct ScopedFixture {
+    pool: PgPool,
+    state: AppState,
+    workspace_a: Uuid,
+    workspace_b: Uuid,
+    peer_id: Uuid,
+    peer: ScopedPeer,
+    auth: AuthContext,
+}
+
+/// One peer, two workspaces bound to it, each with its own static credential.
+async fn scoped_fixture() -> ScopedFixture {
+    let (pool, state) = spawn_state().await;
+    let org_id = default_org_id(&pool).await;
+    let user_id = default_user_id(&pool).await;
+    let workspace_a = default_workspace_id(&pool).await;
+    let workspace_b = insert_workspace(&pool, org_id, "Workspace B").await;
+    let peer = spawn_bearer_scoped_peer().await;
+    let issuer_id = insert_trust_issuer(&pool, org_id, "https://iss-scope.test").await;
+    let peer_id = insert_active_peer(
+        &pool,
+        org_id,
+        "Scoped Peer",
+        "scoped",
+        &peer.mcp_url,
+        issuer_id,
+    )
+    .await;
+    insert_active_binding(&pool, workspace_a, peer_id).await;
+    insert_active_binding(&pool, workspace_b, peer_id).await;
+    ScopedFixture {
+        pool,
+        state,
+        workspace_a,
+        workspace_b,
+        peer_id,
+        peer,
+        auth: tool_caller(org_id, user_id),
+    }
+}
+
+fn tool_names(manifest: &PeerManifest) -> Vec<String> {
+    manifest
+        .tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn resource_uris(manifest: &PeerManifest) -> Vec<String> {
+    manifest
+        .resources
+        .iter()
+        .filter_map(|resource| resource.get("uri").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Workspace A fetches the peer manifest with A's credential; workspace B must
+/// then fetch its own rather than be served A's. Keyed by `peer.id` alone, B
+/// read A's answer for up to `MANIFEST_TTL_SECONDS`.
+#[tokio::test]
+#[ignore]
+async fn workspace_manifest_is_not_served_to_another_workspace() {
+    let f = scoped_fixture().await;
+    insert_workspace_credential(&f.pool, f.workspace_a, f.peer_id, "cred-a").await;
+    insert_workspace_credential(&f.pool, f.workspace_b, f.peer_id, "cred-b").await;
+
+    let manifest_a = ione::services::federation::workspace_peer_manifest(
+        &f.state,
+        f.workspace_a,
+        f.peer_id,
+        &f.auth,
+    )
+    .await
+    .expect("workspace A manifest");
+    assert_eq!(tool_names(&manifest_a), vec!["tool-cred-a".to_string()]);
+    assert_eq!(resource_uris(&manifest_a), vec!["res://cred-a".to_string()]);
+
+    let manifest_b = ione::services::federation::workspace_peer_manifest(
+        &f.state,
+        f.workspace_b,
+        f.peer_id,
+        &f.auth,
+    )
+    .await
+    .expect("workspace B manifest");
+    assert_eq!(
+        tool_names(&manifest_b),
+        vec!["tool-cred-b".to_string()],
+        "workspace B was served workspace A's manifest"
+    );
+    assert_eq!(
+        resource_uris(&manifest_b),
+        vec!["res://cred-b".to_string()],
+        "workspace B was served workspace A's resource listing"
+    );
+
+    // And A still sees A's, i.e. B's fetch did not simply overwrite one shared
+    // entry with the other direction of the same leak.
+    let manifest_a_again = ione::services::federation::workspace_peer_manifest(
+        &f.state,
+        f.workspace_a,
+        f.peer_id,
+        &f.auth,
+    )
+    .await
+    .expect("workspace A manifest again");
+    assert_eq!(
+        tool_names(&manifest_a_again),
+        vec!["tool-cred-a".to_string()]
+    );
+}
+
+/// The same rule for the context slice, which is peer-authored prose fed into a
+/// model prompt.
+#[tokio::test]
+#[ignore]
+async fn workspace_context_slice_is_not_served_to_another_workspace() {
+    let f = scoped_fixture().await;
+    insert_workspace_credential(&f.pool, f.workspace_a, f.peer_id, "cred-a").await;
+    insert_workspace_credential(&f.pool, f.workspace_b, f.peer_id, "cred-b").await;
+
+    let slices_a =
+        ione::services::federation::workspace_context_slices(&f.state, f.workspace_a, &f.auth)
+            .await
+            .expect("workspace A slices");
+    assert_eq!(slices_a.len(), 1);
+    assert_eq!(slices_a[0].body["summary"], json!("slice-cred-a"));
+
+    let slices_b =
+        ione::services::federation::workspace_context_slices(&f.state, f.workspace_b, &f.auth)
+            .await
+            .expect("workspace B slices");
+    assert_eq!(slices_b.len(), 1);
+    assert_eq!(
+        slices_b[0].body["summary"],
+        json!("slice-cred-b"),
+        "workspace B was served workspace A's context slice"
+    );
+}
+
+/// `peers.last_manifest_jsonb` is one peer-global column and the boot
+/// rehydration path loads it for every peer. A workspace-scoped fetch must not
+/// write it — otherwise A's listing becomes the restart-time answer for every
+/// workspace — and a workspace read must not fall back to it.
+#[tokio::test]
+#[ignore]
+async fn workspace_scoped_manifest_is_not_persisted_or_rehydrated_for_other_workspaces() {
+    let f = scoped_fixture().await;
+    insert_workspace_credential(&f.pool, f.workspace_a, f.peer_id, "cred-a").await;
+
+    let manifest_a = ione::services::federation::workspace_peer_manifest(
+        &f.state,
+        f.workspace_a,
+        f.peer_id,
+        &f.auth,
+    )
+    .await
+    .expect("workspace A manifest");
+    assert_eq!(tool_names(&manifest_a), vec!["tool-cred-a".to_string()]);
+
+    let persisted: Option<Value> =
+        sqlx::query_scalar("SELECT last_manifest_jsonb FROM peers WHERE id = $1")
+            .bind(f.peer_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("read last_manifest_jsonb");
+    assert!(
+        persisted.is_none(),
+        "a workspace-scoped manifest was persisted as the peer-global one: {persisted:?}"
+    );
+
+    // Now stand in for a peer-global fetch having stored one, and restart: the
+    // rehydrated entry may only answer peer-global reads.
+    let peer_global = json!({
+        "peerId": f.peer_id,
+        "tools": [{ "name": "tool-peer-global-only" }],
+        "resources": [],
+        "fetchedAt": Utc::now().to_rfc3339(),
+        "etag": null,
+        "stale": false
+    });
+    sqlx::query("UPDATE peers SET last_manifest_jsonb = $2 WHERE id = $1")
+        .bind(f.peer_id)
+        .bind(&peer_global)
+        .execute(&f.pool)
+        .await
+        .expect("seed last_manifest_jsonb");
+    f.state.peer_manifest_cache.clear();
+    ione::services::federation::hydrate_manifest_cache(&f.state).await;
+
+    // With the peer unreachable and no entry of its own, workspace B gets an
+    // error — not the stored peer-global listing.
+    f.peer.reject_with_401();
+    let err = ione::services::federation::workspace_peer_manifest(
+        &f.state,
+        f.workspace_b,
+        f.peer_id,
+        &f.auth,
+    )
+    .await
+    .expect_err("a workspace read must not fall back to the peer-global manifest");
+    assert!(
+        !err.to_string().contains("tool-peer-global-only"),
+        "unexpected error: {err}"
+    );
+}
+
+// ─── connector 401: no tier downgrade ─────────────────────────────────────────
+
+/// The connector poll path, in its production shape:
+/// `auto_create_connector_for_peer` writes `mcp_url`/`peer_id`/`workspace_id`
+/// and **no** `bearer_token`, so every subscribed peer resolves through the full
+/// precedence chain. A 401 against the tier-1 delegated token must surface, not
+/// be retried with the peer-global grant.
+#[tokio::test]
+#[ignore]
+async fn connector_does_not_retry_a_401_delegated_token_with_the_peer_global_token() {
+    let f = fixture().await;
+    let delegated = "connector-delegated-that-gets-401";
+    give_peer_refreshable_oauth(&f.pool, f.peer_id, Some("peer-global-access")).await;
+    insert_delegation(
+        &f.pool,
+        f.workspace_id,
+        f.peer_id,
+        "https://unused.test/token",
+        delegated,
+        Some(Utc::now() + Duration::hours(1)),
+    )
+    .await;
+
+    let connector = McpClientConnector::from_config(
+        &json!({
+            "mcp_url": f.peer.mcp_url,
+            "workspace_id": f.workspace_id.to_string(),
+            "peer_id": f.peer_id.to_string(),
+        }),
+        Some(f.pool.clone()),
+    )
+    .expect("build mcp_client connector");
+    f.peer.reject_with_401();
+
+    let err = connector
+        .invoke("probe", json!({}))
+        .await
+        .expect_err("a 401 on the delegated token must surface");
+    assert!(
+        err.to_string().contains("401"),
+        "the 401 must be propagated, got: {err}"
+    );
+
+    assert_eq!(
+        f.peer.bearers(),
+        vec![format!("Bearer {delegated}")],
+        "exactly one attempt, on the delegated token"
+    );
+    assert_eq!(
+        f.peer.refresh_hits(),
+        0,
+        "the peer-global refresh must not be attempted"
+    );
+    assert!(
+        !f.peer
+            .bearers()
+            .iter()
+            .any(|bearer| bearer.contains(REFRESHED_PEER_GLOBAL)),
+        "the peer-global token was presented after a workspace-scoped 401"
+    );
+}
+
+/// The same for tier 3, the per-(workspace, peer) static credential.
+#[tokio::test]
+#[ignore]
+async fn connector_does_not_retry_a_401_workspace_credential_with_the_peer_global_token() {
+    let f = fixture().await;
+    let secret = "connector-workspace-cred-that-gets-401";
+    insert_workspace_credential(&f.pool, f.workspace_id, f.peer_id, secret).await;
+    give_peer_refreshable_oauth(&f.pool, f.peer_id, None).await;
+
+    let connector = McpClientConnector::from_config(
+        &json!({
+            "mcp_url": f.peer.mcp_url,
+            "workspace_id": f.workspace_id.to_string(),
+            "peer_id": f.peer_id.to_string(),
+        }),
+        Some(f.pool.clone()),
+    )
+    .expect("build mcp_client connector");
+    f.peer.reject_with_401();
+
+    connector
+        .invoke("probe", json!({}))
+        .await
+        .expect_err("a 401 on the workspace credential must surface");
+
+    assert_eq!(
+        f.peer.bearers(),
+        vec![format!("Bearer {secret}")],
+        "exactly one attempt, on the workspace credential"
+    );
+    assert_eq!(f.peer.refresh_hits(), 0);
+}
+
+// ─── catalog reindex vs. a cold slice cache ───────────────────────────────────
+
+/// `reindex_peer_catalog` reads the peer context slice for `sample_queries`, but
+/// nothing on the reindex path is guaranteed to have populated it — with a
+/// bounded TTL, cold is the steady state. Deriving `sample_queries` from an
+/// absent entry empties them, which flips `content_hash` and rewrites every row
+/// on every scheduler tick, defeating the delta guard in `catalog_repo`.
+#[tokio::test]
+#[ignore]
+async fn catalog_reindex_keeps_sample_queries_when_the_slice_cache_is_cold() {
+    let f = fixture().await;
+    let peer = ione::repos::PeerRepo::new(f.pool.clone())
+        .get(f.peer_id)
+        .await
+        .expect("load peer")
+        .expect("peer exists");
+    let manifest = PeerManifest {
+        peer_id: f.peer_id,
+        tools: vec![json!({
+            "name": "probe",
+            "description": "catalog probe",
+            "inputSchema": { "type": "object", "properties": { "target": { "type": "string" } } }
+        })],
+        resources: vec![],
+        fetched_at: Utc::now(),
+        etag: None,
+        stale: false,
+    };
+
+    // One index while the peer-global slice is warm.
+    f.state.peer_slice_cache.insert(
+        PeerCacheKey::global(f.peer_id),
+        SliceEntry {
+            peer_id: f.peer_id,
+            body: json!({ "sample_queries": { "probe": ["how many probes are open?"] } }),
+            fetched_at: Utc::now(),
+        },
+    );
+    ione::services::federation::reindex_peer_catalog(&f.state, &peer, &manifest)
+        .await
+        .expect("first reindex");
+
+    let (queries, hash, updated_at): (Vec<String>, String, DateTime<Utc>) = sqlx::query_as(
+        "SELECT sample_queries, content_hash, updated_at FROM peer_catalog_entries
+         WHERE peer_id = $1 AND namespaced_name = 'fed:probe'",
+    )
+    .bind(f.peer_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("catalog row after first reindex");
+    assert_eq!(queries, vec!["how many probes are open?".to_string()]);
+
+    // The entry ages out. Two more reindexes must be no-ops.
+    f.state.peer_slice_cache.clear();
+    for pass in 1..=2 {
+        ione::services::federation::reindex_peer_catalog(&f.state, &peer, &manifest)
+            .await
+            .expect("cold-cache reindex");
+        let (cold_queries, cold_hash, cold_updated_at): (Vec<String>, String, DateTime<Utc>) =
+            sqlx::query_as(
+                "SELECT sample_queries, content_hash, updated_at FROM peer_catalog_entries
+                 WHERE peer_id = $1 AND namespaced_name = 'fed:probe'",
+            )
+            .bind(f.peer_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("catalog row after cold reindex");
+        assert_eq!(
+            cold_queries, queries,
+            "pass {pass}: a cold slice cache eroded sample_queries"
+        );
+        assert_eq!(
+            cold_hash, hash,
+            "pass {pass}: content_hash churned with unchanged manifest and description"
+        );
+        assert_eq!(
+            cold_updated_at, updated_at,
+            "pass {pass}: the row was rewritten even though nothing changed"
+        );
+    }
 }

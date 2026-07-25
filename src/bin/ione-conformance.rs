@@ -63,12 +63,15 @@ OPTIONS:
   --webhook-timeout <SECS>    How long to wait for the event. Default 30.
   --help                      Print this message.
 
-Surfaces 3 is optional in contract v1 and reports SKIP when not configured.
+Surface 3 is optional in contract v1 and reports SKIP when not configured.
+Surface 4 reports SKIP for a tools-only peer that exposes no renderable
+resource, and surface 5 reports SKIP for a peer that serves no slice:// —
+both are conforming shapes, so neither fails the run.
 A SKIP never fails the run; a FAIL always does."#;
 
 // ─── Reporting ────────────────────────────────────────────────────────────────
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum Status {
     Pass,
     Fail,
@@ -391,9 +394,13 @@ impl McpClient {
 
 // ─── Surface 1 — MCP server endpoint (§1) ─────────────────────────────────────
 
-async fn check_mcp_endpoint(client: &mut McpClient) -> (Surface, Vec<Value>) {
+/// Returns the surface-1 result and the peer's resource listing. `None` means
+/// `resources/list` produced no listing at all — an unreachable or non-MCP
+/// endpoint — which surfaces 4 and 5 must treat as a hard failure rather than as
+/// "this peer simply exposes nothing".
+async fn check_mcp_endpoint(client: &mut McpClient) -> (Surface, Option<Vec<Value>>) {
     let mut surface = Surface::new(1, "MCP server endpoint", "§1");
-    let mut resources = Vec::new();
+    let mut resources = None;
 
     match client.initialize().await {
         Ok(call) => {
@@ -439,10 +446,15 @@ async fn check_mcp_endpoint(client: &mut McpClient) -> (Surface, Vec<Value>) {
                 items.len()
             ));
             if pages > 1 {
-                surface.fail(
-                    "resources/list paginates, but IONe's map/chart/table/document panel paths \
-                     read page 1 only (§8.2) — resources beyond page 1 will not render",
-                );
+                // §8.2 requires a v1 peer to support cursor-based pagination on
+                // resources/list, and all four panel paths follow nextCursor via
+                // src/services/peer_panels.rs (issue #18). Paginating is
+                // conforming; the kit used to FAIL it, which told a peer that
+                // did exactly what the contract asks that it was broken.
+                surface.ok(format!(
+                    "resources/list paginates over {pages} page(s); IONe's map/chart/table/\
+                     document panel paths follow nextCursor (§8.2), capped at 50 pages (§8.1)"
+                ));
             }
             let unnamed = items
                 .iter()
@@ -458,7 +470,7 @@ async fn check_mcp_endpoint(client: &mut McpClient) -> (Surface, Vec<Value>) {
                 "every resource carries a non-empty uri",
                 format!("{unnamed} resource(s) have a missing or empty 'uri' and are dropped"),
             );
-            resources = items;
+            resources = Some(items);
         }
         Err(err) => surface.fail(err),
     }
@@ -828,6 +840,16 @@ async fn receive_webhook(
 }
 
 /// Re-implements IONe's §3.1 verification: grammar, hex length, signing input.
+///
+/// Two places where the kit deliberately matches `src/routes/webhooks.rs`
+/// rather than the contract's prose:
+///
+///   * whitespace around a key or value is trimmed, as `parse_signature` does,
+///     so `t=1, v1=…` verifies here exactly as it does in production;
+///   * the digest is compared case-insensitively, because production decodes it
+///     with `hex::decode`, which accepts `A-F`. The contract's §3.1 table calls
+///     lowercase "Enforced"; it is not. Rejecting uppercase here would fail a
+///     peer IONe accepts, which is the failure mode this kit exists to prevent.
 fn verify_signature_header(header: &str, secret: &str, body: &[u8]) -> Result<i64, String> {
     let mut timestamp: Option<&str> = None;
     let mut digest: Option<&str> = None;
@@ -835,6 +857,7 @@ fn verify_signature_header(header: &str, secret: &str, body: &[u8]) -> Result<i6
         let (key, value) = part
             .split_once('=')
             .ok_or_else(|| format!("X-IONe-Signature part '{part}' is not key=value (§3.1)"))?;
+        let (key, value) = (key.trim(), value.trim());
         match key {
             "t" if timestamp.is_none() => timestamp = Some(value),
             "v1" if digest.is_none() => digest = Some(value),
@@ -854,12 +877,9 @@ fn verify_signature_header(header: &str, secret: &str, body: &[u8]) -> Result<i6
         .map_err(|_| format!("t='{timestamp}' is not a base-10 integer of unix seconds (§3.1)"))?;
     if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!(
-            "v1 must be exactly 64 lowercase hex characters, got {} characters (§3.1)",
+            "v1 must be exactly 64 hex characters decoding to 32 bytes, got {} characters (§3.1)",
             digest.len()
         ));
-    }
-    if digest.chars().any(|c| c.is_ascii_uppercase()) {
-        return Err("v1 must be lowercase hex (§3.1)".to_string());
     }
 
     type HmacSha256 = Hmac<Sha256>;
@@ -868,7 +888,7 @@ fn verify_signature_header(header: &str, secret: &str, body: &[u8]) -> Result<i6
     mac.update(b".");
     mac.update(body);
     let expected = hex::encode(mac.finalize().into_bytes());
-    if expected != digest {
+    if expected != digest.to_ascii_lowercase() {
         return Err(
             "v1 digest does not match HMAC-SHA256(t_ascii ++ \".\" ++ raw_body) with the \
              provisioned secret (§3.1). The usual cause is re-serializing the body after \
@@ -994,18 +1014,29 @@ fn verify_envelope(surface: &mut Surface, body: &[u8], peer_id: &str, timestamp:
 
 // ─── Surface 4 — resource view metadata (§4) ──────────────────────────────────
 
-async fn check_view_metadata(client: &McpClient, resources: &[Value]) -> Surface {
+async fn check_view_metadata(client: &McpClient, resources: Option<&[Value]>) -> Surface {
     let mut surface = Surface::new(4, "Resource view metadata (ione_view)", "§4");
 
+    let Some(resources) = resources else {
+        surface.fail(
+            "resources/list returned no listing (see surface 1), so no renderable resource could              be discovered at all",
+        );
+        return surface;
+    };
     let viewed: Vec<&Value> = resources
         .iter()
         .filter(|r| r.pointer("/metadata/ione_view").is_some())
         .collect();
 
     if viewed.is_empty() {
-        surface.fail(
-            "no resource carries metadata.ione_view, so nothing renders in IONe's shell. A \
-             resource without it is silently dropped from every panel (§4.1).",
+        // Surface 4 is "Required to render in the shell", not required outright:
+        // a tools-only peer that exposes no renderable resource is conforming
+        // and must not be told it is broken.
+        surface.skip(
+            "no resource carries metadata.ione_view, so nothing renders in IONe's shell. That is \
+             conforming for a tools-only peer — surface 4 is required only to render — but if you \
+             expect panels, this is why they are empty: a resource without ione_view is silently \
+             dropped from every panel (§4.1).",
         );
         return surface;
     }
@@ -1265,15 +1296,29 @@ fn validate_document_url(raw: &str) -> Result<(), String> {
 
 // ─── Surface 5 — context slice (§5) ───────────────────────────────────────────
 
-async fn check_slice(client: &McpClient) -> Surface {
+async fn check_slice(client: &McpClient, peer_answered: bool) -> Surface {
     let mut surface = Surface::new(5, "Context slice (slice://)", "§5");
 
+    // Surface 5 is Recommended, not Required: §5.2 has IONe synthesize a
+    // schema_version "0" slice for a peer that serves none, which is why the
+    // contract's surface table grades it that way. A peer that declines the
+    // surface is conforming, so its absence is a SKIP. Everything below —
+    // schema_version, summary, size, sentinels — still FAILs, because a peer
+    // that *does* serve slice:// has to serve a valid one.
     let body = match client.read_json("slice://").await {
         Ok(body) => body,
+        Err(err) if peer_answered => {
+            surface.skip(format!(
+                "{err}. Surface 5 is Recommended, not Required: §5.2 lets IONe fall back to a \
+                 synthesized schema_version \"0\" slice. But then your capability description is \
+                 IONe's guess, not yours."
+            ));
+            return surface;
+        }
         Err(err) => {
             surface.fail(format!(
-                "{err}. §5.2 lets IONe fall back to a synthesized schema_version \"0\" slice, but \
-                 then your capability description is IONe's guess, not yours."
+                "{err}. The endpoint answered no MCP listing either (see surface 1), so this is \
+                 not a peer declining an optional surface."
             ));
             return surface;
         }
@@ -1441,8 +1486,8 @@ async fn main() -> ExitCode {
     let (surface1, resources) = check_mcp_endpoint(&mut client).await;
     let surface2 = check_oauth(&options).await;
     let surface3 = check_webhook_sender(&options).await;
-    let surface4 = check_view_metadata(&client, &resources).await;
-    let surface5 = check_slice(&client).await;
+    let surface4 = check_view_metadata(&client, resources.as_deref()).await;
+    let surface5 = check_slice(&client, resources.is_some()).await;
     let surface6 = check_whoami(&client).await;
 
     let surfaces = [surface1, surface2, surface3, surface4, surface5, surface6];
@@ -1551,5 +1596,199 @@ mod tests {
                 surface.lines
             );
         }
+    }
+
+    // ── signature digest case ─────────────────────────────────────────────
+
+    const SECRET: &str = "whsec-conformance";
+
+    fn signature_header(timestamp: i64, body: &[u8], uppercase: bool) -> String {
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(SECRET.as_bytes()).expect("hmac key");
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(body);
+        let digest = hex::encode(mac.finalize().into_bytes());
+        let digest = if uppercase {
+            digest.to_ascii_uppercase()
+        } else {
+            digest
+        };
+        format!("t={timestamp},v1={digest}")
+    }
+
+    /// The control for the two cases below.
+    #[test]
+    fn a_lowercase_hex_digest_verifies() {
+        let body = br#"{"id":"evt-1"}"#;
+        let timestamp = Utc::now().timestamp();
+        assert_eq!(
+            verify_signature_header(&signature_header(timestamp, body, false), SECRET, body),
+            Ok(timestamp)
+        );
+    }
+
+    /// `webhooks.rs:194` decodes the digest with `hex::decode`, which accepts
+    /// `A-F`. The contract's §3.1 table marks lowercase "Enforced"; production
+    /// does not enforce it. The kit follows the code, because a peer that sends
+    /// uppercase hex is accepted by IONe and must not be told it is broken.
+    #[test]
+    fn an_uppercase_hex_digest_verifies_because_production_hex_decodes_it() {
+        let body = br#"{"id":"evt-1"}"#;
+        let timestamp = Utc::now().timestamp();
+        assert_eq!(
+            verify_signature_header(&signature_header(timestamp, body, true), SECRET, body),
+            Ok(timestamp)
+        );
+    }
+
+    /// `parse_signature` trims each key and value, so a sender that puts a space
+    /// after the comma is accepted by IONe.
+    #[test]
+    fn whitespace_around_signature_components_is_trimmed_as_production_does() {
+        let body = br#"{"id":"evt-1"}"#;
+        let timestamp = Utc::now().timestamp();
+        let spaced = signature_header(timestamp, body, false).replace(",v1=", ", v1=");
+        assert_eq!(
+            verify_signature_header(&spaced, SECRET, body),
+            Ok(timestamp)
+        );
+    }
+
+    /// Accepting either case is not accepting anything: a wrong digest, and a
+    /// digest of the wrong length, still fail.
+    #[test]
+    fn a_wrong_or_short_digest_still_fails() {
+        let body = br#"{"id":"evt-1"}"#;
+        let timestamp = Utc::now().timestamp();
+        assert!(verify_signature_header(
+            &format!("t={timestamp},v1={}", "a".repeat(64)),
+            SECRET,
+            body
+        )
+        .is_err());
+        assert!(
+            verify_signature_header(&format!("t={timestamp},v1=DEADBEEF"), SECRET, body).is_err()
+        );
+    }
+
+    // ── paginating resources/list ─────────────────────────────────────────
+
+    /// A peer whose `resources/list` returns two pages, and is otherwise
+    /// surface-1 conforming.
+    async fn spawn_paginating_peer() -> String {
+        async fn rpc(Json(body): Json<Value>) -> Json<Value> {
+            let id = body.get("id").cloned().unwrap_or(json!(1));
+            let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+            let cursor = body.pointer("/params/cursor").and_then(Value::as_str);
+            let result = match (method, cursor) {
+                ("initialize", _) => json!({ "protocolVersion": "2025-11-25" }),
+                ("tools/list", _) => json!({ "tools": [{ "name": "probe" }] }),
+                ("resources/list", None) => json!({
+                    "resources": [{ "uri": "peer://page-1" }],
+                    "nextCursor": "page-2"
+                }),
+                ("resources/list", Some(_)) => json!({
+                    "resources": [{ "uri": "peer://page-2" }],
+                    "nextCursor": null
+                }),
+                ("resources/read", _) => {
+                    return Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32002, "message": "resource not found" }
+                    }))
+                }
+                ("tools/call", _) => json!({ "content": [] }),
+                _ => {
+                    return Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32601, "message": "method not found" }
+                    }))
+                }
+            };
+            Json(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub peer");
+        let addr = listener.local_addr().expect("stub peer addr");
+        let router = Router::new().route("/mcp", post(rpc));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    fn options_for(url: String) -> Options {
+        Options {
+            url,
+            token: None,
+            pre_brokered: true,
+            oauth_issuer: None,
+            webhook_peer_id: None,
+            webhook_secret: None,
+            webhook_trigger: None,
+            webhook_timeout: 1,
+        }
+    }
+
+    /// §8.2 requires a v1 peer to paginate `resources/list`, and IONe follows
+    /// `nextCursor` on all four panel paths (issue #18). The kit used to FAIL a
+    /// peer that did exactly that — the same class of bug the pagination work
+    /// had just fixed, pointed the other way.
+    #[tokio::test]
+    async fn a_paginating_resources_list_passes_surface_one() {
+        let options = options_for(spawn_paginating_peer().await);
+        let mut client = McpClient::new(&options);
+        let (surface, resources) = check_mcp_endpoint(&mut client).await;
+        assert_eq!(
+            surface.status(),
+            Status::Pass,
+            "a paginating peer is conforming: {:?}",
+            surface.lines
+        );
+        assert_eq!(
+            resources.as_deref().map(<[Value]>::len),
+            Some(2),
+            "both pages must be collected: {resources:?}"
+        );
+    }
+
+    /// Surface 4 is "Required to render in the shell" and surface 5 is
+    /// "Recommended" — a reachable tools-only peer that serves neither is
+    /// conforming, so both SKIP. The hard-failure case (an endpoint that is not
+    /// an MCP peer at all) is still a FAIL, and is pinned by
+    /// `tests/stub_peer_conformance_integration.rs`.
+    #[tokio::test]
+    async fn a_tools_only_peer_skips_the_optional_surfaces_rather_than_failing_them() {
+        let options = options_for(spawn_paginating_peer().await);
+        let mut client = McpClient::new(&options);
+        let (_, resources) = check_mcp_endpoint(&mut client).await;
+
+        let view = check_view_metadata(&client, resources.as_deref()).await;
+        assert_eq!(
+            view.status(),
+            Status::Skip,
+            "no ione_view is conforming for a tools-only peer: {:?}",
+            view.lines
+        );
+
+        let slice = check_slice(&client, resources.is_some()).await;
+        assert_eq!(
+            slice.status(),
+            Status::Skip,
+            "an absent slice:// is conforming (§5.2): {:?}",
+            slice.lines
+        );
+
+        // The same two surfaces against an endpoint that answered nothing.
+        assert_eq!(
+            check_view_metadata(&client, None).await.status(),
+            Status::Fail
+        );
+        assert_eq!(check_slice(&client, false).await.status(), Status::Fail);
     }
 }
