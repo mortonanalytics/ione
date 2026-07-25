@@ -61,14 +61,23 @@ jobs:
       - name: integration tests (serial, live DB, IONE_SKIP_LIVE=1)
         run: |
           for p in phase02_conversations phase03_workspaces phase04_nws_connector \
-                   phase05_signals phase06_critic phase07_routing \
-                   phase08_auth phase09_delivery phase10_auto_exec \
+                   phase05_signals phase05b_rule_diagnostics phase06_critic \
+                   phase07_routing phase08_auth phase09_delivery phase10_auto_exec \
                    phase11_mcp_server phase12_peer phase13_connectors phase13_demo \
                    phase14_bindings phase_event_layers phase_geojson_poll \
                    phase_map_layers phase_chart_aggregates phase_chart_peer \
                    phase_table phase_table_peer phase_document_panels \
                    phase_peer_token_refresh phase_push_ingress \
-                   audit_export_integration; do
+                   phase_rule_nested_field phase_workspace_patch \
+                   phase_federation_hardening \
+                   audit_export_integration auto_exec_governance_integration \
+                   catalog_search_integration federation_hardening_regression_integration \
+                   headless_provisioning_integration integration_oauth_roundtrip \
+                   integration_peer_manifest integration_telemetry \
+                   observability_capture_integration observability_push_integration \
+                   observability_read_integration rbac_integration \
+                   contract_api_routes contract_demo_workspace contract_errors \
+                   contract_schema; do
             echo "=== $p ==="
             cargo test --test "$p" -- --ignored --test-threads=1
           done
