@@ -96,6 +96,27 @@ impl BrokerCredentialRepo {
         .context("failed to consume broker credential state")
     }
 
+    /// One connection by id, scoped to its owner so a caller cannot address
+    /// another operator's connection by guessing the uuid.
+    pub async fn find_for_user(
+        &self,
+        user_id: Uuid,
+        id: Uuid,
+    ) -> anyhow::Result<Option<BrokerCredential>> {
+        sqlx::query_as::<_, BrokerCredential>(
+            "SELECT id, user_id, org_id, provider, label, scopes, access_token_ciphertext,
+                refresh_token_ciphertext, token_expires_at, state_token, code_verifier,
+                state_expires_at, created_at
+             FROM broker_credentials
+             WHERE user_id = $1 AND id = $2",
+        )
+        .bind(user_id)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to find broker credential by id")
+    }
+
     pub async fn find_user_provider(
         &self,
         user_id: Uuid,

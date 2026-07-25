@@ -35,6 +35,7 @@ pub mod user_session_repo;
 pub mod webhook_event_repo;
 pub mod workspace_peer_binding_repo;
 pub mod workspace_peer_credential_repo;
+pub mod workspace_peer_delegation_repo;
 pub mod workspace_repo;
 
 pub use activation_repo::*;
@@ -75,4 +76,7 @@ pub use user_session_repo::UserSessionRepo;
 pub use webhook_event_repo::WebhookEventRepo;
 pub use workspace_peer_binding_repo::WorkspacePeerBindingRepo;
 pub use workspace_peer_credential_repo::{CredentialUpsert, WorkspacePeerCredentialRepo};
+pub use workspace_peer_delegation_repo::{
+    DelegatedTokenMaterial, PendingDelegation, WorkspacePeerDelegationRepo,
+};
 pub use workspace_repo::WorkspaceRepo;

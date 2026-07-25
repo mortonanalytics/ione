@@ -206,7 +206,7 @@ pub async fn complete_callback(
     Ok(())
 }
 
-fn verify_peer_endpoint_hosts(peer_url: &str, disc: &PeerDiscovery) -> Result<(), AppError> {
+pub fn verify_peer_endpoint_hosts(peer_url: &str, disc: &PeerDiscovery) -> Result<(), AppError> {
     let peer_host = url::Url::parse(peer_url)
         .map_err(|_| AppError::BadRequest("invalid peerUrl".into()))?
         .host_str()

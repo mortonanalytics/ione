@@ -137,7 +137,11 @@ One-line: `peers` table currently has no `org_id`. Cross-app workspace context c
 | /api/v1/broker/connections | GET | none | `[{ id, provider, label, scopes, expires_at, created_at }]` | 401 | session + auth |
 | /api/v1/broker/connections/:id | DELETE | none | 204 (also revokes upstream where supported) | 401, 404 | session + auth |
 | /auth/broker/callback | GET | `?code=string&state=string&error=?` (state is the `broker_credentials.state_token` random nonce, NOT the row id) | 302 redirect to `/settings/connections` | 400 (state not found or expired), 502 (upstream token exchange failed) | none (callback) |
-| /api/v1/broker/connections/:id/refresh | POST | empty | `{ expires_at }` | 401, 404, 502 | session + auth |
+| /api/v1/broker/connections/:id/refresh | POST | empty | `{ expiresAt }` | 400 (no stored refresh token), 401, 404, 502 (`broker_upstream`) | session + auth |
+| /api/v1/workspaces/:id/peers/:peerId/delegation | POST | empty | `{ authorizeUrl }` — peer AS URL with PKCE + single-use state | 400 (peer not federated), 401, 403, 404 | session + auth + `peers:manage` |
+| /api/v1/workspaces/:id/peers/:peerId/delegation | GET | none | `{ id, orgId, workspaceId, peerId, grantedBy, tokenExpiresAt, createdAt, refreshedAt }` — no token material | 401, 403, 404 | session + auth + `peers:manage` |
+| /api/v1/workspaces/:id/peers/:peerId/delegation | DELETE | none | 204 | 401, 403, 404 | session + auth + `peers:manage` |
+| /auth/broker/peer-callback | GET | `?code=string&state=string&error=?` (state is the single-use `workspace_peer_delegation_pending.nonce`) | 302 redirect to the workspace's peer view | 400 (state not found, expired, or replayed), 502 (peer token exchange failed) | none (callback) |
 
 **Response field conventions:**
 - All timestamps ISO 8601 UTC
@@ -283,7 +287,74 @@ All criteria are mechanically verifiable. Each maps to one or more test assertio
 | AC-12 | S5 | Given a `broker_credentials` row whose `access_token_ciphertext` has a leading key-version byte of `0x00` but `IONE_TOKEN_KEY` was loaded with a different key, when BrokerService attempts to decrypt that ciphertext, then the call returns `Err(DecryptionError)` (a typed error) and does not panic. |
 | AC-13 | S6 | Given any successful or failed authentication event, when the handler completes, then exactly one `identity_audit_events` row is written with `org_id`, `outcome`, `occurred_at`, and `detail` containing no `access_token` or `id_token` substrings. |
 | AC-14 | S7 | Given two organizations and one peer per org, when org A's user lists peers, then only org A's peer rows are returned (verified via integration test that inserts a second org's peer and confirms it does not appear). |
-| AC-15 | S6 / RLS | Given a Postgres session with `app.current_org_id` set to org A's UUID, when the session attempts to SELECT from `broker_credentials` where `org_id` is org B, then zero rows are returned (RLS policy enforced at DB level). |
+| AC-15 | S6 / RLS | Given a Postgres session with `app.current_org_id` set to org A's UUID, when the session attempts to SELECT from `broker_credentials` where `org_id` is org B, then zero rows are returned (RLS policy enforced at DB level). **NOT SATISFIED — see "Known limitation: RLS is inert as deployed" below.** |
+| AC-16 | S5 | Given a connected broker connection with a stored refresh token, when POST /api/v1/broker/connections/:id/refresh is called and the provider returns new tokens, then `access_token_ciphertext` differs from its previous value and exactly one `identity_audit_events` row with `event_type='token_broker_refresh'` and `outcome='success'` is written; when the provider fails, the stored ciphertext is unchanged, the response is 502 `broker_upstream`, and the audit row has `outcome='failure'` with `detail.failureReason`. |
+| AC-17 | S5 | Given a connected broker connection and a provider registry entry with a revocation endpoint, when DELETE /api/v1/broker/connections/:id is called and upstream revocation fails, then the local row is still deleted, one `token_broker_revoke_upstream_failed` row is written with `outcome='failure'`, and the `token_broker_revoke` row records `detail.upstreamRevoked = false`. |
+| AC-18 | S5 | Given a brokered delegation stored for (workspace A, peer P) and workspaces A and B both bound to P, when an outbound MCP request is made in A's scope then the bearer is A's delegated token, and when one is made in B's scope then it is not (B falls through to the next precedence tier). |
+
+## Delegated-token precedence (issue #12)
+
+`broker_credentials` holds IONe-as-client credentials for third-party SaaS
+providers, per `(user, provider)`. Delegated credentials for **peers** are a
+separate axis and are stored per `(workspace, peer)` in
+`workspace_peer_delegations` (migration 0048), because a peer bound into two
+workspaces must not share one delegation — the operator consented for one
+workspace, not for the peer.
+
+Outbound bearer precedence, highest first (canonical statement lives on the
+`services::peer_tokens::resolve_access_token` doc comment):
+
+1. the brokered delegated token for (`peer.workspace_scope`, peer) — issue #12
+2. the peer-global brokered OAuth token (`peers.access_token_ciphertext`)
+3. the pre-broker static credential for `peer.workspace_scope` — issue #19
+4. the process-global `IONE_OAUTH_STATIC_BEARER`
+
+More specific wins. A peer with no delegation resolves tiers 2–4 exactly as it
+did before #12, so peer-global tokens keep working with no flag day. All four
+tiers emit the identical `Authorization: Bearer <credential>` header frozen in
+[app-integration-contract-v1.md](app-integration-contract-v1.md), so a peer
+cannot tell which mode IONe is in. An expired delegation with no refresh token
+is treated as absent and falls through; a refresh that reaches the peer and
+fails is propagated rather than silently downgrading to a weaker credential.
+
+## Known limitation: RLS is inert as deployed
+
+**AC-15 is not satisfied, and no code in this repo makes it satisfiable.**
+Recorded here rather than quietly carried, because the policies existing makes
+it look done.
+
+Every identity table (`broker_credentials`, `mfa_enrollments`,
+`mfa_recovery_codes`, `identity_audit_events`, `service_account_tokens`,
+`workspace_peer_bindings`, `workspace_peer_credentials`,
+`workspace_peer_delegations`) carries an org-isolation policy keyed on
+`current_setting('app.current_org_id', true)`. Three independent facts make
+those policies unreachable:
+
+1. nothing in `src/` ever sets `app.current_org_id` — there is no `SET LOCAL`
+   anywhere, so the predicate would evaluate against NULL;
+2. no table declares `FORCE ROW LEVEL SECURITY`, and the application role owns
+   every one of them, so PostgreSQL skips policy evaluation for it;
+3. the application role additionally holds `BYPASSRLS`.
+
+Setting the variable alone would therefore change nothing — it would only make
+the gap harder to see. Activating RLS needs all of: a non-owner, non-`BYPASSRLS`
+application role plus grants (a deployment change, not a code change);
+`FORCE ROW LEVEL SECURITY` on each table; and a transaction handle that sets the
+org context on every query, since sqlx here runs on pooled connections outside
+transactions — the `rls_context.rs` / `TxHandle` the archived plan describes and
+that was never written.
+
+Until then the real guard is the application-layer `WHERE org_id = $n` predicate
+present on every org-scoped repo query, covered by the rbac, binding, peer
+credential, and identity-broker integration suites.
+
+**Follow-up:** *RLS activation — non-owner application role, `FORCE ROW LEVEL
+SECURITY`, and per-transaction org context.* Re-entry gate: the first deployment
+that runs more than one organization in a single IONe database. The current
+state is pinned by
+`tests/identity_broker_integration.rs::rls_policies_are_present_but_inert_as_deployed`,
+which fails the moment any of the three facts above stops holding, so the
+follow-up cannot be silently forgotten.
 
 ## Tradeoffs
 

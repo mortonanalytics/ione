@@ -16,6 +16,7 @@ pub mod interaction_sink;
 pub mod map_layers;
 pub mod ollama;
 pub mod peer;
+pub mod peer_delegation;
 pub mod peer_governor;
 pub mod peer_oauth;
 pub mod peer_tokens;

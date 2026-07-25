@@ -148,20 +148,31 @@ struct RefreshTokenResp {
 
 /// Outbound bearer precedence, highest first:
 ///
-/// 1. the peer's brokered OAuth access token (`peers.access_token_ciphertext`),
-/// 2. the pre-broker static credential for `peer.workspace_scope` (issue #19),
-/// 3. the process-global `IONE_OAUTH_STATIC_BEARER` env fallback.
+/// 1. the brokered delegated token for (`peer.workspace_scope`, peer) (issue #12),
+/// 2. the peer's brokered OAuth access token (`peers.access_token_ciphertext`),
+/// 3. the pre-broker static credential for `peer.workspace_scope` (issue #19),
+/// 4. the process-global `IONE_OAUTH_STATIC_BEARER` env fallback.
 ///
-/// OAuth outranks the static credential deliberately: when #12 lands, a peer
-/// that gains a brokered token starts using it on the next request with no flag
-/// day and no operator action, and the now-dormant static credential can be
-/// deleted at leisure. All three produce the identical `Authorization: Bearer
-/// <credential>` header, so the peer cannot tell which mode IONe is in.
+/// The workspace-scoped delegated token outranks the peer-global one because it
+/// is the more specific grant: the operator delegated it for exactly this
+/// workspace, and a peer-global token that shadowed it would silently widen the
+/// scope the operator consented to. When no delegation exists for the handle,
+/// tiers 2–4 resolve exactly as they did before #12 — peer-global tokens keep
+/// working untouched.
+///
+/// OAuth outranks the static credential deliberately: a peer that gains a
+/// brokered token starts using it on the next request with no flag day and no
+/// operator action, and the now-dormant static credential can be deleted at
+/// leisure. All four produce the identical `Authorization: Bearer <credential>`
+/// header, so the peer cannot tell which mode IONe is in.
 pub async fn resolve_access_token(
     pool: &PgPool,
     http: &reqwest::Client,
     peer: &Peer,
 ) -> Result<String> {
+    if let Some(delegated) = crate::services::peer_delegation::resolve(pool, http, peer).await? {
+        return Ok(delegated);
+    }
     if peer.access_token_ciphertext.is_none() {
         return pre_broker_bearer(pool, peer).await;
     }
@@ -178,6 +189,11 @@ pub async fn resolve_access_token_locked(
     state: &crate::state::AppState,
     peer: &Peer,
 ) -> Result<String> {
+    if let Some(delegated) =
+        crate::services::peer_delegation::resolve(&state.pool, &state.http, peer).await?
+    {
+        return Ok(delegated);
+    }
     if peer.access_token_ciphertext.is_none() {
         return pre_broker_bearer(&state.pool, peer).await;
     }
