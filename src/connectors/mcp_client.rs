@@ -283,9 +283,35 @@ impl ConnectorImpl for McpClientConnector {
 
     async fn default_streams(&self) -> anyhow::Result<Vec<StreamDescriptor>> {
         // Query the peer's tools/list and expose one stream per readable tool.
-        let result = self.jsonrpc_call("tools/list", Value::Null).await?;
-
-        let tools = result["tools"].as_array().cloned().unwrap_or_default();
+        //
+        // Contract v1 §8 requires cursor pagination on every list call: reading
+        // only page one silently drops a readable tool that a paginating peer
+        // happens to return on page two, and that tool then has no derived
+        // stream at all. The cursor semantics (absent, `null` and empty-string
+        // are all terminal) and the page cap are `federation`'s, reused rather
+        // than reimplemented.
+        let mut cursor: Option<Value> = None;
+        let mut tools: Vec<Value> = Vec::new();
+        for page in 0..crate::services::federation::MAX_PAGINATION_PAGES {
+            let params = cursor
+                .as_ref()
+                .map(|cursor| json!({ "cursor": cursor }))
+                .unwrap_or(Value::Null);
+            let result = self.jsonrpc_call("tools/list", params).await?;
+            if let Some(items) = result.get("tools").and_then(Value::as_array) {
+                tools.extend(items.iter().cloned());
+            }
+            cursor = crate::services::federation::next_cursor(&result);
+            if cursor.is_none() {
+                break;
+            }
+            if page + 1 == crate::services::federation::MAX_PAGINATION_PAGES {
+                warn!(
+                    "mcp_client: tools/list hit the page cap ({}); truncating derived streams",
+                    crate::services::federation::MAX_PAGINATION_PAGES
+                );
+            }
+        }
 
         let streams = tools
             .iter()

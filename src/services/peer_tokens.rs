@@ -518,6 +518,37 @@ async fn send_with_token(
     request.send().await.context("HTTP send failed")
 }
 
+/// Streamable HTTP session termination: `DELETE {endpoint}` carrying
+/// `MCP-Session-Id`, which asks the peer to release a session IONe opened.
+///
+/// Presents the same bearer the session was negotiated under, resolved from the
+/// peer handle's scope, so a workspace-scoped session is torn down with that
+/// workspace's credential rather than a peer-global one.
+pub async fn send_mcp_session_delete(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    peer: &Peer,
+    endpoint: &str,
+    mcp_session_id: &str,
+) -> Result<StatusCode> {
+    let governor = governor_for(peer.id);
+    governor.acquire().await?;
+    let bearer = resolve_bearer(pool, http, peer).await?;
+    let mut request = http
+        .delete(endpoint)
+        .header(reqwest::header::ACCEPT, MCP_ACCEPT)
+        .header(MCP_PROTOCOL_VERSION_HEADER, MCP_PROTOCOL_VERSION)
+        .header("MCP-Session-Id", mcp_session_id);
+    if !bearer.token.is_empty() {
+        request = request.bearer_auth(&bearer.token);
+    }
+    let response = request
+        .send()
+        .await
+        .context("MCP session DELETE send failed")?;
+    Ok(response.status())
+}
+
 /// Send `notifications/initialized`, which the MCP lifecycle requires the client
 /// to send once `initialize` succeeds.
 ///
