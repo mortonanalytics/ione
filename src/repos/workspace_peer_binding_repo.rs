@@ -168,12 +168,16 @@ impl WorkspacePeerBindingRepo {
 
     /// Returns all active Peer records that have an active binding to `workspace_id`
     /// within `org_id`. Used by the map-layer fan-out service.
+    ///
+    /// Each handle is tagged with `workspace_scope = workspace_id` so outbound MCP
+    /// auth resolves the pre-broker per-(workspace, peer) credential for exactly
+    /// this workspace and no other.
     pub async fn list_active_peers_for_workspace(
         &self,
         workspace_id: Uuid,
         org_id: Uuid,
     ) -> anyhow::Result<Vec<crate::models::Peer>> {
-        sqlx::query_as::<_, crate::models::Peer>(
+        let peers = sqlx::query_as::<_, crate::models::Peer>(
             "SELECT p.id, p.org_id, p.name, p.mcp_url, p.issuer_id, p.sharing_policy,
                     p.status, p.created_at, p.oauth_client_id,
                     p.access_token_hash, p.refresh_token_hash,
@@ -196,7 +200,11 @@ impl WorkspacePeerBindingRepo {
         .bind(org_id)
         .fetch_all(&self.pool)
         .await
-        .context("failed to list active peers for workspace")
+        .context("failed to list active peers for workspace")?;
+        Ok(peers
+            .into_iter()
+            .map(|peer| peer.scoped_to(workspace_id))
+            .collect())
     }
 
     pub async fn get_by_id_org_scoped(

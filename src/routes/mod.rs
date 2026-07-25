@@ -46,6 +46,7 @@ pub mod mcp_clients;
 pub mod me;
 pub mod mfa;
 pub mod oauth;
+pub mod peer_credentials;
 pub mod peers;
 pub mod pipeline_events;
 pub mod provision;
@@ -276,6 +277,16 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/bindings/:bindingId/refresh",
             post(bindings::refresh_binding),
+        )
+        .route(
+            "/api/v1/workspaces/:id/peer-credentials",
+            get(peer_credentials::list_credentials),
+        )
+        .route(
+            "/api/v1/workspaces/:id/peers/:peerId/credential",
+            get(peer_credentials::get_credential)
+                .put(peer_credentials::put_credential)
+                .delete(peer_credentials::delete_credential),
         )
         .route(
             "/api/v1/workspaces/:id/peers/:peerId/tools",
