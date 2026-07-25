@@ -133,10 +133,14 @@ automatically. The resulting access token is presented per §1.
 > pre-registered client) is the better long-term fix and is tracked as a
 > follow-up; until then, publish it.
 
-**Enforcement status: Specified** for the peer's endpoint set (IONe fails the
-authorization flow rather than validating the peer's discovery document against
-the spec), **except `registration_endpoint`, which is Enforced by
-deserialization**. **Enforced** for the resulting header shape.
+**Enforcement status:** `authorization_endpoint`, `token_endpoint` **and**
+`registration_endpoint` are all **Enforced by deserialization** —
+`PeerDiscovery` (`src/services/peer_oauth.rs:11-13`) declares all three
+non-optional, so a document missing any of them fails the join with
+`400 bad_request` before any authorization step. `issuer` and
+`revocation_endpoint` are **read but unused**: the `/oauth/revoke` row above
+describes what a peer should publish, not something IONe currently calls.
+**Enforced** for the resulting header shape.
 
 ---
 
@@ -331,13 +335,18 @@ Rules that hold for all four:
 | `opacity` | number | no | `0.0`–`1.0`; omitted ⇒ opaque. Range not clamped. | **Specified** |
 | `vector_url` | string | no | Pass-through only; **v1 does not render it**. Validated to the same bar as `tile_url`; if unsafe it is **stripped to `null`** and the layer survives (an unrendered optional field must not cost a valid tile layer). | **Enforced** as optional |
 
-> **Scheme tightening, 2026-07-25 (issue #18).** At freeze time `tile_url` and
-> `vector_url` accepted any non-empty string — including `javascript:` and
-> plaintext `http:` — and were handed straight to MapLibre. Both are now
-> https-only and SSRF-guarded. Under §9 this is a **breaking** change for a peer
-> that served tiles over plaintext `http:`, so it is recorded here explicitly
-> rather than as an additive clarification. Loopback and private hosts over
+> **Scheme tightening, 2026-07-25 (issue #18).** At freeze time `tile_url`
+> accepted any non-empty string — including `javascript:` and plaintext
+> `http:` — and was handed straight to MapLibre. It is now https-only and
+> SSRF-guarded. Per the compatibility rule this is a **breaking** change for a
+> peer that served tiles over plaintext `http:`, so it is recorded explicitly
+> rather than as an additive clarification; it ships inside v1 because no peer
+> had implemented against the freeze-time text. Loopback and private hosts over
 > https keep working, so on-prem peers are unaffected.
+>
+> `vector_url` is validated to the same bar but was never rendered and never
+> required to be non-empty, so tightening it changes nothing observable for any
+> peer — it is additive, not breaking.
 
 > **Divergence.** The v0.1 playbook lists `bounds` and `attribution` alongside
 > `tile_url` in a way that reads as required. In code, **only `tile_url` is
@@ -613,8 +622,15 @@ error for any other URI (`src/mcp_server.rs:955-986`). `slice://` in v1 is a
 Returns the foreign tenant and user identity for the authenticated session. This
 populates `workspace_peer_bindings` and powers cross-app correlation.
 
-**Invocation:** `resources/read {"uri": "whoami://"}`, `Authorization: Bearer`,
-8-second timeout ([foreign-tenant-mapping.md](foreign-tenant-mapping.md):63-67).
+**Invocation:** `resources/read {"uri": "whoami://"}`, `Authorization: Bearer`.
+Timeout per §1: **3 s** on the subscribe path (`bind_on_subscribe`) and **no
+per-call timeout** on the binding-refresh path, which inherits the 15 s HTTP
+client timeout — and since `fetch_whoami` may issue up to three requests
+(initialize, retry, read), that path's real ceiling is ~45 s.
+
+> `foreign-tenant-mapping.md:63-67` states 8 s. That design doc predates the
+> implementation and does not match `src/services/workspace_peer_binding.rs`;
+> this contract follows the code.
 
 **Response envelope:**
 
@@ -694,18 +710,29 @@ Every IONe 4xx/5xx JSON response uses:
 | `hint` | string | optional |
 | `field` | string | optional, present on validation failures |
 
-Clients must branch on `error`, never on `message` text. Kinds a v1 peer may
-actually observe, all verified present in `src/`: `unauthorized`, `forbidden`,
-`demo_read_only`, `validation_failed`, `ollama_unreachable`,
-`nws_out_of_range`, `connector_error`, `broker_upstream`, `webhook_rejected`,
-`webhook_unauthorized`.
+Clients must branch on `error`, never on `message` text. `src/error.rs` is
+authoritative. The complete set it emits is:
 
-> The freeze-time draft also listed `peer_unreachable`, `manifest_timeout`,
-> `oauth_denied`, and `oauth_token_expired`. **None of these are emitted
-> anywhere in `src/`** — they were aspirational. They are removed rather than
-> frozen: §9 clause 8 promises not to change existing discriminators, and
-> freezing four that do not exist would have committed IONe to inventing them.
-> A peer must not branch on them.
+`bad_request`, `broker_upstream`, `connector_error`, `forbidden`, `internal`,
+`invalid_permission`, `mfa_enrollment_required`, `mfa_required`, `not_found`,
+`ollama_model_missing`, `ollama_unreachable`, `ollama_upstream`,
+`payload_too_large`, `permission_escalation`, `too_many_requests`,
+`unauthorized`, `unprocessable_entity`, `webhook_rejected`,
+`webhook_unauthorized`, `whoami_unreachable`, `workspace_binding_conflict`.
+Plus `demo_read_only` from `src/middleware/demo_guard.rs`.
+
+The ones a **peer** is most likely to see: `webhook_rejected` and
+`webhook_unauthorized` (§3), `payload_too_large` (every 413 in §4.3, §4.4 and
+§8.3 resolves to this), `bad_request` (including the join failure in §2),
+`not_found`, `whoami_unreachable`, `workspace_binding_conflict`,
+`connector_error`, and `unauthorized` / `forbidden`.
+
+> The freeze-time draft listed `peer_unreachable`, `manifest_timeout`,
+> `oauth_denied`, and `oauth_token_expired`. **None are emitted anywhere in
+> `src/`** — they were aspirational and are removed rather than frozen, since
+> the compatibility rule promises not to change existing discriminators and
+> freezing four that do not exist would commit IONe to inventing them. A peer
+> must not branch on them.
 
 **Enforcement status: Enforced.** `src/error.rs`;
 [ione-complete-contract.md](ione-complete-contract.md):125-132.
@@ -750,7 +777,7 @@ as 502 (peer fault), not 404.
 (`src/services/chart_data.rs`) collapses **every** peer JSON-RPC error —
 including `-32002` — to `Unavailable` → **502**, so a not-found chart resource
 reports 502 rather than 404. A v1 peer must not depend on receiving 404 for a
-missing chart resource. Aligning the chart path is additive under §9 and is
+missing chart resource. Aligning the chart path is additive under the compatibility rule and is
 tracked as a follow-up.
 
 ---
@@ -811,10 +838,16 @@ on all four panel paths via `src/services/peer_panels.rs`, subject to the same
 50-page ceiling as the manifest path (§8.1).
 
 At freeze time these four paths sent `params: null` and rendered only the
-**first page**, while the manifest saw up to 50. That was closed the same day, so
-a peer may now paginate `resources/list` freely and have every page rendered.
+**first page**, while the manifest saw up to 50. That was closed the same day.
 Additive under the compatibility rule — a peer already returning a single page is
 unaffected.
+
+**Budget, not licence.** The entire multi-page loop on each panel path runs
+inside a single **5-second** timeout (`map_layers.rs`, `chart_panels.rs`,
+`table_panels.rs`, `document_panels.rs`). If the loop does not finish in 5 s,
+**zero** pages render for that peer — a peer that paginates into many small
+pages can therefore render nothing where one page would have succeeded. Page
+for round-trip cost, not just for the 50-page ceiling.
 
 A `nextCursor` that is **absent, `null`, or the empty string** all terminate
 pagination identically. This is load-bearing: treating a present-but-`null`
@@ -907,7 +940,7 @@ where v1 instead adopts the playbook's reading and the code was amended to
 match — see the note in §3.3 for why.
 
 Divergences 2, 6 and 7 were **resolved in code on the freeze date** rather than
-left standing; each row records what changed. All three are additive under §9,
+left standing; each row records what changed. All three are additive under the compatibility rule,
 so a peer written against the freeze-time text stays conformant.
 
 | # | Topic | Playbook (v0.1) says | Code actually does | Ref |
