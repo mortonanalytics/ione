@@ -47,7 +47,8 @@ impl StreamEventAggregateRepo {
         until: DateTime<Utc>,
         bucket: &str,
     ) -> anyhow::Result<Vec<Value>> {
-        let bucket_expr = bucket_expr(bucket);
+        let bucket_expr =
+            bucket_expr(bucket).ok_or_else(|| anyhow::anyhow!("invalid bucket: {bucket}"))?;
         let sql = format!(
             "SELECT {bucket_expr} AS bucket_start,
                     (EXTRACT(EPOCH FROM {bucket_expr}) * 1000)::bigint AS bucket_start_ms,
@@ -100,7 +101,8 @@ impl StreamEventAggregateRepo {
         bucket: &str,
         value_path: Vec<String>,
     ) -> anyhow::Result<Vec<Value>> {
-        let bucket_expr = bucket_expr(bucket);
+        let bucket_expr =
+            bucket_expr(bucket).ok_or_else(|| anyhow::anyhow!("invalid bucket: {bucket}"))?;
         let sql = format!(
             "SELECT {bucket_expr} AS bucket_start,
                     (EXTRACT(EPOCH FROM {bucket_expr}) * 1000)::bigint AS bucket_start_ms,
@@ -163,7 +165,8 @@ impl StreamEventAggregateRepo {
         value_path: Vec<String>,
         pct: f64,
     ) -> anyhow::Result<Vec<Value>> {
-        let bucket_expr = bucket_expr(bucket);
+        let bucket_expr =
+            bucket_expr(bucket).ok_or_else(|| anyhow::anyhow!("invalid bucket: {bucket}"))?;
         let sql = format!(
             "SELECT {bucket_expr} AS bucket_start,
                     (EXTRACT(EPOCH FROM {bucket_expr}) * 1000)::bigint AS bucket_start_ms,
@@ -317,13 +320,15 @@ impl StreamEventAggregateRepo {
     }
 }
 
-fn bucket_expr(bucket: &str) -> &'static str {
+fn bucket_expr(bucket: &str) -> Option<&'static str> {
+    // `bucket` is interpolated into SQL; this is the last allow-list gate before the
+    // value reaches the query. Return None (→ caller error) rather than panicking, so a
+    // bucket that slips past the route layer can never reach SQL or crash the worker.
     match bucket {
-        "hour" => "date_trunc('hour', se.observed_at)",
-        "day" => "date_trunc('day', se.observed_at)",
-        "week" => "date_trunc('week', se.observed_at)",
-        // `bucket` is interpolated into SQL; callers must validate it against the
-        // allow-list (route layer) first. Fail loudly rather than silently default.
-        other => panic!("bucket '{other}' must be validated before bucket_expr"),
+        "minute" => Some("date_trunc('minute', se.observed_at)"),
+        "hour" => Some("date_trunc('hour', se.observed_at)"),
+        "day" => Some("date_trunc('day', se.observed_at)"),
+        "week" => Some("date_trunc('week', se.observed_at)"),
+        _ => None,
     }
 }

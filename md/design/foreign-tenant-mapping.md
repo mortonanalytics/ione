@@ -62,7 +62,7 @@ What v0.1 does NOT do: inject `foreign_workspace_id` into tools that did not alr
 **API**
 - Internal service function `fetch_whoami(peer) → Result<WhoamiResponse>`, used by slices 3 and 4. Not exposed over HTTP directly.
 - Calls peer's MCP endpoint via JSON-RPC `resources/read { uri: "whoami://" }`. Bearer-authed with the peer's stored access token.
-- 8-second timeout. Failure modes: HTTP error, JSON parse error, `whoami://` resource not found (the v0.1-realistic case for stubs).
+- **3-second timeout** (`WHOAMI_TIMEOUT`, `src/services/workspace_peer_binding.rs`), covering all of `fetch_whoami` — initialize, retry and read — on both the subscribe and binding-refresh paths. (This doc previously said 8 s; that predated the implementation and never matched the code. The refresh path had no per-call timeout at all until 2026-07-25.) Failure modes: HTTP error, JSON parse error, `whoami://` resource not found (the v0.1-realistic case for stubs).
 
 **UI:** None.
 

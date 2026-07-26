@@ -28,6 +28,11 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: cargo check
         run: cargo check --all-targets
+      # "Enforced — <citation>" is the frozen contract's whole verifiability
+      # story. Two citations once pointed past EOF and eleven were ambiguous
+      # between src/routes/ and src/services/; this keeps that from recurring.
+      - name: contract citations resolve
+        run: python3 scripts/check-contract-citations.py
 
   test:
     name: integration tests
@@ -56,21 +61,49 @@ jobs:
         run: cargo install sqlx-cli --no-default-features --features native-tls,postgres --version ^0.8 --locked
       - name: run migrations
         run: sqlx migrate run
+      - name: unit tests (lib + bin #[cfg(test)] modules)
+        run: cargo test --lib --bins
+      # NOT --include-ignored: phase01_chat::chat_endpoint_happy_path is
+      # #[ignore]d because it needs a live Ollama at OLLAMA_BASE_URL, and unlike
+      # the live tests in phase05/phase06 it has no IONE_SKIP_LIVE guard. The
+      # runner has no Ollama. #[ignore] in this repo marks two different things
+      # — needs-Postgres (CI has it) and needs-a-live-external-service (CI does
+      # not) — so it can only be lifted per suite, not globally.
       - name: unit + phase-1 tests (no DB needed)
         run: cargo test --test phase01_chat
       - name: integration tests (serial, live DB, IONE_SKIP_LIVE=1)
         run: |
           for p in phase02_conversations phase03_workspaces phase04_nws_connector \
-                   phase05_signals phase06_critic phase07_routing \
-                   phase08_auth phase09_delivery phase10_auto_exec \
+                   phase05_signals phase05b_rule_diagnostics phase06_critic \
+                   phase07_routing phase08_auth phase09_delivery phase10_auto_exec \
                    phase11_mcp_server phase12_peer phase13_connectors phase13_demo \
                    phase14_bindings phase_event_layers phase_geojson_poll \
                    phase_map_layers phase_chart_aggregates phase_chart_peer \
                    phase_table phase_table_peer phase_document_panels \
                    phase_peer_token_refresh phase_push_ingress \
-                   audit_export_integration; do
+                   phase_rule_nested_field phase_workspace_patch \
+                   phase_federation_hardening \
+                   audit_export_integration auto_exec_governance_integration \
+                   catalog_search_integration federation_hardening_regression_integration \
+                   headless_provisioning_integration integration_oauth_roundtrip \
+                   integration_peer_manifest integration_telemetry \
+                   observability_capture_integration observability_push_integration \
+                   observability_read_integration rbac_integration \
+                   contract_api_routes contract_demo_workspace contract_errors \
+                   contract_schema contract_v1_integration \
+                   peer_credential_integration stub_peer_conformance_integration \
+                   mcp_conformance_integration identity_broker_integration \
+                   peer_ref_rendering_integration peer_lifecycle_e2e_integration \
+                   credential_presentation_integration \
+                   tool_allowlist_integration mcp_session_integration \
+                   peer_join_followups_integration \
+                   whoami_and_error_mapping_integration \
+                   rls_enforcement_integration; do
             echo "=== $p ==="
-            cargo test --test "$p" -- --ignored --test-threads=1
+            # --include-ignored, not --ignored: the latter runs ONLY #[ignore]d
+            # tests, so a suite whose tests are not ignore-gated (e.g.
+            # phase_federation_hardening) silently ran zero of them.
+            cargo test --test "$p" -- --include-ignored --test-threads=1
           done
 
   build:
@@ -81,3 +114,63 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --bin ione
+
+  # The Playwright specs were previously never executed by any job, so the
+  # browser-side acceptance criteria (notably the peer document expired-signed-URL
+  # protocol) had no CI enforcement at all.
+  e2e:
+    name: playwright e2e
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ione
+          POSTGRES_PASSWORD: ione
+          POSTGRES_DB: ione
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U ione"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      DATABASE_URL: postgres://ione:ione@localhost:5433/ione
+      IONE_TOKEN_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      IONE_WEBHOOK_SECRET_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      IONE_BIND: 127.0.0.1:3007
+      BASE_URL: http://127.0.0.1:3007
+      # The specs stub peer APIs at the network layer, so no Ollama is needed —
+      # point at a closed port so nothing can silently reach a live service.
+      OLLAMA_BASE_URL: http://127.0.0.1:9
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: build server
+        run: cargo build --bin ione
+      - name: install e2e deps
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: start server
+        run: |
+          # ione::db::migrate runs at startup, so no separate migration step.
+          ./target/debug/ione &
+          echo $! > /tmp/ione.pid
+          for i in $(seq 1 60); do
+            if curl -fsS "$BASE_URL/api/v1/health" >/dev/null 2>&1; then
+              echo "server ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not become ready"; exit 1
+      - name: playwright
+        run: npm run test:e2e
+      - name: stop server
+        if: always()
+        run: kill "$(cat /tmp/ione.pid)" 2>/dev/null || true

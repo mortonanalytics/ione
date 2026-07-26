@@ -228,9 +228,11 @@ async fn peer_oauth_callback_stores_refresh_token_ciphertext() {
         peer_id,
         peer_url: mock.uri(),
         discovery: ione::services::peer_oauth::PeerDiscovery {
+            issuer: Some(mock.uri()),
             authorization_endpoint: format!("{}/authorize", mock.uri()),
             token_endpoint: format!("{}/token", mock.uri()),
-            registration_endpoint: format!("{}/register", mock.uri()),
+            registration_endpoint: Some(format!("{}/register", mock.uri())),
+            revocation_endpoint: Some(format!("{}/revoke", mock.uri())),
             client_id_metadata_document_supported: false,
         },
         code_verifier: "verifier".to_string(),

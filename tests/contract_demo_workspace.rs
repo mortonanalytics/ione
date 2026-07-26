@@ -20,12 +20,18 @@ use uuid::{uuid, Uuid};
 
 const DEFAULT_DATABASE_URL: &str = "postgres://ione:ione@localhost:5433/ione";
 
+/// Demo seeding encrypts a demo peer OAuth token, so the suite needs a token key.
+/// Matches the fixture key used by phase11_mcp_server, phase_push_ingress, and
+/// phase_peer_token_refresh.
+const TEST_TOKEN_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
 /// Canonical demo workspace UUID — must match the constant in ione-complete-contract.md.
 const DEMO_WORKSPACE_ID: Uuid = uuid!("00000000-0000-0000-0000-000000000d30");
 
 // ─── Harness ──────────────────────────────────────────────────────────────────
 
 async fn make_pool() -> PgPool {
+    std::env::set_var("IONE_TOKEN_KEY", TEST_TOKEN_KEY);
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
     PgPoolOptions::new()
         .max_connections(5)

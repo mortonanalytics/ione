@@ -168,17 +168,22 @@ impl WorkspacePeerBindingRepo {
 
     /// Returns all active Peer records that have an active binding to `workspace_id`
     /// within `org_id`. Used by the map-layer fan-out service.
+    ///
+    /// Each handle is tagged with `workspace_scope = workspace_id` so outbound MCP
+    /// auth resolves the pre-broker per-(workspace, peer) credential for exactly
+    /// this workspace and no other.
     pub async fn list_active_peers_for_workspace(
         &self,
         workspace_id: Uuid,
         org_id: Uuid,
     ) -> anyhow::Result<Vec<crate::models::Peer>> {
-        sqlx::query_as::<_, crate::models::Peer>(
+        let peers = sqlx::query_as::<_, crate::models::Peer>(
             "SELECT p.id, p.org_id, p.name, p.mcp_url, p.issuer_id, p.sharing_policy,
                     p.status, p.created_at, p.oauth_client_id,
                     p.access_token_hash, p.refresh_token_hash,
                     p.access_token_ciphertext, p.refresh_token_ciphertext,
-                    p.token_expires_at, p.tool_allowlist, p.tool_prefix,
+                    p.token_expires_at, p.tool_allowlist, p.tool_allowlist_configured,
+                    p.tool_prefix,
                     p.session_status, p.last_connected_at, p.last_session_error,
                     p.last_manifest_jsonb
              FROM workspace_peer_bindings b
@@ -196,7 +201,11 @@ impl WorkspacePeerBindingRepo {
         .bind(org_id)
         .fetch_all(&self.pool)
         .await
-        .context("failed to list active peers for workspace")
+        .context("failed to list active peers for workspace")?;
+        Ok(peers
+            .into_iter()
+            .map(|peer| peer.scoped_to(workspace_id))
+            .collect())
     }
 
     pub async fn get_by_id_org_scoped(
@@ -231,6 +240,7 @@ impl WorkspacePeerBindingRepo {
                 SELECT 1 FROM workspaces w, peers p
                 WHERE w.id = $1 AND p.id = $2
                   AND w.org_id = $3 AND p.org_id = $3
+                  AND p.status = 'active'::peer_status
              )",
         )
         .bind(workspace_id)

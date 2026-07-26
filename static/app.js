@@ -1450,7 +1450,7 @@ function addEventLayersToMap(eventLayers) {
       const r = 22;
       const bbox = [[e.point.x - r, e.point.y - r], [e.point.x + r, e.point.y + r]];
       const features = mapInstance.queryRenderedFeatures(bbox, { layers: [layerId] });
-      if (features[0]) openEventPopup(features[0], false);
+      if (features[0]) openEventPopup(features[0], false, layer);
     });
     mapInstance.on('mouseenter', layerId, () => { mapInstance.getCanvas().style.cursor = 'pointer'; });
     mapInstance.on('mouseleave', layerId, () => { mapInstance.getCanvas().style.cursor = ''; });
@@ -1732,61 +1732,41 @@ function showEventOnMap(feature, layer) {
   const coords = feature.geometry && feature.geometry.coordinates;
   if (!mapInstance || !Array.isArray(coords) || coords.length !== 2) return;
   mapInstance.flyTo({ center: coords, zoom: Math.max(mapInstance.getZoom(), 8), essential: !prefersReducedMotion() });
-  openEventPopup({ ...feature, layer: { id: `evt-lyr-${layer.streamId}` } }, true);
+  openEventPopup(feature, true, layer);
 }
 
-// First property whose key matches any of `names` (case-insensitive). Field
-// names are the allowlisted view_config.property_fields[].name values.
-function firstProp(props, names) {
-  const lower = {};
-  Object.keys(props).forEach((k) => { lower[k.toLowerCase()] = props[k]; });
-  for (const n of names) {
-    const v = lower[n.toLowerCase()];
-    if (v != null && v !== '') return v;
+// Render a property value: a clickable link for http(s) URLs, escaped text otherwise.
+// Domain-agnostic — no assumptions about which fields exist.
+function renderEventValue(value) {
+  const s = String(value);
+  if (/^https?:\/\/\S+$/i.test(s)) {
+    return `<a href="${escapeHtml(s)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s)}</a>`;
   }
-  return null;
+  return escapeHtml(s);
 }
 
-// PAGER alert level → human label. USGS green<yellow<orange<red. We pair the
-// color chip with a TEXT label so meaning is never conveyed by color alone
-// (AC-2.6 / WCAG 1.4.1).
-const PAGER_LABELS = {
-  green: 'Green — no impact expected',
-  yellow: 'Yellow — local impact',
-  orange: 'Orange — regional impact',
-  red: 'Red — major impact',
-};
-
-function openEventPopup(feature, triggeredByKeyboard) {
+function openEventPopup(feature, triggeredByKeyboard, layer) {
   const panel = document.getElementById('map-detail-panel');
   if (!panel) return;
   const props = feature.properties || {};
 
-  const mag = firstProp(props, ['magnitude', 'mag']);
-  const depth = firstProp(props, ['depth_km', 'depth']);
-  const place = firstProp(props, ['place', 'location', 'region']);
-  const alert = firstProp(props, ['alert', 'pager']);
-  const url = firstProp(props, ['url', 'usgs_url', 'detail']);
-
   const titleEl = document.getElementById('map-detail-title');
-  titleEl.textContent = place != null ? String(place) : (eventFeatureLabel(feature, feature.layer || {}) || 'Event');
+  titleEl.textContent = eventFeatureLabel(feature, layer || {}) || 'Event';
+
+  // Render the operator-declared property fields, in declared order. Fall back to
+  // every non-internal property if the layer carries no field manifest.
+  const declared = (layer && Array.isArray(layer.propertyFields)) ? layer.propertyFields : [];
+  const names = declared.length
+    ? declared
+    : Object.keys(props).filter((k) => !k.startsWith('_'));
 
   const rows = [];
-  if (mag != null) rows.push(`<dt>Magnitude</dt><dd>${escapeHtml(mag)}</dd>`);
-  if (depth != null) rows.push(`<dt>Depth (km)</dt><dd>${escapeHtml(depth)}</dd>`);
-  if (place != null) rows.push(`<dt>Place</dt><dd>${escapeHtml(place)}</dd>`);
-
-  // PAGER impact assessment: chip carries a text label, never color-alone.
-  const alertKey = alert != null ? String(alert).toLowerCase() : null;
-  if (alertKey && PAGER_LABELS[alertKey]) {
-    rows.push(`<dt>PAGER alert</dt><dd><span class="pager-chip pager-chip--${escapeHtml(alertKey)}">${escapeHtml(PAGER_LABELS[alertKey])}</span></dd>`);
-  } else {
-    rows.push('<dt>PAGER alert</dt><dd>No impact assessment</dd>');
-  }
-
-  if (url != null) {
-    rows.push(`<dt>Source</dt><dd><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">View on USGS</a></dd>`);
-  }
+  names.forEach((name) => {
+    const value = props[name];
+    if (value == null || value === '') return;
+    rows.push(`<dt>${escapeHtml(name)}</dt><dd>${renderEventValue(value)}</dd>`);
+  });
+  if (!rows.length) rows.push('<dt>Event</dt><dd>No detail fields</dd>');
 
   document.getElementById('map-detail-fields').innerHTML = rows.join('');
   panel.hidden = false;
@@ -2689,12 +2669,20 @@ initTablePanel();
 
 const DOCUMENT_IFRAME_SANDBOX = 'allow-downloads allow-same-origin';
 const DOCUMENT_EMBED_TIMEOUT_MS = 3000;
+// Peer signed URLs are short-lived. Contract v1 §4.5 requires a `download_url`
+// to stay valid for at least 5 minutes after `resources/list`, so a ref older
+// than this is presumed expired and re-requested before it is used. IONe never
+// caches, proxies, or re-hosts the object itself — only the ref is refreshed.
+const DOCUMENT_REF_MAX_AGE_MS = 240000;
 
 let documentLoadedWorkspaceId = null;
 let documentItems = [];
 let documentActiveItem = null;
 let documentRequestController = null;
 let documentEmbedTimer = null;
+let documentRefsFetchedAt = 0;
+let documentRefRefreshInFlight = null;
+let documentRefRetriedId = null;
 
 function initDocumentPanel() {
   document.getElementById('document-connect-peer')?.addEventListener('click', () => switchTab('connectors'));
@@ -2710,6 +2698,8 @@ function resetDocumentPanel() {
   documentLoadedWorkspaceId = null;
   documentItems = [];
   documentActiveItem = null;
+  documentRefsFetchedAt = 0;
+  documentRefRetriedId = null;
   if (documentRequestController) {
     documentRequestController.abort();
     documentRequestController = null;
@@ -2730,6 +2720,7 @@ function resetDocumentPanel() {
 async function updateDocumentPanel(workspaceId) {
   documentLoadedWorkspaceId = workspaceId;
   documentActiveItem = null;
+  documentRefRetriedId = null;
   showDocumentState('loading');
   resetDocumentRender();
   const controller = replaceDocumentController();
@@ -2747,6 +2738,7 @@ async function updateDocumentPanel(workspaceId) {
   if (!activeWorkspace || activeWorkspace.id !== workspaceId || documentLoadedWorkspaceId !== workspaceId) return;
 
   documentItems = (data.peerDocuments || data.peer_documents || []).map(normalizeDocumentItem);
+  documentRefsFetchedAt = Date.now();
   const peerErrors = data.peerErrors || data.peer_errors || [];
   renderDocumentList(documentItems, peerErrors);
 
@@ -2848,19 +2840,170 @@ function formatBytes(value) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function selectDocument(item) {
-  documentActiveItem = item;
+/* Expired signed-URL handling.
+ *
+ * A peer's `download_url` is a short-lived signed URL owned by the peer. IONe
+ * neither proxies it nor stores the object it points at, so there is nothing to
+ * invalidate on expiry — the shell simply re-requests the *ref*: it re-runs
+ * GET /document-panels, which performs a live MCP `resources/list` fan-out and
+ * returns whatever URL the peer signs at that moment. Two triggers:
+ *
+ *   1. Pre-emptive — a ref older than DOCUMENT_REF_MAX_AGE_MS is refreshed
+ *      before it is embedded or followed.
+ *   2. Reactive — an embed that fails (dead URL, 403 on an expired signature,
+ *      peer-side deletion) is retried exactly once against a fresh ref. A ref
+ *      that comes back byte-identical is not an expiry, so that case degrades
+ *      to the existing "could not be displayed inline" fallback instead of
+ *      looping.
+ *
+ * A ref that has disappeared from the peer's listing is reported as gone; it is
+ * never served from a cached copy, because no copy exists.
+ */
+function documentRefsAreStale() {
+  return !documentRefsFetchedAt || (Date.now() - documentRefsFetchedAt) > DOCUMENT_REF_MAX_AGE_MS;
+}
+
+async function requestFreshDocumentRefs(workspaceId) {
+  if (documentRefRefreshInFlight) return documentRefRefreshInFlight;
+  documentRefRefreshInFlight = (async () => {
+    try {
+      const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/document-panels`, { skipErrorToast: true });
+      const items = (data.peerDocuments || data.peer_documents || []).map(normalizeDocumentItem);
+      documentItems = items;
+      documentRefsFetchedAt = Date.now();
+      return items;
+    } catch (_err) {
+      return null;
+    } finally {
+      documentRefRefreshInFlight = null;
+    }
+  })();
+  return documentRefRefreshInFlight;
+}
+
+// `undefined` = the ref could not be re-requested; `null` = the peer no longer
+// lists it; otherwise the freshly-signed ref.
+async function refreshDocumentRef(item) {
+  if (!activeWorkspace) return undefined;
+  const items = await requestFreshDocumentRefs(activeWorkspace.id);
+  if (!items) return undefined;
+  return items.find((candidate) => candidate.id === item.id) || null;
+}
+
+function applyDocumentRefToLinks(item) {
+  document
+    .querySelectorAll('#document-toolbar a, #document-link-card a, #document-frame-container a.document-fallback-link')
+    .forEach((link) => { link.href = item.downloadUrl; });
+}
+
+function setDocumentNotice(message) {
+  const notice = document.getElementById('document-notice');
+  if (!notice) return;
+  notice.textContent = message;
+  notice.hidden = false;
+}
+
+function hideDocumentNotice() {
+  const notice = document.getElementById('document-notice');
+  if (!notice) return;
+  notice.textContent = '';
+  notice.hidden = true;
+}
+
+function showDocumentRefGone(item) {
+  clearDocumentEmbed();
+  const toolbar = document.getElementById('document-toolbar');
+  if (toolbar) {
+    toolbar.innerHTML = '';
+    toolbar.hidden = true;
+  }
+  const card = document.getElementById('document-link-card');
+  if (card) {
+    card.innerHTML = '';
+    card.hidden = true;
+  }
+  setDocumentNotice(`${item.peerName || 'The peer'} no longer offers this document.`);
+}
+
+async function selectDocument(item) {
+  // The list rows close over the item they were rendered with; a ref refresh
+  // replaces those objects, so always resolve the current ref by id.
+  const current = documentItems.find((candidate) => candidate.id === item.id) || item;
+  documentActiveItem = current;
+  documentRefRetriedId = null;
   document.querySelectorAll('.document-row--active').forEach((row) => row.classList.remove('document-row--active'));
-  document.querySelector(`.document-row[data-document-id="${CSS.escape(item.id)}"]`)?.classList.add('document-row--active');
-  document.getElementById('document-title').textContent = item.name || 'Document';
-  document.getElementById('document-source-label').textContent = documentMeta(item);
+  document.querySelector(`.document-row[data-document-id="${CSS.escape(current.id)}"]`)?.classList.add('document-row--active');
+  document.getElementById('document-title').textContent = current.name || 'Document';
+  document.getElementById('document-source-label').textContent = documentMeta(current);
   resetDocumentRender();
 
-  if (isPdfDocument(item)) {
-    renderPdfDocument(item);
-  } else {
-    renderDocumentLinkCard(item);
+  let target = current;
+  if (documentRefsAreStale()) {
+    setDocumentNotice('Re-requesting the document link from the peer…');
+    const fresh = await refreshDocumentRef(current);
+    if (documentActiveItem?.id !== current.id) return;
+    if (fresh === null) {
+      showDocumentRefGone(current);
+      return;
+    }
+    if (fresh) {
+      target = fresh;
+      documentActiveItem = fresh;
+    }
+    hideDocumentNotice();
   }
+
+  if (isPdfDocument(target)) {
+    renderPdfDocument(target);
+  } else {
+    renderDocumentLinkCard(target);
+  }
+}
+
+async function handleDocumentEmbedFailure(item) {
+  if (documentRefRetriedId === item.id) {
+    showDocumentEmbedFallback(item);
+    return;
+  }
+  documentRefRetriedId = item.id;
+  clearDocumentEmbed();
+  setDocumentNotice('The document link may have expired — re-requesting it from the peer…');
+
+  const fresh = await refreshDocumentRef(item);
+  if (documentActiveItem?.id !== item.id) return;
+  if (fresh === null) {
+    showDocumentRefGone(item);
+    return;
+  }
+  if (!fresh || fresh.downloadUrl === item.downloadUrl) {
+    // Same ref back from the peer: the URL is current, so this is a rendering
+    // failure, not an expiry.
+    showDocumentEmbedFallback(item);
+    return;
+  }
+  documentActiveItem = fresh;
+  hideDocumentNotice();
+  renderPdfDocument(fresh);
+}
+
+function handleDocumentLinkClick(event, item) {
+  if (!documentRefsAreStale()) return;
+  event.preventDefault();
+  setDocumentNotice('Re-requesting the document link from the peer…');
+  refreshDocumentRef(item).then((fresh) => {
+    if (documentActiveItem?.id !== item.id) return;
+    if (fresh === null) {
+      showDocumentRefGone(item);
+      return;
+    }
+    if (!fresh) {
+      setDocumentNotice('Could not re-request the document link from the peer. Try again.');
+      return;
+    }
+    documentActiveItem = fresh;
+    applyDocumentRefToLinks(fresh);
+    setDocumentNotice('The document link was re-requested from the peer. Open it again.');
+  });
 }
 
 function isPdfDocument(item) {
@@ -2926,12 +3069,12 @@ function renderPdfDocument(item) {
       hasDocument = false;
     }
     if (!hasDocument) {
-      showDocumentEmbedFallback(item);
+      handleDocumentEmbedFailure(item);
       return;
     }
     if (live) live.textContent = `${item.name || 'Document'} loaded`;
   });
-  iframe.addEventListener('error', () => showDocumentEmbedFallback(item));
+  iframe.addEventListener('error', () => handleDocumentEmbedFailure(item));
 
   frameContainer.appendChild(iframe);
   if (live) live.textContent = `Loading ${item.name || 'document'}`;
@@ -2944,7 +3087,7 @@ function renderPdfDocument(item) {
       hasDocument = false;
     }
     if (!hasDocument && documentActiveItem?.id === item.id) {
-      showDocumentEmbedFallback(item);
+      handleDocumentEmbedFailure(item);
     }
   }, DOCUMENT_EMBED_TIMEOUT_MS);
 }
@@ -2962,11 +3105,7 @@ function renderDocumentToolbar(item) {
 
 function showDocumentEmbedFallback(item) {
   clearDocumentEmbed();
-  const notice = document.getElementById('document-notice');
-  if (notice) {
-    notice.textContent = 'This document could not be displayed inline.';
-    notice.hidden = false;
-  }
+  setDocumentNotice('This document could not be displayed inline.');
   renderDocumentLinkCard(item);
 }
 
@@ -3002,6 +3141,7 @@ function buildDocumentLink(item, label, className) {
   link.className = className;
   link.textContent = label;
   link.setAttribute('aria-label', `${label} ${item.name || 'document'} (opens in new tab)`);
+  link.addEventListener('click', (event) => handleDocumentLinkClick(event, item));
   return link;
 }
 

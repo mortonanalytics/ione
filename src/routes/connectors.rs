@@ -304,6 +304,13 @@ async fn run_initial_connector_poll(
             {
                 Ok(InsertOutcome::Inserted) => inserted_count += 1,
                 Ok(InsertOutcome::Updated | InsertOutcome::Duplicate) => {}
+                Ok(InsertOutcome::Rejected) => {
+                    warn!(
+                        connector_id = %connector_id,
+                        stream_id = %stream.id,
+                        "stream event rejected: payload exceeds size limit"
+                    );
+                }
                 Err(err) => {
                     emit_pipeline_error(
                         state,
@@ -549,6 +556,7 @@ async fn do_poll_stream(
 
     // Insert events with dedup
     let mut ingested: i64 = 0;
+    let mut skipped: i64 = 0;
     for evt in poll_result.events {
         let outcome = event_repo
             .insert_event(
@@ -559,12 +567,14 @@ async fn do_poll_stream(
             )
             .await
             .map_err(AppError::Internal)?;
-        if matches!(outcome, InsertOutcome::Inserted) {
-            ingested += 1;
+        match outcome {
+            InsertOutcome::Inserted => ingested += 1,
+            InsertOutcome::Rejected => skipped += 1,
+            InsertOutcome::Updated | InsertOutcome::Duplicate => {}
         }
     }
 
-    Ok(Json(json!({ "ingested": ingested })))
+    Ok(Json(json!({ "ingested": ingested, "skipped": skipped })))
 }
 
 fn stable_json_hash(value: &Value) -> String {

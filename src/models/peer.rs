@@ -36,9 +36,31 @@ pub struct Peer {
     pub refresh_token_ciphertext: Option<Vec<u8>>,
     pub token_expires_at: Option<DateTime<Utc>>,
     pub tool_allowlist: serde_json::Value,
+    /// True once `POST /api/v1/peers/:id/authorize` wrote `tool_allowlist`.
+    /// Disambiguates an authorized-but-empty allowlist (deny everything) from a
+    /// row that still carries the column default. See `tool_is_allowlisted`.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub tool_allowlist_configured: bool,
     pub tool_prefix: Option<String>,
     pub session_status: String,
     pub last_connected_at: Option<DateTime<Utc>>,
     pub last_session_error: Option<String>,
     pub last_manifest_jsonb: Option<serde_json::Value>,
+    /// Workspace this peer handle was resolved for. Not a `peers` column: it
+    /// carries the outbound auth scope so `services::peer_tokens` can present
+    /// the pre-broker per-(workspace, peer) static credential. `None` on
+    /// peer-global paths (registration-time manifest fetch, the long-lived SSE
+    /// session), which have no workspace and stay on the OAuth/env path.
+    #[sqlx(default)]
+    #[serde(skip)]
+    pub workspace_scope: Option<Uuid>,
+}
+
+impl Peer {
+    /// Scope this peer handle to `workspace_id` for outbound auth resolution.
+    pub fn scoped_to(mut self, workspace_id: Uuid) -> Self {
+        self.workspace_scope = Some(workspace_id);
+        self
+    }
 }

@@ -47,10 +47,14 @@ pub struct ActorCountRow {
 
 /// `bucket` must be pre-validated by the route against {minute,hour,day,week};
 /// it is interpolated into date_trunc. Fail loudly rather than silently default.
-fn bucket_expr(bucket: &str) -> String {
+fn bucket_expr(bucket: &str) -> Option<String> {
+    // Last allow-list gate before `bucket` is interpolated into SQL; return None
+    // (→ caller error) rather than panicking on a value that slips past the route layer.
     match bucket {
-        "minute" | "hour" | "day" | "week" => format!("date_trunc('{bucket}', ae.created_at)"),
-        other => panic!("bucket '{other}' must be validated before bucket_expr"),
+        "minute" | "hour" | "day" | "week" => {
+            Some(format!("date_trunc('{bucket}', ae.created_at)"))
+        }
+        _ => None,
     }
 }
 
@@ -67,7 +71,8 @@ impl AuditEventAggregateRepo {
         group_col: GroupCol,
         filter: &AuditEventFilter,
     ) -> anyhow::Result<Vec<BucketCountRow>> {
-        let bucket_expr = bucket_expr(bucket);
+        let bucket_expr =
+            bucket_expr(bucket).ok_or_else(|| anyhow::anyhow!("invalid bucket: {bucket}"))?;
         let key_expr = group_col.key_expr();
         let mut qb = QueryBuilder::new(format!(
             "SELECT {bucket_expr} AS bucket_start, {key_expr} AS key, COUNT(*)::bigint AS count"

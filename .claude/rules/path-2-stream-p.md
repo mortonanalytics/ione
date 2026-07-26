@@ -11,7 +11,7 @@ paths:
 
 # Path 2 — Stream P Supporting (IONe)
 
-Work in this repo supports **Path 2 — Modular Infrastructure Risk Intelligence**, the selected growth path for Morton Analytics LLC (decided 2026-05-12). IONe's role: **integration fabric for Morton Analytics' polyglot client-app portfolio.** GroundPulse is the first instance; TerraYield (`../eo_ag/`) and bearingLineDash (`../bearingLineDash/`) are the next reference apps the substrate must accommodate. Full plan: `../morton-analytics-web/md/strategy/path-2-90day-plan.md`. Substrate spec: `md/design/ione-substrate.md`.
+Work in this repo supports **Path 2 — Modular Infrastructure Risk Intelligence**, the selected growth path for Morton Analytics LLC (decided 2026-05-12). IONe's role: **integration fabric for Morton Analytics' polyglot client-app portfolio.** GroundPulse is the first instance; TerraYield (`../eo_ag/`) and bearingLineDash (`../bearingLineDash/`) are the next reference apps the substrate must accommodate. Full plan: `../morton-command-center/strategy/path-2-90day-plan.md`. Substrate spec: `md/design/ione-substrate.md`.
 
 ## Positioning inside Path 2
 
@@ -40,7 +40,7 @@ P7 is Tier 3 — protected against P2 (pipelines module) but cuttable if Stream 
 ## Working in this repo
 
 - All Stream P commits should reference the outcome ID (currently P7) and the GroundPulse-substrate framing.
-- Major architectural decisions go in `md/design/`. Cross-reference the Path 2 tracker (`../morton-analytics-web/md/strategy/path-2-tracker.md`).
+- Major architectural decisions go in `md/design/`. Cross-reference the Path 2 tracker (`../morton-command-center/strategy/path-2-tracker.md`).
 - IONe pricing strategy at `md/strategy/market/ione-pricing.md` is canonical for any pricing discussion — do not re-derive.
 
 ## What this rule prohibits
@@ -58,4 +58,4 @@ P7 is Tier 3 — protected against P2 (pipelines module) but cuttable if Stream 
 
 ## When in doubt
 
-Read the 90-day plan at `../morton-analytics-web/md/strategy/path-2-90day-plan.md`. The current week's Tier 1 Stream P outcomes (P1–P3) are the priority. IONe (P7) is supporting.
+Read the 90-day plan at `../morton-command-center/strategy/path-2-90day-plan.md`. Stream P Tier 1 outcomes (P1–P3) shipped; per the replan, IONe (P7) is deferred Tier 3 (target Aug 2026) behind GTM and engine reliability.

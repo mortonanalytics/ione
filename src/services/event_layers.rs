@@ -53,6 +53,10 @@ pub struct EventLayer {
     /// GeoJSON `FeatureCollection`; geometry is always `Point`.
     pub collection: Value,
     pub style: Option<LayerStyle>,
+    /// Ordered, operator-declared property field names present on each feature's
+    /// `properties`. The detail view renders exactly these (in this order) instead of
+    /// assuming any domain-specific schema.
+    pub property_fields: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -534,6 +538,7 @@ pub fn project_event_layers(
                     }));
                 }
 
+                let property_fields = cfg.property_fields.iter().map(|f| f.name.clone()).collect();
                 streams_ok.push(row.stream_id);
                 layers.push(EventLayer {
                     stream_id: row.stream_id,
@@ -542,6 +547,7 @@ pub fn project_event_layers(
                     features_skipped,
                     collection: json!({ "type": "FeatureCollection", "features": features }),
                     style: cfg.style,
+                    property_fields,
                 });
             }
         }

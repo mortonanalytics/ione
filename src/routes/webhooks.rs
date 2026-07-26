@@ -45,10 +45,17 @@ pub struct WebhookEnvelope {
     pub foreign_tenant_id: String,
     pub severity: Option<String>,
     pub data: Value,
+    /// Optional, defaults false. The ingress policy floor is escalate-only
+    /// (`env.approval_required || severity in {Flagged, Command}`), so omitting
+    /// this field is exactly equivalent to sending `false` — a value a peer may
+    /// always send. Making it required bought no safety and cost peers an
+    /// undebuggable 400, since webhook errors deliberately carry no message.
+    #[serde(default)]
     pub approval_required: bool,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebhookAckResponse {
     pub ok: bool,
     pub duplicate: bool,
@@ -232,6 +239,15 @@ fn validate_envelope(path_peer_id: Uuid, env: &WebhookEnvelope) -> Result<(), Ap
         return Err(AppError::WebhookRejected);
     }
     if !env.data.is_object() {
+        return Err(AppError::WebhookRejected);
+    }
+    // Domain-agnostic cap on the `data` field: it is stored as signal evidence and
+    // later inlined into the critic LLM prompt, so an oversized payload inflates
+    // tokens/storage even within the 256 KB body limit.
+    if serde_json::to_string(&env.data)
+        .map(|s| s.len() > 102_400)
+        .unwrap_or(true)
+    {
         return Err(AppError::WebhookRejected);
     }
     if env.r#type.is_empty()

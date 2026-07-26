@@ -20,7 +20,11 @@
 use std::net::SocketAddr;
 
 use chrono::Utc;
-use ione::{auth::AuthContext, services::federation::PeerManifest, state::AppState};
+use ione::{
+    auth::AuthContext,
+    services::federation::PeerManifest,
+    state::{AppState, PeerCacheKey},
+};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -325,6 +329,24 @@ async fn insert_connector(pool: &PgPool, workspace_id: Uuid, name: &str, config:
     .fetch_one(pool)
     .await
     .expect("insert connector failed")
+}
+
+/// A peer mock that echoes the JSON-RPC request id back on its reply, which
+/// JSON-RPC 2.0 requires of any server ("It MUST be the same as the value of the
+/// id member in the Request Object"). IONe's outbound client allocates a unique
+/// id per request and correlates the reply against it, so a fixture that answers
+/// with a fixed id is not modelling a real MCP server.
+struct EchoJsonRpcId(Value);
+
+impl wiremock::Respond for EchoJsonRpcId {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body.get("id").cloned().unwrap_or(Value::Null),
+            "result": self.0,
+        }))
+    }
 }
 
 /// Mint a signed HS256 JWT for testing.
@@ -1022,22 +1044,14 @@ async fn tool_invoke_gated() {
     let weather_server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": { "forecast": "sunny" }
-        })))
+        .respond_with(EchoJsonRpcId(json!({ "forecast": "sunny" })))
         .expect(1)
         .mount(&weather_server)
         .await;
     let db_server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": { "rows": [] }
-        })))
+        .respond_with(EchoJsonRpcId(json!({ "rows": [] })))
         .expect(0) // denial must happen before any outbound call
         .mount(&db_server)
         .await;
@@ -1079,7 +1093,7 @@ async fn tool_invoke_gated() {
         })
     };
     state.peer_manifest_cache.insert(
-        peer_ids[0],
+        PeerCacheKey::for_workspace(peer_ids[0], workspace_id),
         PeerManifest {
             peer_id: peer_ids[0],
             tools: vec![tool_for("get_forecast")],
@@ -1090,7 +1104,7 @@ async fn tool_invoke_gated() {
         },
     );
     state.peer_manifest_cache.insert(
-        peer_ids[1],
+        PeerCacheKey::for_workspace(peer_ids[1], workspace_id),
         PeerManifest {
             peer_id: peer_ids[1],
             tools: vec![tool_for("run_query")],
@@ -1167,11 +1181,7 @@ async fn approval_gated_peer_tool_call_executes_once_on_retry() {
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": { "ok": true }
-        })))
+        .respond_with(EchoJsonRpcId(json!({ "ok": true })))
         .expect(1)
         .mount(&mock_server)
         .await;
@@ -1202,7 +1212,7 @@ async fn approval_gated_peer_tool_call_executes_once_on_retry() {
     .expect("insert peer binding failed");
 
     state.peer_manifest_cache.insert(
-        peer_id,
+        PeerCacheKey::for_workspace(peer_id, workspace_id),
         PeerManifest {
             peer_id,
             tools: vec![json!({

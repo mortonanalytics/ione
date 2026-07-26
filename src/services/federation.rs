@@ -18,11 +18,29 @@ use crate::{
         PendingPeerToolCallRepo, WorkspacePeerBindingRepo,
     },
     routes::webhooks::WebhookEnvelope,
-    state::AppState,
+    state::{AppState, PeerCacheKey},
 };
 
 const MANIFEST_TTL_SECONDS: i64 = 300;
+/// How long a manifest entry is kept after it stops being servable fresh.
+///
+/// `manifest_for_peer` still serves an over-TTL entry, marked `stale`, when the
+/// peer is unreachable, so entries cannot be dropped at `MANIFEST_TTL_SECONDS`
+/// without losing the degraded-mode fallback. They are dropped here instead,
+/// which is what bounds the (workspace × peer) key space the scoped cache key
+/// introduces: a workspace that stops reading a peer costs one entry for at most
+/// an hour rather than for the process lifetime.
+const MANIFEST_RETENTION_SECONDS: i64 = 3600;
+/// How long a cached peer context slice may be served before it is refetched.
+/// Matches `MANIFEST_TTL_SECONDS`: the slice is peer-supplied payload, and the
+/// `resources/updated` eviction below is a peer courtesy, not a guarantee — a
+/// peer that never sends it would otherwise pin its body for the process
+/// lifetime.
+const SLICE_TTL_SECONDS: i64 = 300;
 const PENDING_TOOL_CALL_TTL_MINUTES: i64 = 30;
+/// How long a negotiated MCP session id is reused before it is dropped and
+/// released with a `DELETE`. Overridable with `IONE_MCP_SESSION_TTL_SECS`.
+const DEFAULT_MCP_SESSION_TTL_SECONDS: i64 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +52,17 @@ pub struct PeerManifest {
     pub etag: Option<String>,
     #[serde(default)]
     pub stale: bool,
+}
+
+/// A streamable-HTTP session id IONe negotiated with a peer, and when.
+///
+/// Held in `AppState::peer_mcp_sessions` under a `PeerCacheKey`, so a session
+/// negotiated under one workspace's credential is never presented on another
+/// workspace's call.
+#[derive(Debug, Clone)]
+pub struct PeerMcpSession {
+    pub id: String,
+    pub established_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +150,12 @@ pub async fn route_tool_call_with_session(
     let (prefix, raw_tool) = namespaced
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("federated tool name must be prefix:name"))?;
-    let peer = peer_by_prefix(state, auth.org_id, prefix).await?;
+    // Outbound auth for this call is resolved in the calling workspace's scope,
+    // so the peer sees this workspace's delegated token (#12) or per-(workspace,
+    // peer) credential (#19) rather than falling through to a peer-global one.
+    let peer = peer_by_prefix(state, auth.org_id, prefix)
+        .await?
+        .scoped_to(workspace_id);
     if let Err(err) =
         ensure_peer_bound_to_workspace(state, workspace_id, peer.id, auth.org_id).await
     {
@@ -159,6 +193,29 @@ pub async fn route_tool_call_with_session(
             json!({ "code": "permission_denied", "permission": needed }),
         );
         anyhow::bail!("FORBIDDEN: caller lacks permission '{needed}'");
+    }
+
+    // The operator's `peers.tool_allowlist` is an *additional* constraint on top
+    // of the grant above, not a substitute for it: the grant says which caller
+    // may reach the peer, the allowlist says which of the peer's tools the
+    // operator consented to at authorize time. Checked before the manifest
+    // fetch so a tool the operator never approved costs no outbound round trip.
+    if !tool_is_allowlisted(&peer, raw_tool) {
+        emit_interaction_event(
+            state,
+            workspace_id,
+            &peer,
+            raw_tool,
+            auth,
+            transport_session_id,
+            outcome::DENY,
+            None,
+            json!({ "code": "tool_not_allowlisted" }),
+        );
+        anyhow::bail!(
+            "FORBIDDEN: tool '{raw_tool}' is not in peer '{}' allowlist",
+            peer.name
+        );
     }
 
     let manifest = match manifest_for_peer(state, &peer).await {
@@ -350,10 +407,59 @@ pub async fn execute_pending_tool_call(
         .namespaced_tool
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("pending tool has invalid namespaced name"))?;
+    // The approved call is executed in the workspace it was enqueued for, so it
+    // presents that workspace's credential — the same bearer the unapproved
+    // path would have used.
     let peer = PeerRepo::new(state.pool.clone())
         .get(pending.peer_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("pending peer not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("pending peer not found"))?
+        .scoped_to(pending.workspace_id);
+    if peer.status != crate::models::PeerStatus::Active {
+        anyhow::bail!(
+            "peer is not active (status: {:?}); execution blocked",
+            peer.status
+        );
+    }
+    let binding_is_active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM workspace_peer_bindings
+            WHERE workspace_id = $1 AND peer_id = $2 AND status = 'active'::binding_status
+        )",
+    )
+    .bind(pending.workspace_id)
+    .bind(pending.peer_id)
+    .fetch_one(&state.pool)
+    .await
+    .context("failed to check workspace peer binding status")?;
+    if !binding_is_active {
+        anyhow::bail!("workspace peer binding is not active; execution blocked");
+    }
+    // An approval is consent to run *this* call, not consent to widen the set of
+    // tools the operator authorized. The allowlist is re-read here rather than
+    // captured at enqueue time so a narrowing between enqueue and approval takes
+    // effect, and audited the way `delivery.rs` audits its own allowlist block.
+    if !tool_is_allowlisted(&peer, raw_tool) {
+        AuditEventRepo::new(state.pool.clone())
+            .insert(
+                Some(pending.workspace_id),
+                ActorKind::User,
+                &approver_user_id.to_string(),
+                "peer_tool_blocked",
+                "pending_peer_tool_call",
+                Some(pending.id),
+                json!({
+                    "approval_id": approval_id,
+                    "tool": pending.namespaced_tool,
+                    "reason": "tool not in peer allowlist"
+                }),
+            )
+            .await?;
+        anyhow::bail!(
+            "FORBIDDEN: tool '{raw_tool}' is not in peer '{}' allowlist",
+            peer.name
+        );
+    }
     let result = invoke_peer_tool(state, &peer, raw_tool, args).await?;
     repo.mark_executed(pending.id, &result).await?;
     AuditEventRepo::new(state.pool.clone())
@@ -383,21 +489,50 @@ pub async fn reject_pending_tool_call(
     Ok(false)
 }
 
+/// Refresh the **peer-global** manifest and re-index the catalog from it.
+///
+/// Runs over a peer regardless of which workspaces are bound to it (boot
+/// hydration, the scheduler, and `tools/list_changed` notifications all land
+/// here), so the handle stays unscoped and the entry it writes is the
+/// peer-global one. The per-workspace entries cannot be refreshed here — each
+/// needs its own credential — so, *when the peer's contract actually changed*,
+/// they are dropped instead: whatever changed on the peer may have changed their
+/// view too, and the next read re-fetches under the right credential.
 pub async fn refresh_manifest_if_changed(state: &AppState, peer_id: Uuid) -> anyhow::Result<bool> {
     let peer = PeerRepo::new(state.pool.clone())
         .get(peer_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("peer not found"))?;
+    let key = PeerCacheKey::global(peer_id);
     let new_manifest = fetch_manifest(state, &peer).await?;
     let new_hash = manifest_contract_hash(&new_manifest);
     let old_hash = state
         .peer_manifest_cache
-        .get(&peer_id)
+        .get(&key)
         .map(|entry| manifest_contract_hash(entry.value()));
     let changed = old_hash.as_deref() != Some(new_hash.as_str());
-    state
-        .peer_manifest_cache
-        .insert(peer_id, new_manifest.clone());
+    if changed {
+        // Gated, because this runs on every scheduler tick
+        // (`IONE_POLL_INTERVAL_SECS`, default 60) and the entries it drops live
+        // for `MANIFEST_TTL_SECONDS` (300): evicting unconditionally collapses
+        // their lifetime to the poll interval and re-issues every workspace's
+        // `tools/list` + `resources/list` once a minute.
+        //
+        // The gate does not weaken the isolation guarantee, because isolation is
+        // not what this eviction provides. No workspace-scoped entry can ever be
+        // served to another workspace or to a peer-global reader — that is
+        // enforced by `PeerCacheKey` carrying the credential scope, on every
+        // read, whether or not anything is evicted here. What the eviction
+        // provides is *freshness*: it keeps a workspace's copy from outliving a
+        // manifest change it would contradict. An unchanged contract hash is a
+        // just-completed round trip proving the contract those entries were
+        // built against still holds, so there is no contradiction to resolve;
+        // and `manifest_for_peer` still bounds each entry at
+        // `MANIFEST_TTL_SECONDS` independently of this call.
+        evict_workspace_scoped_manifests(state, peer_id);
+    }
+    state.peer_manifest_cache.insert(key, new_manifest.clone());
+    prune_expired_manifests(state);
     PeerRepo::new(state.pool.clone())
         .set_last_manifest(peer_id, &serde_json::to_value(&new_manifest)?)
         .await?;
@@ -405,6 +540,38 @@ pub async fn refresh_manifest_if_changed(state: &AppState, peer_id: Uuid) -> any
     Ok(changed)
 }
 
+/// Drop every workspace-scoped manifest entry for one peer, leaving the
+/// peer-global entry alone.
+fn evict_workspace_scoped_manifests(state: &AppState, peer_id: Uuid) {
+    state
+        .peer_manifest_cache
+        .retain(|key, _| key.peer_id != peer_id || key.workspace_scope.is_none());
+}
+
+/// Drop manifest entries no read can still serve, fresh or stale.
+fn prune_expired_manifests(state: &AppState) {
+    let now = Utc::now();
+    state.peer_manifest_cache.retain(|_, manifest| {
+        (now - manifest.fetched_at).num_seconds() <= MANIFEST_RETENTION_SECONDS
+    });
+}
+
+/// Drop slice entries past `SLICE_TTL_SECONDS`. Nothing serves a stale slice, so
+/// the retention window is the TTL itself.
+fn prune_expired_slices(state: &AppState) {
+    let now = Utc::now();
+    state
+        .peer_slice_cache
+        .retain(|_, entry| (now - entry.fetched_at).num_seconds() <= SLICE_TTL_SECONDS);
+}
+
+/// Boot-time manifest hydration. Deliberately peer-global: it runs before any
+/// request, over every peer regardless of which workspaces are bound to it, so
+/// there is no workspace whose credential it could legitimately present. The
+/// peer handles here stay unscoped and resolve on the peer-global OAuth / env
+/// tiers, and `peers.last_manifest_jsonb` — which only ever stores a
+/// peer-global fetch — rehydrates under the peer-global key, so no workspace
+/// read can be answered from it.
 pub async fn hydrate_manifest_cache(state: &AppState) {
     let peers = match PeerRepo::new(state.pool.clone()).list().await {
         Ok(peers) => peers,
@@ -416,7 +583,9 @@ pub async fn hydrate_manifest_cache(state: &AppState) {
     for peer in peers {
         if let Some(cached) = peer.last_manifest_jsonb.clone() {
             if let Ok(manifest) = serde_json::from_value::<PeerManifest>(cached) {
-                state.peer_manifest_cache.insert(peer.id, manifest);
+                state
+                    .peer_manifest_cache
+                    .insert(PeerCacheKey::global(peer.id), manifest);
             }
         }
         if peer.status == crate::models::PeerStatus::Active {
@@ -440,7 +609,8 @@ pub async fn workspace_peer_manifest(
     let peer = PeerRepo::new(state.pool.clone())
         .get_for_org(peer_id, auth.org_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("peer not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("peer not found"))?
+        .scoped_to(workspace_id);
     manifest_for_peer(state, &peer).await
 }
 
@@ -459,6 +629,8 @@ pub async fn workspace_peer_resources(
     }))
 }
 
+/// Admin-triggered refresh. Peer-global for the same reason
+/// `refresh_manifest_if_changed` is: the request names a peer, not a workspace.
 pub async fn force_refresh_manifest(
     state: &AppState,
     peer_id: Uuid,
@@ -469,24 +641,59 @@ pub async fn force_refresh_manifest(
         .await?
         .ok_or_else(|| anyhow::anyhow!("peer not found"))?;
     let manifest = fetch_manifest(state, &peer).await?;
-    state.peer_manifest_cache.insert(peer_id, manifest.clone());
+    evict_workspace_scoped_manifests(state, peer_id);
+    state
+        .peer_manifest_cache
+        .insert(PeerCacheKey::global(peer_id), manifest.clone());
+    prune_expired_manifests(state);
     PeerRepo::new(state.pool.clone())
         .set_last_manifest(peer_id, &serde_json::to_value(&manifest)?)
         .await?;
     Ok(manifest)
 }
 
+/// The peer's own answer to `resources/read slice://`, or `Err` when the peer
+/// did not serve a slice document.
+///
+/// The distinction matters to every caller that treats the slice as
+/// authoritative: `Ok` is a slice body IONe can attribute to the peer, and is
+/// authoritative *including for removals*, while `Err` means there is nothing to
+/// attribute and the caller must keep what it already has. `fetch_slice` papers
+/// over `Err` with a synthesized stand-in for display purposes;
+/// `catalog_slice_for_peer` must not, because a stand-in carries no
+/// `sample_queries` and would read as the peer having removed them.
+///
+/// Three cases, deliberately separated:
+///
+///   * `contents[0].text` parses as JSON → `Ok`. This covers the genuine empty
+///     slice: a peer that serves `"{}"` has *said* it has no sample queries, so
+///     that answer clears them.
+///   * `contents[0].text` is present but does not parse → `Err`. A truncated or
+///     malformed body is a failed read wearing a 200; treating it as an empty
+///     slice would let one bad response wipe every catalog row's
+///     `sample_queries` and flip its `content_hash`.
+///   * `contents[0].text` is absent (no `contents`, an empty array, or an entry
+///     without `text`) → `Err`. The peer answered the request but served no
+///     slice, which is not the same as serving an empty one.
+async fn peer_authored_slice(state: &AppState, peer: &Peer) -> anyhow::Result<Value> {
+    let value = send_jsonrpc(state, peer, "resources/read", json!({ "uri": "slice://" })).await?;
+    let text = value
+        .get("contents")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|content| content.get("text"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("peer slice reply carried no contents[0].text"))?;
+    serde_json::from_str(text).context("peer slice body is not valid JSON")
+}
+
+/// A context slice for `peer`, falling back to a manifest-derived stand-in when
+/// the peer's `slice://` read fails. Callers that render the slice want *some*
+/// body; callers that write peer-authored text into durable state want
+/// `peer_authored_slice` instead.
 pub async fn fetch_slice(state: &AppState, peer: &Peer) -> anyhow::Result<SliceEntry> {
-    let result = send_jsonrpc(state, peer, "resources/read", json!({ "uri": "slice://" })).await;
-    let body = match result {
-        Ok(value) => value
-            .get("contents")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .and_then(|content| content.get("text"))
-            .and_then(Value::as_str)
-            .and_then(|text| serde_json::from_str(text).ok())
-            .unwrap_or_else(|| json!({})),
+    let body = match peer_authored_slice(state, peer).await {
+        Ok(body) => body,
         Err(_) => {
             let manifest = manifest_for_peer(state, peer).await?;
             json!({
@@ -513,11 +720,15 @@ pub async fn workspace_context_slices(
         .await?;
     let mut entries = Vec::new();
     for peer in peers {
-        let entry = if let Some(cached) = state.peer_slice_cache.get(&peer.id) {
-            cached.value().clone()
+        // `list_active_peers_for_workspace` tags every handle, so the fetch —
+        // and therefore the cache entry — is scoped to this workspace.
+        let key = PeerCacheKey::for_peer(&peer);
+        let entry = if let Some(cached) = fresh_cached_slice(state, key) {
+            cached
         } else {
             let fetched = fetch_slice(state, &peer).await?;
-            state.peer_slice_cache.insert(peer.id, fetched.clone());
+            state.peer_slice_cache.insert(key, fetched.clone());
+            prune_expired_slices(state);
             fetched
         };
         entries.push(entry);
@@ -525,32 +736,16 @@ pub async fn workspace_context_slices(
     Ok(entries)
 }
 
-pub async fn expand_tool_schema(
-    state: &AppState,
-    auth: &AuthContext,
-    namespaced: &str,
-) -> anyhow::Result<Value> {
-    let (prefix, raw_tool) = namespaced
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("federated tool name must be prefix:name"))?;
-    let peer = peer_by_prefix(state, auth.org_id, prefix).await?;
-    let manifest = manifest_for_peer(state, &peer).await?;
-    if let Some(tool) = manifest
-        .tools
-        .iter()
-        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(raw_tool))
-    {
-        if let Some(schema) = tool.get("inputSchema") {
-            return Ok(schema.clone());
-        }
-    }
-    let result = send_jsonrpc(state, &peer, "tools/get", json!({ "name": raw_tool })).await;
-    if let Ok(value) = result {
-        if let Some(schema) = value.get("inputSchema") {
-            return Ok(schema.clone());
-        }
-    }
-    anyhow::bail!("schema unavailable for tool '{namespaced}'")
+/// The cached slice for `key`, or `None` when it is absent or older than
+/// `SLICE_TTL_SECONDS`. Every read of `peer_slice_cache` goes through here so
+/// no path can serve an unbounded-age peer payload, and the key carries the
+/// credential scope so no path can serve another workspace's payload either.
+fn fresh_cached_slice(state: &AppState, key: PeerCacheKey) -> Option<SliceEntry> {
+    state
+        .peer_slice_cache
+        .get(&key)
+        .map(|entry| entry.value().clone())
+        .filter(|entry| (Utc::now() - entry.fetched_at).num_seconds() <= SLICE_TTL_SECONDS)
 }
 
 pub async fn dispatch_notification(
@@ -586,7 +781,12 @@ pub async fn dispatch_notification(
         }
         "notifications/resources/list_changed" | "resources/list_changed" | "resources/updated" => {
             refresh_manifest_if_changed(state, peer_id).await?;
-            state.peer_slice_cache.remove(&peer_id);
+            // Every scope's slice is invalidated, not just the peer-global one:
+            // the notification says the peer's resources changed, and each
+            // workspace's copy can only be re-fetched with its own credential.
+            state
+                .peer_slice_cache
+                .retain(|key, _| key.peer_id != peer_id);
         }
         _ => dispatch_domain_notification(state, peer_id, notification).await?,
     }
@@ -607,8 +807,20 @@ fn manifest_contract_hash(manifest: &PeerManifest) -> String {
     }))
 }
 
+/// The manifest for one peer handle, cached under that handle's credential
+/// scope.
+///
+/// `peers.last_manifest_jsonb` is a single peer-global column, so it is written
+/// and read **only** for a peer-global handle. A workspace-scoped manifest is
+/// the peer's answer to that workspace's credential; persisting it would make it
+/// the boot-time answer for every workspace, and reading it as a workspace's
+/// degraded-mode fallback would hand that workspace a listing fetched under a
+/// credential it was never granted. A workspace-scoped fetch that fails with a
+/// cold cache therefore surfaces the error instead.
 async fn manifest_for_peer(state: &AppState, peer: &Peer) -> anyhow::Result<PeerManifest> {
-    if let Some(entry) = state.peer_manifest_cache.get(&peer.id) {
+    let key = PeerCacheKey::for_peer(peer);
+    let peer_global = key.workspace_scope.is_none();
+    if let Some(entry) = state.peer_manifest_cache.get(&key) {
         let mut manifest = entry.value().clone();
         manifest.stale = (Utc::now() - manifest.fetched_at).num_seconds() > MANIFEST_TTL_SECONDS;
         if !manifest.stale {
@@ -617,23 +829,29 @@ async fn manifest_for_peer(state: &AppState, peer: &Peer) -> anyhow::Result<Peer
     }
     match fetch_manifest(state, peer).await {
         Ok(manifest) => {
-            state.peer_manifest_cache.insert(peer.id, manifest.clone());
-            PeerRepo::new(state.pool.clone())
-                .set_last_manifest(peer.id, &serde_json::to_value(&manifest)?)
-                .await?;
+            state.peer_manifest_cache.insert(key, manifest.clone());
+            prune_expired_manifests(state);
+            if peer_global {
+                PeerRepo::new(state.pool.clone())
+                    .set_last_manifest(peer.id, &serde_json::to_value(&manifest)?)
+                    .await?;
+            }
             Ok(manifest)
         }
         Err(e) => {
-            if let Some(cached) = state.peer_manifest_cache.get(&peer.id) {
+            if let Some(cached) = state.peer_manifest_cache.get(&key) {
                 let mut manifest = cached.value().clone();
                 manifest.stale = true;
                 return Ok(manifest);
+            }
+            if !peer_global {
+                return Err(e);
             }
             if let Some(last_good) = peer.last_manifest_jsonb.clone() {
                 let mut manifest: PeerManifest =
                     serde_json::from_value(last_good).context("stored peer manifest is invalid")?;
                 manifest.stale = true;
-                state.peer_manifest_cache.insert(peer.id, manifest.clone());
+                state.peer_manifest_cache.insert(key, manifest.clone());
                 return Ok(manifest);
             }
             Err(e)
@@ -656,9 +874,32 @@ async fn fetch_manifest(state: &AppState, peer: &Peer) -> anyhow::Result<PeerMan
     })
 }
 
-/// Maximum pages fetched per `paginated_list` call. A buggy peer returning an
+/// Maximum pages fetched per paginated list call. A buggy peer returning an
 /// infinite cursor would otherwise loop forever; this caps the damage.
-const MAX_PAGINATION_PAGES: usize = 50;
+///
+/// `pub(crate)` so the connector's `tools/list` loop uses the same cap rather
+/// than growing its own copy.
+pub(crate) const MAX_PAGINATION_PAGES: usize = 50;
+
+/// The cursor for the next page, or `None` when the peer signalled the last one.
+///
+/// `nextCursor` is the spec spelling; `cursor` is accepted as an alias. Both are
+/// terminal when absent, JSON `null`, or an empty string. The null case is not
+/// cosmetic: the frozen app-integration contract (§8.1) lets a conforming peer
+/// end pagination with an explicit `"nextCursor": null`, and `Value::get` returns
+/// `Some(Value::Null)` for that — so treating "key present" as "keep paging"
+/// re-requests the last page until the page cap and duplicates every item on it.
+///
+/// `pub(crate)` so `connectors::mcp_client` reuses these semantics instead of
+/// adding a third copy of them.
+pub(crate) fn next_cursor(result: &Value) -> Option<Value> {
+    result
+        .get("nextCursor")
+        .or_else(|| result.get("cursor"))
+        .filter(|value| !value.is_null())
+        .filter(|value| value.as_str() != Some(""))
+        .cloned()
+}
 
 async fn paginated_list(
     state: &AppState,
@@ -677,12 +918,7 @@ async fn paginated_list(
         if let Some(items) = result.get(field).and_then(Value::as_array) {
             out.extend(items.iter().cloned());
         }
-        cursor = result.get("nextCursor").cloned().or_else(|| {
-            result
-                .get("cursor")
-                .filter(|value| !value.is_null())
-                .cloned()
-        });
+        cursor = next_cursor(&result);
         if cursor.is_none() {
             break;
         }
@@ -697,20 +933,146 @@ async fn paginated_list(
     Ok(out)
 }
 
+/// Issue one JSON-RPC call to a peer, reusing the MCP session IONe already
+/// negotiated for this peer handle.
+///
+/// Before the session cache this initialized *reactively on every call* and
+/// discarded the returned `MCP-Session-Id`: against a server that enforces the
+/// header, each call cost a failed request, an `initialize`, a
+/// `notifications/initialized` and a retry, and left one more orphaned session
+/// behind on the peer. Now the id is negotiated at most once per (peer,
+/// credential scope) and re-negotiated only when the peer says the session is
+/// gone.
 async fn send_jsonrpc(
     state: &AppState,
     peer: &Peer,
     method: &str,
     params: Value,
 ) -> anyhow::Result<Value> {
-    match send_jsonrpc_once(state, peer, method, params.clone(), None).await {
+    if method == "initialize" {
+        return send_jsonrpc_once(state, peer, method, params, None).await;
+    }
+    let key = PeerCacheKey::for_peer(peer);
+    // Before the lookup, not after the store: an id that has aged out has to be
+    // handed back to the peer with a DELETE, and a store would overwrite it
+    // first — turning the expiry into exactly the orphaned server-side session
+    // this cache exists to stop creating.
+    prune_expired_sessions(state);
+    let cached = cached_session_id(state, key);
+    match send_jsonrpc_once(state, peer, method, params.clone(), cached.as_deref()).await {
         Ok(value) => Ok(value),
-        Err(e) if method != "initialize" && looks_like_missing_session(&e) => {
+        Err(e) if looks_like_missing_session(&e) => {
+            // The peer has already released whatever session IONe was holding,
+            // so the entry is dropped without a DELETE. `remove_if` rather than
+            // `remove`, so a session another task negotiated in the meantime is
+            // not thrown away.
+            if let Some(stale) = cached {
+                state
+                    .peer_mcp_sessions
+                    .remove_if(&key, |_, session| session.id == stale);
+            }
             let session_id = initialize_peer_session(state, peer).await?;
+            store_session(state, key, &session_id);
             send_jsonrpc_once(state, peer, method, params, Some(&session_id)).await
         }
         Err(e) => Err(e),
     }
+}
+
+/// The live session id for this peer handle, or `None` when there is none.
+/// Expiry is `prune_expired_sessions`' job, which the caller runs first.
+///
+/// Keyed by `PeerCacheKey` — peer **plus credential scope** — not by peer alone.
+/// An MCP session is opened by an `initialize` carrying one specific bearer, and
+/// a conforming server binds it to the principal that authenticated. Sharing one
+/// id across workspaces would therefore either be rejected by the peer or, worse,
+/// let a workspace-B call ride the server-side identity workspace A established.
+/// This is the same argument that keys the manifest and slice caches, and the
+/// scope is the same resolution input `peer_tokens` derives the bearer from, so
+/// equal keys always imply equal credentials.
+fn cached_session_id(state: &AppState, key: PeerCacheKey) -> Option<String> {
+    state
+        .peer_mcp_sessions
+        .get(&key)
+        .map(|entry| entry.value().id.clone())
+}
+
+fn store_session(state: &AppState, key: PeerCacheKey, session_id: &str) {
+    state.peer_mcp_sessions.insert(
+        key,
+        PeerMcpSession {
+            id: session_id.to_string(),
+            established_at: Utc::now(),
+        },
+    );
+}
+
+/// Drop session ids past the TTL and tell each peer to release them.
+///
+/// This is the bound on the (workspace × peer) key space the session cache
+/// introduces, and it is also the only teardown point inside the federation
+/// service: it is where IONe stops using a session it opened, so it is where the
+/// streamable-HTTP `DELETE` belongs. Evicting without the DELETE would leave the
+/// orphaned server-side session this cache exists to stop creating.
+///
+/// Lazy, like `prune_expired_manifests` — it runs on the way out to a peer, so a
+/// peer that is never called again keeps one entry until the next outbound call
+/// anywhere. The operator-driven teardown (peer revoke / delete) lives in the
+/// peers route handler, not here.
+fn prune_expired_sessions(state: &AppState) {
+    let now = Utc::now();
+    let ttl = mcp_session_ttl_seconds();
+    let mut expired = Vec::new();
+    state.peer_mcp_sessions.retain(|key, session| {
+        let live = (now - session.established_at).num_seconds() <= ttl;
+        if !live {
+            expired.push((*key, session.id.clone()));
+        }
+        live
+    });
+    for (key, session_id) in expired {
+        let state = state.clone();
+        tokio::spawn(async move {
+            terminate_session(&state, key, &session_id).await;
+        });
+    }
+}
+
+/// `DELETE {peer}/mcp` for one expired session, under the credential the scope
+/// that opened it resolves to. Best-effort: a peer that is unreachable, or that
+/// does not allow client-driven termination, must not turn a local eviction into
+/// an error anyone sees.
+async fn terminate_session(state: &AppState, key: PeerCacheKey, session_id: &str) {
+    let peer = match PeerRepo::new(state.pool.clone()).get(key.peer_id).await {
+        Ok(Some(peer)) => match key.workspace_scope {
+            Some(workspace_id) => peer.scoped_to(workspace_id),
+            None => peer,
+        },
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(peer_id = %key.peer_id, error = %e, "mcp session teardown peer lookup failed");
+            return;
+        }
+    };
+    let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
+    if let Err(e) = crate::services::peer_tokens::send_mcp_session_delete(
+        &state.pool,
+        &state.http,
+        &peer,
+        &endpoint,
+        session_id,
+    )
+    .await
+    {
+        tracing::warn!(peer_id = %peer.id, error = %e, "mcp session DELETE failed");
+    }
+}
+
+fn mcp_session_ttl_seconds() -> i64 {
+    std::env::var("IONE_MCP_SESSION_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MCP_SESSION_TTL_SECONDS)
 }
 
 async fn send_jsonrpc_once(
@@ -721,9 +1083,10 @@ async fn send_jsonrpc_once(
     mcp_session_id: Option<&str>,
 ) -> anyhow::Result<Value> {
     let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
+    let request_id = crate::services::peer_tokens::next_request_id();
     let body = json!({
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": request_id,
         "method": method,
         "params": params,
     });
@@ -736,10 +1099,19 @@ async fn send_jsonrpc_once(
     )
     .await?;
     let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        // Streamable HTTP, "Session Management": a server that has expired or
+        // never issued the session the request refers to answers 404. Tagged so
+        // `looks_like_missing_session` recognises it — the bare
+        // "peer returned HTTP 404" it used to produce matched nothing, so a
+        // conforming peer's expiry signal was surfaced as a hard failure
+        // instead of triggering a re-handshake.
+        anyhow::bail!("peer returned HTTP 404 ({MISSING_SESSION_MARKER})");
+    }
     if !status.is_success() {
         anyhow::bail!("peer returned HTTP {}", status.as_u16());
     }
-    let value: Value = resp.json().await?;
+    let value = crate::services::peer_tokens::read_jsonrpc_reply(resp, &request_id).await?;
     if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
         anyhow::bail!("peer MCP error: {}", error);
     }
@@ -748,11 +1120,15 @@ async fn send_jsonrpc_once(
 
 async fn initialize_peer_session(state: &AppState, peer: &Peer) -> anyhow::Result<String> {
     let endpoint = peer.mcp_url.trim_end_matches('/').to_string();
+    let request_id = crate::services::peer_tokens::next_request_id();
     let body = json!({
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": request_id,
         "method": "initialize",
-        "params": { "protocolVersion": "2025-11-25", "capabilities": {} },
+        "params": {
+            "protocolVersion": crate::services::peer_tokens::MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+        },
     });
     let resp = crate::services::peer_tokens::send_mcp_request(
         &state.pool,
@@ -767,11 +1143,12 @@ async fn initialize_peer_session(state: &AppState, peer: &Peer) -> anyhow::Resul
         .get("MCP-Session-Id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let value: Value = resp.error_for_status()?.json().await?;
+    let resp = resp.error_for_status()?;
+    let value = crate::services::peer_tokens::read_jsonrpc_reply(resp, &request_id).await?;
     if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
         anyhow::bail!("peer initialize error: {}", error);
     }
-    header_session
+    let session_id = header_session
         .or_else(|| {
             value
                 .get("result")
@@ -779,20 +1156,89 @@ async fn initialize_peer_session(state: &AppState, peer: &Peer) -> anyhow::Resul
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
-        .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))
+        .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))?;
+    crate::services::peer_tokens::send_initialized_notification(
+        &state.pool,
+        &state.http,
+        peer,
+        &endpoint,
+        &session_id,
+    )
+    .await;
+    Ok(session_id)
 }
 
+/// Tag `send_jsonrpc_once` puts on an HTTP 404 so the session layer can tell it
+/// apart from every other unsuccessful status.
+const MISSING_SESSION_MARKER: &str = "mcp session missing";
+
+/// Whether a failed call means "the session you presented does not exist".
+///
+/// Covers the two shapes a peer can use: a JSON-RPC error naming the header
+/// (what a server enforcing sessions returns for a request that carries none),
+/// and the transport-level HTTP 404 the streamable-HTTP spec defines for an
+/// expired or unknown session.
 fn looks_like_missing_session(error: &anyhow::Error) -> bool {
     let msg = error.to_string().to_ascii_lowercase();
-    msg.contains("mcp-session-id") || msg.contains("session not found")
+    msg.contains("mcp-session-id")
+        || msg.contains("session not found")
+        || msg.contains(MISSING_SESSION_MARKER)
 }
 
+/// Whether `raw_tool` is one the operator authorized on this peer.
+///
+/// `peers.tool_allowlist` is written by `POST /api/v1/peers/:id/authorize`,
+/// which is also what promotes the peer to Active, so an operator who authorizes
+/// a narrow list has stated the full set of tools any caller may invoke.
+///
+/// An empty allowlist is read against `peers.tool_allowlist_configured`
+/// (`migrations/0049`), which `PeerRepo::set_allowlist` — the only writer — sets
+/// true. That separates two cases the bytes alone could not:
+///
+/// - **configured and empty** ⇒ the operator authorized this peer to invoke
+///   *nothing*. Fail closed.
+/// - **not configured** ⇒ the row carries the `NOT NULL DEFAULT '[]'` from
+///   `migrations/0016_peers_oauth.sql` and never went through the authorize
+///   route. Fall through, so a directly-seeded peer (demo seeder, fixtures)
+///   keeps working.
+///
+/// Before 0049 those were the same value, so enforcement could not fail closed
+/// without denying every directly-seeded peer. `delivery.rs` has always been
+/// fail-closed on empty; this brings the federated path into line for any peer
+/// that actually went through authorize.
+///
+/// A non-empty allowlist is enforced on every federated invocation path.
+fn tool_is_allowlisted(peer: &Peer, raw_tool: &str) -> bool {
+    let Some(entries) = peer.tool_allowlist.as_array() else {
+        return !peer.tool_allowlist_configured;
+    };
+    if entries.is_empty() {
+        return !peer.tool_allowlist_configured;
+    }
+    entries
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|allowed| allowed == raw_tool)
+}
+
+/// Every federated `tools/call` funnels through here, so the allowlist check is
+/// repeated at the point of dispatch rather than only at the entry points.
+/// `route_tool_call_with_session` and `execute_pending_tool_call` both check
+/// earlier — they can attribute the denial to a workspace and a caller, which
+/// this cannot — but a future caller that forgets to still cannot invoke a tool
+/// the operator did not authorize.
 async fn invoke_peer_tool(
     state: &AppState,
     peer: &Peer,
     raw_tool: &str,
     args: Value,
 ) -> anyhow::Result<Value> {
+    if !tool_is_allowlisted(peer, raw_tool) {
+        anyhow::bail!(
+            "FORBIDDEN: tool '{raw_tool}' is not in peer '{}' allowlist",
+            peer.name
+        );
+    }
     send_jsonrpc(
         state,
         peer,
@@ -903,9 +1349,15 @@ pub fn namespaced_tools_from_manifest(peer: &Peer, manifest: &PeerManifest) -> V
 /// manifest-refresh path. Tools and resources become `peer_catalog_entries`
 /// rows keyed by the invocation-form `namespaced_name` (`<tool_prefix>:<raw>`,
 /// the same string `route_tool_call` splits). Peer-supplied text is sanitized
-/// at index time (FCS-M2); `sample_queries` are pulled best-effort from the
-/// cached peer slice (empty if absent). `org_id` comes from `peers.org_id`,
-/// never the org-blind manifest cache (FCS-H2).
+/// at index time (FCS-M2). `org_id` comes from `peers.org_id`, never the
+/// org-blind manifest cache (FCS-H2).
+///
+/// `sample_queries` come from the peer-global context slice — see
+/// `catalog_slice_for_peer` — and, when no slice is available, from the values
+/// already indexed. Deriving them from an absent cache entry instead would
+/// empty them on every tick the slice happens to be cold, flip `content_hash`,
+/// and rewrite every row twice per slice lifetime, which is exactly what the
+/// `content_hash` delta in `catalog_repo` exists to avoid.
 pub async fn reindex_peer_catalog(
     state: &AppState,
     peer: &Peer,
@@ -914,17 +1366,24 @@ pub async fn reindex_peer_catalog(
     let Some(prefix) = peer.tool_prefix.as_deref() else {
         return Ok(());
     };
-    let slice = state
-        .peer_slice_cache
-        .get(&peer.id)
-        .map(|entry| entry.value().clone());
+    let slice = catalog_slice_for_peer(state, peer).await;
+    let indexed_sample_queries = if slice.is_some() {
+        HashMap::new()
+    } else {
+        indexed_sample_queries(state, peer).await?
+    };
     let repo = CatalogRepo::new(state.pool.clone());
 
     let mut desired: Vec<CatalogUpsert> = Vec::new();
     for tool in &manifest.tools {
-        if let Some(entry) =
-            build_catalog_upsert(peer, prefix, CatalogEntryKind::Tool, tool, slice.as_ref())
-        {
+        if let Some(entry) = build_catalog_upsert(
+            peer,
+            prefix,
+            CatalogEntryKind::Tool,
+            tool,
+            slice.as_ref(),
+            &indexed_sample_queries,
+        ) {
             desired.push(entry);
         }
     }
@@ -935,6 +1394,7 @@ pub async fn reindex_peer_catalog(
             CatalogEntryKind::Resource,
             resource,
             slice.as_ref(),
+            &indexed_sample_queries,
         ) {
             desired.push(entry);
         }
@@ -962,12 +1422,84 @@ pub async fn reindex_peer_catalog(
     Ok(())
 }
 
+/// The peer-global context slice to draw `sample_queries` from, or `None` when
+/// none is available without inventing a peer round trip.
+///
+/// Only the peer-global slice may feed the catalog: `peer_catalog_entries` rows
+/// are org-scoped, and a workspace-scoped slice is the peer's answer to one
+/// workspace's credential — promoting it to org-wide catalog text would leak it
+/// to every other workspace in the org.
+///
+/// A fetch is attempted only when the peer-global manifest cache holds a fresh
+/// entry, i.e. the caller has just completed a peer-global round trip and the
+/// peer is known reachable. So the scheduler's manifest tick refreshes the
+/// slice alongside the manifest, while a reindex driven from a stored manifest
+/// never becomes an outbound call. Only a slice the peer actually authored is
+/// returned; a failed read is not fatal and yields `None`, so the caller falls
+/// back to the already-indexed values.
+async fn catalog_slice_for_peer(state: &AppState, peer: &Peer) -> Option<SliceEntry> {
+    let key = PeerCacheKey::global(peer.id);
+    if let Some(cached) = fresh_cached_slice(state, key) {
+        return Some(cached);
+    }
+    if peer.workspace_scope.is_some() {
+        return None;
+    }
+    let manifest_is_fresh = state
+        .peer_manifest_cache
+        .get(&key)
+        .map(|entry| (Utc::now() - entry.value().fetched_at).num_seconds() <= MANIFEST_TTL_SECONDS)
+        .unwrap_or(false);
+    if !manifest_is_fresh {
+        return None;
+    }
+    // `peer_authored_slice`, not `fetch_slice`: the latter never fails on a bad
+    // `slice://` read, it substitutes a manifest-derived stand-in that carries no
+    // `sample_queries`. Indexing that stand-in would read as the peer having
+    // removed every sample query, so one transient error would wipe them,
+    // flip `content_hash`, and rewrite every row.
+    match peer_authored_slice(state, peer).await {
+        Ok(body) => {
+            let entry = SliceEntry {
+                peer_id: peer.id,
+                body,
+                fetched_at: Utc::now(),
+            };
+            state.peer_slice_cache.insert(key, entry.clone());
+            prune_expired_slices(state);
+            Some(entry)
+        }
+        Err(e) => {
+            tracing::warn!(peer_id = %peer.id, error = %e, "catalog slice read failed; keeping indexed sample queries");
+            None
+        }
+    }
+}
+
+/// `sample_queries` already stored for this peer, by `namespaced_name`.
+async fn indexed_sample_queries(
+    state: &AppState,
+    peer: &Peer,
+) -> anyhow::Result<HashMap<String, Vec<String>>> {
+    let rows: Vec<(String, Vec<String>)> = sqlx::query_as(
+        "SELECT namespaced_name, sample_queries FROM peer_catalog_entries
+         WHERE org_id = $1 AND peer_id = $2",
+    )
+    .bind(peer.org_id)
+    .bind(peer.id)
+    .fetch_all(&state.pool)
+    .await
+    .context("failed to read indexed catalog sample queries")?;
+    Ok(rows.into_iter().collect())
+}
+
 fn build_catalog_upsert(
     peer: &Peer,
     prefix: &str,
     kind: CatalogEntryKind,
     item: &Value,
     slice: Option<&SliceEntry>,
+    indexed: &HashMap<String, Vec<String>>,
 ) -> Option<CatalogUpsert> {
     let raw_name = item.get("name").and_then(Value::as_str)?;
     if raw_name.contains(':') {
@@ -979,8 +1511,15 @@ fn build_catalog_upsert(
             .unwrap_or(""),
     );
     let schema_field_names = catalog_schema_field_names(item);
-    let sample_queries = catalog_sample_queries(slice, raw_name);
     let namespaced_name = format!("{prefix}:{raw_name}");
+    // `slice` is peer-authored by construction (`catalog_slice_for_peer` passes
+    // nothing else), so it is authoritative when present, including for
+    // removals. Its absence — the peer did not answer — falls back to what is
+    // already indexed.
+    let sample_queries = match slice {
+        Some(slice) => catalog_sample_queries(slice, raw_name),
+        None => indexed.get(&namespaced_name).cloned().unwrap_or_default(),
+    };
     let content_hash =
         catalog_content_hash(raw_name, &description, &sample_queries, &schema_field_names);
     Some(CatalogUpsert {
@@ -1009,11 +1548,12 @@ fn catalog_schema_field_names(item: &Value) -> Vec<String> {
     keys
 }
 
-/// Best-effort `sample_queries` from the cached peer slice. The slice body may
-/// carry `{"sample_queries": {"<raw_name>": ["q1", ...]}}`; absent → empty.
-fn catalog_sample_queries(slice: Option<&SliceEntry>, raw_name: &str) -> Vec<String> {
+/// `sample_queries` for one tool from a peer slice. The slice body may carry
+/// `{"sample_queries": {"<raw_name>": ["q1", ...]}}`; absent → empty.
+fn catalog_sample_queries(slice: &SliceEntry, raw_name: &str) -> Vec<String> {
     slice
-        .and_then(|s| s.body.get("sample_queries"))
+        .body
+        .get("sample_queries")
         .and_then(|sq| sq.get(raw_name))
         .and_then(Value::as_array)
         .map(|arr| {
@@ -1042,11 +1582,20 @@ fn catalog_content_hash(
     format!("{:x}", hasher.finalize())
 }
 
+/// NOTE: this is one of **three** hand-written `peers` column lists — the others
+/// are `PeerRepo::PEER_COLUMNS` and the join in
+/// `WorkspacePeerBindingRepo::list_active_peers_for_workspace`. Adding a column
+/// to `Peer` means adding it to all three. `Peer` marks the newer fields
+/// `#[sqlx(default)]`, so a missed list does **not** error — it silently yields
+/// the type default, which for `tool_allowlist_configured` reads as "not
+/// configured" and quietly disables the allowlist gate. That failure mode cost a
+/// debugging cycle; if you add a column here, grep for the other two.
 async fn peer_by_prefix(state: &AppState, org_id: Uuid, prefix: &str) -> anyhow::Result<Peer> {
     sqlx::query_as::<_, Peer>(
         "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
                 oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                refresh_token_ciphertext, token_expires_at, tool_allowlist, tool_prefix,
+                refresh_token_ciphertext, token_expires_at, tool_allowlist,
+                tool_allowlist_configured, tool_prefix,
                 session_status, last_connected_at, last_session_error, last_manifest_jsonb
          FROM peers
          WHERE org_id = $1 AND tool_prefix = $2 AND status = 'active'",
@@ -1303,6 +1852,25 @@ mod tests {
             derive_prefix("Very Long Peer Name With Spaces", &HashSet::new()),
             "very_long_peer_n"
         );
+    }
+
+    #[test]
+    fn next_cursor_treats_null_and_empty_as_terminal() {
+        assert_eq!(
+            next_cursor(&json!({ "tools": [], "nextCursor": "page-2" })),
+            Some(json!("page-2"))
+        );
+        assert_eq!(
+            next_cursor(&json!({ "tools": [], "nextCursor": null })),
+            None
+        );
+        assert_eq!(next_cursor(&json!({ "tools": [], "nextCursor": "" })), None);
+        assert_eq!(next_cursor(&json!({ "tools": [] })), None);
+        assert_eq!(
+            next_cursor(&json!({ "tools": [], "cursor": "legacy" })),
+            Some(json!("legacy"))
+        );
+        assert_eq!(next_cursor(&json!({ "tools": [], "cursor": null })), None);
     }
 
     #[test]

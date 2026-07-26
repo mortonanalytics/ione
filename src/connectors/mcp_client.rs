@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::connectors::{ConnectorImpl, PollResult, StreamDescriptor, StreamEventInput};
 use crate::models::{BindingStatus, ConnectorKind};
 use crate::repos::{PeerRepo, WorkspacePeerBindingRepo};
+use crate::services::peer_tokens::ResolvedBearer;
 
 pub struct McpClientConnector {
     pub mcp_url: String,
@@ -71,46 +72,54 @@ impl McpClientConnector {
         params: Value,
         mcp_session_id: Option<&str>,
     ) -> anyhow::Result<Value> {
+        let request_id = crate::services::peer_tokens::next_request_id();
         let body = json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": request_id,
             "method": method,
             "params": params,
         });
 
-        let token = self.resolve_bearer_token(false).await?;
-        let mut resp = self.send_jsonrpc(&body, &token, mcp_session_id).await?;
+        let bearer = self.resolve_bearer().await?;
+        let mut resp = self
+            .send_jsonrpc(&body, &bearer.token, mcp_session_id)
+            .await?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            let Some(token) = self.try_refresh_bearer_token().await? else {
-                return self.handle_jsonrpc_response(resp).await;
+            let Some(token) = self.try_refresh_bearer_token(&bearer).await? else {
+                return self.handle_jsonrpc_response(resp, &request_id).await;
             };
             resp = self.send_jsonrpc(&body, &token, mcp_session_id).await?;
         }
 
-        self.handle_jsonrpc_response(resp).await
+        self.handle_jsonrpc_response(resp, &request_id).await
     }
 
     async fn initialize_session(&self) -> anyhow::Result<String> {
+        let request_id = crate::services::peer_tokens::next_request_id();
         let body = json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": request_id,
             "method": "initialize",
-            "params": { "protocolVersion": "2025-11-25", "capabilities": {} },
+            "params": {
+                "protocolVersion": crate::services::peer_tokens::MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+            },
         });
-        let token = self.resolve_bearer_token(false).await?;
-        let resp = self.send_jsonrpc(&body, &token, None).await?;
+        let bearer = self.resolve_bearer().await?;
+        let resp = self.send_jsonrpc(&body, &bearer.token, None).await?;
         let header_session = resp
             .headers()
             .get("MCP-Session-Id")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let value: Value = resp.error_for_status()?.json().await?;
+        let resp = resp.error_for_status()?;
+        let value = crate::services::peer_tokens::read_jsonrpc_reply(resp, &request_id).await?;
         if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
             anyhow::bail!("peer initialize error: {}", error);
         }
-        header_session
+        let session_id = header_session
             .or_else(|| {
                 value
                     .get("result")
@@ -118,10 +127,36 @@ impl McpClientConnector {
                     .and_then(Value::as_str)
                     .map(str::to_string)
             })
-            .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))
+            .ok_or_else(|| anyhow::anyhow!("peer initialize did not return a session id"))?;
+        self.send_initialized_notification(&session_id).await;
+        Ok(session_id)
     }
 
-    async fn handle_jsonrpc_response(&self, resp: reqwest::Response) -> anyhow::Result<Value> {
+    /// MCP lifecycle: the client announces it is initialized before issuing any
+    /// other request. Best-effort — a peer that rejects the notification must
+    /// not fail an otherwise-good handshake.
+    async fn send_initialized_notification(&self, mcp_session_id: &str) {
+        let body = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        let bearer = match self.resolve_bearer().await {
+            Ok(bearer) => bearer,
+            Err(e) => {
+                warn!("mcp_client: notifications/initialized token resolve failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = self
+            .send_jsonrpc(&body, &bearer.token, Some(mcp_session_id))
+            .await
+        {
+            warn!("mcp_client: notifications/initialized send failed: {e}");
+        }
+    }
+
+    async fn handle_jsonrpc_response(
+        &self,
+        resp: reqwest::Response,
+        request_id: &Value,
+    ) -> anyhow::Result<Value> {
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             anyhow::bail!("peer auth error: HTTP {}", status.as_u16());
@@ -130,7 +165,7 @@ impl McpClientConnector {
             anyhow::bail!("peer returned HTTP {}", status.as_u16());
         }
 
-        let val: Value = resp.json().await?;
+        let val = crate::services::peer_tokens::read_jsonrpc_reply(resp, request_id).await?;
 
         if let Some(err) = val.get("error") {
             if !err.is_null() {
@@ -147,7 +182,18 @@ impl McpClientConnector {
         token: &str,
         mcp_session_id: Option<&str>,
     ) -> anyhow::Result<reqwest::Response> {
-        let mut req = self.http.post(&self.mcp_url).json(body);
+        let mut req = self
+            .http
+            .post(&self.mcp_url)
+            .header(
+                reqwest::header::ACCEPT,
+                crate::services::peer_tokens::MCP_ACCEPT,
+            )
+            .header(
+                crate::services::peer_tokens::MCP_PROTOCOL_VERSION_HEADER,
+                crate::services::peer_tokens::MCP_PROTOCOL_VERSION,
+            )
+            .json(body);
         if !token.is_empty() {
             req = req.bearer_auth(token);
         }
@@ -157,24 +203,55 @@ impl McpClientConnector {
         Ok(req.send().await?)
     }
 
-    async fn resolve_bearer_token(&self, force_refresh: bool) -> anyhow::Result<String> {
+    /// The outbound bearer for this connector, tagged with the precedence tier
+    /// that produced it so the 401 path can tell which credential was rejected.
+    async fn resolve_bearer(&self) -> anyhow::Result<ResolvedBearer> {
         if let (Some(pool), Some(peer_id)) = (&self.pool, self.peer_id) {
             if let Some(peer) = PeerRepo::new(pool.clone()).get(peer_id).await? {
-                return if force_refresh {
-                    crate::services::peer_tokens::refresh_access_token(pool, &self.http, &peer)
-                        .await
-                } else if peer.access_token_ciphertext.is_some() || self.bearer_token.is_empty() {
-                    crate::services::peer_tokens::resolve_access_token(pool, &self.http, &peer)
-                        .await
-                } else {
-                    Ok(self.bearer_token.clone())
+                // This connector polls one workspace, so its outbound auth is
+                // resolved in that workspace's scope (pre-broker credential, #19).
+                let peer = match self.workspace_id {
+                    Some(workspace_id) => peer.scoped_to(workspace_id),
+                    None => peer,
                 };
+                if self.bearer_token.is_empty() {
+                    return crate::services::peer_tokens::resolve_bearer(pool, &self.http, &peer)
+                        .await;
+                }
+                // The literal in connector config is the LAST resort: it stands
+                // in for the process-global env fallback, below the brokered
+                // delegated token (#12), the peer-global OAuth token, and the
+                // per-(workspace, peer) credential (#19). So rotating any of
+                // those through the API takes effect without rewriting
+                // connector rows.
+                if let Some(bearer) =
+                    crate::services::peer_tokens::resolve_bearer_above_env(pool, &self.http, &peer)
+                        .await?
+                {
+                    return Ok(bearer);
+                }
             }
         }
-        Ok(self.bearer_token.clone())
+        Ok(ResolvedBearer::last_resort(self.bearer_token.clone()))
     }
 
-    async fn try_refresh_bearer_token(&self) -> anyhow::Result<Option<String>> {
+    /// The peer-global token to retry a 401 with, or `None` when this 401 must
+    /// be surfaced instead.
+    ///
+    /// A 401 never downgrades the tier
+    /// (`md/design/pre-broker-peer-credentials.md`). This is the default poll
+    /// path — `auto_create_connector_for_peer` writes no `bearer_token`, so
+    /// every subscribed peer resolves through the full precedence chain — and
+    /// without the tier check a rejected tier-1 delegated token would be
+    /// re-presented as the peer-global grant, widening the scope the operator
+    /// consented to.
+    async fn try_refresh_bearer_token(
+        &self,
+        rejected: &ResolvedBearer,
+    ) -> anyhow::Result<Option<String>> {
+        if !rejected.allows_peer_global_refresh() {
+            return Ok(None);
+        }
         let (Some(pool), Some(peer_id)) = (&self.pool, self.peer_id) else {
             return Ok(None);
         };
@@ -206,9 +283,35 @@ impl ConnectorImpl for McpClientConnector {
 
     async fn default_streams(&self) -> anyhow::Result<Vec<StreamDescriptor>> {
         // Query the peer's tools/list and expose one stream per readable tool.
-        let result = self.jsonrpc_call("tools/list", Value::Null).await?;
-
-        let tools = result["tools"].as_array().cloned().unwrap_or_default();
+        //
+        // Contract v1 §8 requires cursor pagination on every list call: reading
+        // only page one silently drops a readable tool that a paginating peer
+        // happens to return on page two, and that tool then has no derived
+        // stream at all. The cursor semantics (absent, `null` and empty-string
+        // are all terminal) and the page cap are `federation`'s, reused rather
+        // than reimplemented.
+        let mut cursor: Option<Value> = None;
+        let mut tools: Vec<Value> = Vec::new();
+        for page in 0..crate::services::federation::MAX_PAGINATION_PAGES {
+            let params = cursor
+                .as_ref()
+                .map(|cursor| json!({ "cursor": cursor }))
+                .unwrap_or(Value::Null);
+            let result = self.jsonrpc_call("tools/list", params).await?;
+            if let Some(items) = result.get("tools").and_then(Value::as_array) {
+                tools.extend(items.iter().cloned());
+            }
+            cursor = crate::services::federation::next_cursor(&result);
+            if cursor.is_none() {
+                break;
+            }
+            if page + 1 == crate::services::federation::MAX_PAGINATION_PAGES {
+                warn!(
+                    "mcp_client: tools/list hit the page cap ({}); truncating derived streams",
+                    crate::services::federation::MAX_PAGINATION_PAGES
+                );
+            }
+        }
 
         let streams = tools
             .iter()
@@ -232,7 +335,7 @@ impl ConnectorImpl for McpClientConnector {
 
         // list_survivors and search_stream_events require workspace_id.
         // Resolve all workspace ids and aggregate results.
-        let workspace_ids = self.resolve_workspace_ids_with_binding().await;
+        let workspace_ids = self.resolve_workspace_ids_with_binding().await?;
         let now = chrono::Utc::now();
         let mut all_events = Vec::new();
 
@@ -313,27 +416,37 @@ impl McpClientConnector {
         }
     }
 
-    async fn resolve_workspace_ids_with_binding(&self) -> Vec<String> {
+    async fn resolve_workspace_ids_with_binding(&self) -> anyhow::Result<Vec<String>> {
+        // When this connector is bound to a workspace+peer, the poll scope MUST come
+        // from an Active binding's foreign_workspace_id. Falling back to the peer-wide
+        // unscoped enumeration here would read across workspaces the binding does not
+        // authorize (C-1 workspace-isolation leak), so this path fails closed.
         if let (Some(pool), Some(workspace_id), Some(peer_id)) =
             (&self.pool, self.workspace_id, self.peer_id)
         {
-            match WorkspacePeerBindingRepo::new(pool.clone())
+            return match WorkspacePeerBindingRepo::new(pool.clone())
                 .get_by_workspace_peer(workspace_id, peer_id)
                 .await
             {
                 Ok(Some(binding)) if binding.status == BindingStatus::Active => {
-                    if let Some(foreign_workspace_id) = binding.foreign_workspace_id {
-                        if !foreign_workspace_id.is_empty() {
-                            return vec![foreign_workspace_id];
-                        }
+                    match binding.foreign_workspace_id {
+                        Some(fw) if !fw.is_empty() => Ok(vec![fw]),
+                        _ => anyhow::bail!(
+                            "mcp_client: active binding for peer {} has no foreign_workspace_id; poll blocked",
+                            peer_id
+                        ),
                     }
                 }
-                Ok(_) => {}
-                Err(e) => warn!("mcp_client: binding lookup failed during poll: {}", e),
-            }
+                Ok(_) => anyhow::bail!(
+                    "mcp_client: no active workspace_peer_binding for peer {}; poll blocked (fail-closed)",
+                    peer_id
+                ),
+                Err(e) => Err(e.context("mcp_client: binding lookup failed during poll")),
+            };
         }
 
-        self.resolve_all_peer_workspace_ids().await
+        // Unbound connector (no workspace/peer context): legacy peer-wide resolution.
+        Ok(self.resolve_all_peer_workspace_ids().await)
     }
 
     /// Resolve the peer's first workspace id via tools/call list_workspaces.

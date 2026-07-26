@@ -28,6 +28,8 @@ pub mod user;
 pub mod user_session;
 pub mod workspace;
 pub mod workspace_peer_binding;
+pub mod workspace_peer_credential;
+pub mod workspace_peer_delegation;
 
 pub use activation::*;
 pub use approval::{Approval, ApprovalStatus};
@@ -59,3 +61,5 @@ pub use user::User;
 pub use user_session::UserSession;
 pub use workspace::{Workspace, WorkspaceLifecycle};
 pub use workspace_peer_binding::{BindingStatus, WorkspacePeerBinding};
+pub use workspace_peer_credential::WorkspacePeerCredential;
+pub use workspace_peer_delegation::WorkspacePeerDelegation;

@@ -582,6 +582,7 @@ async fn mcp_client_poll_fetches_survivors_from_peer() {
     let peer_id = insert_peer(&pool_a, "Node B Peer", &peer_mcp_url, issuer_id).await;
 
     // Subscribe workspace A to the peer — creates mcp connector + first poll in background.
+    // IONe-to-IONe whoami succeeds here, so this produces an Active binding.
     let resp = reqwest::Client::new()
         .post(format!(
             "{}/api/v1/workspaces/{}/peers/{}/subscribe",
@@ -595,10 +596,33 @@ async fn mcp_client_poll_fetches_survivors_from_peer() {
     assert_eq!(resp.status(), StatusCode::OK, "subscribe must return 200");
 
     let connector_body: Value = resp.json().await.expect("response not JSON");
+    assert_eq!(
+        connector_body["firstPollDeferred"], false,
+        "an Active binding must let subscribe_peer trigger the first poll (TT-A07)"
+    );
     let connector_id_str = connector_body["connector"]["id"]
         .as_str()
         .expect("connector id missing");
     let connector_id = Uuid::parse_str(connector_id_str).expect("connector id invalid");
+
+    // Point the Active binding at node B's workspace. Poll scope comes exclusively from
+    // the binding's foreign_workspace_id (TT-A06 fail-closed), so without this the poll
+    // reads nothing rather than falling back to peer-wide enumeration.
+    let scoped = sqlx::query(
+        "UPDATE workspace_peer_bindings SET foreign_workspace_id = $1
+         WHERE workspace_id = $2 AND peer_id = $3 AND status = 'active'::binding_status",
+    )
+    .bind(ws_b.to_string())
+    .bind(ws_a)
+    .bind(peer_id)
+    .execute(&pool_a)
+    .await
+    .expect("scope binding to node B workspace");
+    assert_eq!(
+        scoped.rows_affected(),
+        1,
+        "subscribe must have produced exactly one Active binding to scope"
+    );
 
     // Wait for the background first-poll to complete.
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
