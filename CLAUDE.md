@@ -37,6 +37,22 @@ npm run test:e2e
 ```
 Unset `IONE_SKIP_LIVE` to exercise live Ollama generator/critic/router paths.
 
+## Automation loops
+Three scheduled cloud agents, each driven by a skill in `.agents/skills/`
+(symlinked into `.claude/skills/`):
+
+| Skill | Cadence | Writes |
+|---|---|---|
+| `ione-scout` | weekly | `research-candidate` issues — OLAP, OLTP, data connections, federated data, edge, app support |
+| `ione-triage` | daily | reproduces inbound `bug` reports into `bug-candidate` issues |
+| `ione-backlog` | daily | one `backlog-ready` issue → one `automation-pr`, driven to green CI |
+
+`.github/workflows/auto-backlog-ready.yml` promotes `bug-candidate` and
+`research-candidate` to `backlog-ready` automatically, so review happens at the
+PR. `needs-human-auth` blocks that promotion — scout and triage apply it to
+anything touching secrets, data deletion/rewrite, auth or RLS policy, an
+`eo_ag` wire contract, or a new dependency. Nothing merges unattended.
+
 ## Secrets
 `IONE_TOKEN_KEY` / `IONE_WEBHOOK_SECRET_KEY` live in `.env` (gitignored).
 Never commit `.env` or embed key values in settings/permissions entries.

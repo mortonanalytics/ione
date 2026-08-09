@@ -1,0 +1,4 @@
+interface:
+  display_name: "IONe Idea Scout"
+  short_description: "Research IONe OLAP, OLTP, connector, federation, edge, and app-support opportunities"
+  default_prompt: "Use $ione-scout to research IONe improvement opportunities and file evidence-backed research-candidate issues."

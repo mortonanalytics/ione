@@ -1,0 +1,33 @@
+name: Auto backlog-ready
+
+# Closes the scout/triage -> builder loop. An evidence-backed `bug-candidate`
+# or `research-candidate` is promoted to `backlog-ready` (the builder's pickup
+# gate) without manual approval; review happens at the PR, not the issue. A
+# `needs-human-auth` label holds an issue back, so the builder never
+# auto-actions secrets, data rewrites, auth/RLS policy, a federation wire
+# contract shared with eo_ag, or a new dependency.
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  promote:
+    if: github.event.label.name == 'bug-candidate' || github.event.label.name == 'research-candidate'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.issue.labels.map(l => l.name);
+            if (labels.includes('needs-human-auth')) { core.info('held: needs-human-auth'); return; }
+            if (labels.includes('backlog-ready')) { core.info('already backlog-ready'); return; }
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              labels: ['backlog-ready'],
+            });
+            core.info(`promoted #${context.payload.issue.number} to backlog-ready`);

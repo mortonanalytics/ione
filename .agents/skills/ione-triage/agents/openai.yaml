@@ -1,0 +1,4 @@
+interface:
+  display_name: "IONe Bug Triage"
+  short_description: "Reproduce and scope inbound IONe bug reports into bug-candidate issues"
+  default_prompt: "Use $ione-triage to reproduce and scope open inbound IONe bug reports."
