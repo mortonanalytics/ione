@@ -20,6 +20,6 @@ Then take exactly one action:
 - **Already fixed** — verify against the remote (`git fetch origin`, then `git merge-base --is-ancestor <sha> origin/main` or `gh pr view <n> --json state` reporting `MERGED`), comment with that evidence, and close. A commit in bare `git log` is not evidence.
 - **Not a bug** — comment with the contract or design doc that defines the current behavior and say so. Change no labels.
 
-Apply `needs-human-auth` alongside `bug-candidate` when the fix would touch production secrets, delete or rewrite data, change auth or RLS policy, alter a federation wire contract shared with `eo_ag`, or add a dependency. That holds it out of the automatic promote path.
+Anything you mark `bug-candidate` gets fixed and merged without a human reading it first. Your repro is the specification. That is why reproducing is not optional and why "looks wrong in the code" is never enough.
 
-Never guess at a repro, never mark a report reproduced on code reading alone, never modify code, and never open a PR. Fixing is the builder's job.
+Never guess at a repro, never mark a report reproduced on code reading alone, never modify code, never open a PR, and never put secret values, tokens, or raw credential material in a comment. Fixing is the builder's job.

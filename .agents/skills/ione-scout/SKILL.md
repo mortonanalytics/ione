@@ -24,6 +24,6 @@ Filing `research-candidate` issues is pre-authorized — file them without askin
 
 Each issue states: dated sources, the current gap with a `file:line` citation, user or reliability value, the smallest validation experiment, blast radius, and provenance (scheduled scout run, date).
 
-Apply `needs-human-auth` alongside `research-candidate` when the work would touch production secrets, delete or rewrite data, change auth or RLS policy, alter a federation wire contract shared with `eo_ag`, or add a dependency. That label holds the issue out of the automatic promote-to-`backlog-ready` path until Ryan clears it.
+Everything you file gets built and merged without a human reading the issue first. That is the intended design, and it makes the issue body the specification — write it so the builder cannot misread the scope. Prefer a change that ships behind a narrow contract test over one that needs judgment at implementation time. If you cannot state the acceptance criterion in a sentence, the candidate is not ready; keep researching it and file it next run.
 
-Never modify code, open a PR, bump a version, or start a release.
+Never modify code, open a PR, merge, bump a version, or start a release. Never put secret values in an issue body.

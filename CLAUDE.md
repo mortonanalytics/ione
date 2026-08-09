@@ -43,15 +43,20 @@ Three scheduled cloud agents, each driven by a skill in `.agents/skills/`
 
 | Skill | Cadence | Writes |
 |---|---|---|
-| `ione-scout` | weekly | `research-candidate` issues — OLAP, OLTP, data connections, federated data, edge, app support |
-| `ione-triage` | daily | reproduces inbound `bug` reports into `bug-candidate` issues |
-| `ione-backlog` | daily | one `backlog-ready` issue → one `automation-pr`, driven to green CI |
+| `ione-scout` | Mon, Thu | `research-candidate` issues — OLAP, OLTP, data connections, federated data, edge, app support |
+| `ione-triage` | Mon, Wed, Fri | reproduces inbound `bug` reports into `bug-candidate` issues |
+| `ione-backlog` | Mon, Wed, Fri | one `backlog-ready` issue → `automation-pr` → green CI → squash merge |
 
-`.github/workflows/auto-backlog-ready.yml` promotes `bug-candidate` and
-`research-candidate` to `backlog-ready` automatically, so review happens at the
-PR. `needs-human-auth` blocks that promotion — scout and triage apply it to
-anything touching secrets, data deletion/rewrite, auth or RLS policy, an
-`eo_ag` wire contract, or a new dependency. Nothing merges unattended.
+The loop is autonomous end to end. `auto-backlog-ready.yml` promotes
+`bug-candidate` and `research-candidate` to `backlog-ready`, and the builder
+merges its own PR once CI is green. Nothing waits on a human.
+
+Green CI is the only merge authority — no merging on red or pending checks, no
+admin override, and no deploy, release, or version bump from any loop. The
+issue body is the specification, since nobody reads it before the change lands.
+
+Ryan steers by filing issues. `needs-human-auth` on an issue holds it out of the
+loop; no agent applies that label to its own work.
 
 ## Secrets
 `IONE_TOKEN_KEY` / `IONE_WEBHOOK_SECRET_KEY` live in `.env` (gitignored).

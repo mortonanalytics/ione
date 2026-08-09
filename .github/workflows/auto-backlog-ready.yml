@@ -2,10 +2,10 @@ name: Auto backlog-ready
 
 # Closes the scout/triage -> builder loop. An evidence-backed `bug-candidate`
 # or `research-candidate` is promoted to `backlog-ready` (the builder's pickup
-# gate) without manual approval; review happens at the PR, not the issue. A
-# `needs-human-auth` label holds an issue back, so the builder never
-# auto-actions secrets, data rewrites, auth/RLS policy, a federation wire
-# contract shared with eo_ag, or a new dependency.
+# gate) without manual approval, and the builder merges its own PR once CI is
+# green — so nothing here waits on a human. `needs-human-auth` is Ryan's manual
+# hold: applying it to an issue keeps that one issue out of the loop. No agent
+# applies it to its own work.
 on:
   issues:
     types: [labeled]
