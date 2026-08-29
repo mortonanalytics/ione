@@ -34,6 +34,10 @@ DATABASE_URL=postgres://ione:ione@localhost:5433/ione \
 
 # Playwright e2e:
 npm run test:e2e
+
+# Everything CI runs, under CI's environment (suite list and env block are
+# read out of ci.yml, so the mirror cannot drift from it):
+./scripts/ci-mirror.sh [--with-e2e]
 ```
 Unset `IONE_SKIP_LIVE` to exercise live Ollama generator/critic/router paths.
 
