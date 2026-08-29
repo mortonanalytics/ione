@@ -29,8 +29,11 @@ impl WorkspacePeerCredentialRepo {
     ///
     /// Not org-scoped: `org_id` is derived by the `wpc_check_same_org` trigger
     /// rather than supplied, so there is no org context to set before the INSERT.
+    /// Org-scoped: runs inside an `app.current_org_id` transaction, so the
+    /// `wpc_org_isolation` policy applies to the write as well as the read.
     pub async fn upsert(
         &self,
+        org_id: Uuid,
         workspace_id: Uuid,
         peer_id: Uuid,
         plaintext: &str,
@@ -38,6 +41,7 @@ impl WorkspacePeerCredentialRepo {
     ) -> anyhow::Result<CredentialUpsert> {
         let ciphertext = token_crypto::encrypt_versioned(plaintext.as_bytes())
             .context("failed to encrypt peer credential")?;
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         let credential = sqlx::query_as::<_, WorkspacePeerCredential>(&format!(
             "INSERT INTO workspace_peer_credentials
                (workspace_id, peer_id, credential_ciphertext, created_by)
@@ -51,9 +55,12 @@ impl WorkspacePeerCredentialRepo {
         .bind(peer_id)
         .bind(&ciphertext)
         .bind(created_by)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .context("failed to upsert workspace peer credential")?;
+        tx.commit()
+            .await
+            .context("failed to commit workspace peer credential upsert")?;
         Ok(CredentialUpsert {
             rotated: credential.rotated_at.is_some(),
             credential,
@@ -138,20 +145,27 @@ impl WorkspacePeerCredentialRepo {
     ///
     /// Not org-scoped: the caller resolves (workspace, peer) without an org id in
     /// hand. Listed as uncovered under AC-15 in md/design/identity-broker.md.
+    /// Org-scoped: the caller threads the peer's own `org_id`, so RLS filters
+    /// this read even though the query has no `org_id` predicate of its own.
     pub async fn secret_for(
         &self,
+        org_id: Uuid,
         workspace_id: Uuid,
         peer_id: Uuid,
     ) -> anyhow::Result<Option<String>> {
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         let ciphertext: Option<Vec<u8>> = sqlx::query_scalar(
             "SELECT credential_ciphertext FROM workspace_peer_credentials
              WHERE workspace_id = $1 AND peer_id = $2",
         )
         .bind(workspace_id)
         .bind(peer_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .context("failed to read workspace peer credential")?;
+        tx.commit()
+            .await
+            .context("failed to commit workspace peer credential read")?;
         let Some(ciphertext) = ciphertext else {
             return Ok(None);
         };

@@ -82,7 +82,7 @@ pub async fn put_credential(
 
     let created_by = (!ctx.user_id.is_nil()).then_some(ctx.user_id);
     let outcome = WorkspacePeerCredentialRepo::new(state.pool.clone())
-        .upsert(workspace_id, peer_id, &plaintext, created_by)
+        .upsert(ctx.org_id, workspace_id, peer_id, &plaintext, created_by)
         .await
         .map_err(AppError::Internal)?;
 

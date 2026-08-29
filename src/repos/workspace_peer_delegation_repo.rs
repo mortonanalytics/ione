@@ -126,8 +126,10 @@ impl WorkspacePeerDelegationRepo {
     /// the authorization dance rewrites the ciphertext in place, so re-consent
     /// never accumulates rows.
     #[allow(clippy::too_many_arguments)]
+    /// Org-scoped: the caller threads the peer's own `org_id`.
     pub async fn upsert_tokens(
         &self,
+        org_id: Uuid,
         workspace_id: Uuid,
         peer_id: Uuid,
         oauth_client_id: &str,
@@ -137,7 +139,8 @@ impl WorkspacePeerDelegationRepo {
         token_expires_at: Option<DateTime<Utc>>,
         granted_by: Option<Uuid>,
     ) -> anyhow::Result<WorkspacePeerDelegation> {
-        sqlx::query_as::<_, WorkspacePeerDelegation>(&format!(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let delegation = sqlx::query_as::<_, WorkspacePeerDelegation>(&format!(
             "INSERT INTO workspace_peer_delegations
                (workspace_id, peer_id, oauth_client_id, token_endpoint,
                 access_token_ciphertext, refresh_token_ciphertext,
@@ -161,19 +164,28 @@ impl WorkspacePeerDelegationRepo {
         .bind(refresh_ciphertext)
         .bind(token_expires_at)
         .bind(granted_by)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
-        .context("failed to upsert workspace peer delegation")
+        .context("failed to upsert workspace peer delegation")?;
+        tx.commit()
+            .await
+            .context("failed to commit workspace peer delegation upsert")?;
+        Ok(delegation)
     }
 
     /// Replace only the token material, after a refresh-grant exchange.
+    ///
+    /// Org-scoped: the caller threads the peer's own `org_id`, so the policy
+    /// guards this write even though it selects by delegation id alone.
     pub async fn update_refreshed(
         &self,
+        org_id: Uuid,
         id: Uuid,
         access_ciphertext: &[u8],
         refresh_ciphertext: Option<&[u8]>,
         token_expires_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<()> {
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         sqlx::query(
             "UPDATE workspace_peer_delegations
              SET access_token_ciphertext = $2,
@@ -186,9 +198,12 @@ impl WorkspacePeerDelegationRepo {
         .bind(access_ciphertext)
         .bind(refresh_ciphertext)
         .bind(token_expires_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("failed to update refreshed peer delegation")?;
+        tx.commit()
+            .await
+            .context("failed to commit refreshed peer delegation")?;
         Ok(())
     }
 
@@ -245,13 +260,15 @@ impl WorkspacePeerDelegationRepo {
     /// The encrypted delegated token for (workspace, peer). Only the outbound
     /// MCP auth path in `services::peer_tokens` calls this.
     ///
-    /// Not org-scoped: the caller resolves (workspace, peer) without an org id in
-    /// hand. Listed as uncovered under AC-15 in md/design/identity-broker.md.
+    /// Org-scoped: the caller holds the `Peer` and threads its `org_id`, so RLS
+    /// filters this read even though the query selects on (workspace, peer).
     pub async fn material_for(
         &self,
+        org_id: Uuid,
         workspace_id: Uuid,
         peer_id: Uuid,
     ) -> anyhow::Result<Option<DelegatedTokenMaterial>> {
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         let row: Option<MaterialRow> = sqlx::query_as(
             "SELECT id, access_token_ciphertext, refresh_token_ciphertext,
                         token_expires_at, oauth_client_id, token_endpoint
@@ -260,9 +277,12 @@ impl WorkspacePeerDelegationRepo {
         )
         .bind(workspace_id)
         .bind(peer_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .context("failed to read workspace peer delegation")?;
+        tx.commit()
+            .await
+            .context("failed to commit workspace peer delegation read")?;
         Ok(row.map(
             |(
                 id,

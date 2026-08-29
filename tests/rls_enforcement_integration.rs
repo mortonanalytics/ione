@@ -235,27 +235,21 @@ async fn restricted_role_sees_only_the_org_in_context() {
         "org B context should see its own credential"
     );
 
-    // Without any org context the restricted role fails closed, in one of two
-    // shapes depending on the connection it draws from the pool: on a fresh
-    // connection `current_setting('app.current_org_id', true)` is NULL, the
-    // predicate is NULL, and no row matches; on a connection recycled from an
-    // org-scoped transaction the setting is defined but empty, and `''::uuid`
-    // raises 22P02. Neither returns another org's rows, which is the property
-    // being pinned — an unmigrated query path cannot leak, it can only fail.
-    let without_context: Result<i64, sqlx::Error> =
+    // Without any org context the restricted role fails closed and returns
+    // nothing. Migration 0051 made that true of both shapes the setting takes:
+    // NULL on a fresh connection, and the empty string on one recycled from an
+    // org-scoped transaction. Before it, the empty string reached `''::uuid`
+    // and raised 22P02 from inside the policy.
+    let without_context: i64 =
         sqlx::query_scalar("SELECT count(*) FROM broker_credentials WHERE provider = $1")
             .bind(&seed.provider)
             .fetch_one(&restricted)
-            .await;
-    match without_context {
-        Ok(count) => assert_eq!(count, 0, "restricted role saw rows with no org context set"),
-        Err(sqlx::Error::Database(e)) => assert_eq!(
-            e.code().as_deref(),
-            Some("22P02"),
-            "unexpected database error with no org context: {e}"
-        ),
-        Err(e) => panic!("unexpected error with no org context: {e}"),
-    }
+            .await
+            .expect("no org context must return no rows, not a database error");
+    assert_eq!(
+        without_context, 0,
+        "restricted role saw rows with no org context set"
+    );
 
     // And the default role — the one every existing test and the dev loop use —
     // is untouched: it is SUPERUSER, so it still sees both orgs.
@@ -274,6 +268,138 @@ async fn restricted_role_sees_only_the_org_in_context() {
         "the default role should still see both orgs' rows"
     );
 
+    cleanup(&pool, &seed).await;
+}
+
+/// The empty-string shape specifically. A pooled connection that carried an
+/// org-scoped transaction leaves `app.current_org_id` defined and empty once
+/// that transaction ends, and `''::uuid` used to raise 22P02 from inside every
+/// policy. Fail-closed either way, but an opaque database error on every
+/// not-yet-migrated query is what kept `ione_app` from being a runnable role.
+///
+/// This is the test that fails without migration 0051.
+#[tokio::test]
+#[ignore]
+async fn an_empty_org_context_returns_no_rows_rather_than_raising() {
+    let pool = default_pool().await;
+    let seed = seed_two_orgs(&pool).await;
+    let restricted = restricted_pool().await;
+
+    let mut tx = restricted
+        .begin()
+        .await
+        .expect("begin transaction on the restricted pool");
+    sqlx::query("SELECT set_config('app.current_org_id', '', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("set an empty org context");
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM broker_credentials WHERE provider = $1")
+            .bind(&seed.provider)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("an empty org context must filter, not raise 22P02");
+    assert_eq!(count, 0, "an empty org context must see no rows");
+
+    tx.commit().await.expect("commit");
+    cleanup(&pool, &seed).await;
+}
+
+/// The credential and delegation reads that #25 threaded an org id through must
+/// work under the restricted role, where RLS is the only filter. Before the
+/// change these queries selected on (workspace, peer) with no org context at
+/// all, so under `ione_app` they would have matched nothing.
+#[tokio::test]
+#[ignore]
+async fn threaded_credential_and_delegation_reads_work_under_the_restricted_role() {
+    // The credential is stored encrypted; the repo needs a key like any caller.
+    std::env::set_var(
+        "IONE_TOKEN_KEY",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    );
+    let pool = default_pool().await;
+    let seed = seed_two_orgs(&pool).await;
+    let restricted = restricted_pool().await;
+
+    let workspace_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (org_id, name, domain, lifecycle)
+         VALUES ($1, 'rls-threaded', 'test', 'continuous'::workspace_lifecycle)
+         RETURNING id",
+    )
+    .bind(seed.org_a)
+    .fetch_one(&pool)
+    .await
+    .expect("insert workspace");
+
+    let issuer_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO trust_issuers (org_id, issuer_url, audience, jwks_uri, claim_mapping)
+         VALUES ($1, $2, 'aud', 'secret:test', '{}'::jsonb)
+         RETURNING id",
+    )
+    .bind(seed.org_a)
+    .bind(format!("https://issuer-{workspace_id}.example"))
+    .fetch_one(&pool)
+    .await
+    .expect("insert trust issuer");
+
+    let peer_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO peers (org_id, name, mcp_url, issuer_id, sharing_policy, tool_allowlist, status)
+         VALUES ($1, 'rls-peer', $3, $2, '{}'::jsonb, '[]'::jsonb,
+                 'active'::peer_status)
+         RETURNING id",
+    )
+    .bind(seed.org_a)
+    .bind(issuer_id)
+    .bind(format!("https://peer-{workspace_id}.example/mcp"))
+    .fetch_one(&pool)
+    .await
+    .expect("insert peer");
+
+    let repo = ione::repos::WorkspacePeerCredentialRepo::new(restricted.clone());
+    repo.upsert(seed.org_a, workspace_id, peer_id, "s3cret", None)
+        .await
+        .expect("upsert under the restricted role");
+    let secret = repo
+        .secret_for(seed.org_a, workspace_id, peer_id)
+        .await
+        .expect("read under the restricted role");
+    assert_eq!(
+        secret.as_deref(),
+        Some("s3cret"),
+        "the threaded org id should make this row visible under RLS"
+    );
+
+    // The other org's context must not see it, which is the isolation half.
+    let wrong_org = repo
+        .secret_for(seed.org_b, workspace_id, peer_id)
+        .await
+        .expect("read with the wrong org context");
+    assert_eq!(
+        wrong_org, None,
+        "org B's context must not read org A's peer credential"
+    );
+
+    sqlx::query("DELETE FROM workspace_peer_credentials WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup credentials");
+    sqlx::query("DELETE FROM peers WHERE id = $1")
+        .bind(peer_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup peer");
+    sqlx::query("DELETE FROM trust_issuers WHERE id = $1")
+        .bind(issuer_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup issuer");
+    sqlx::query("DELETE FROM workspaces WHERE id = $1")
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup workspace");
     cleanup(&pool, &seed).await;
 }
 
