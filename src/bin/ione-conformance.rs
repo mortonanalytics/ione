@@ -1369,7 +1369,8 @@ fn check_map_resource(surface: &mut Surface, uri: &str, metadata: &Value) {
     if let Some(opacity) = metadata.get("opacity").and_then(Value::as_f64) {
         if !(0.0..=1.0).contains(&opacity) {
             surface.ok(format!(
-                "{uri}: opacity {opacity} is outside 0.0–1.0; IONe does not clamp it (§4.2)"
+                "{uri}: opacity {opacity} is outside 0.0–1.0; IONe clamps it into range (§4.2), \
+                 so the layer renders at a value the peer did not choose"
             ));
         }
     }
