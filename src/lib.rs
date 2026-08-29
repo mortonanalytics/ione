@@ -14,6 +14,16 @@ pub mod services;
 pub mod state;
 pub mod util;
 
+// Contract-parity harness (issue #24). The conformance kit is included as a
+// module rather than imported, so `src/bin/ione-conformance.rs` keeps its zero
+// `ione::` imports and stays liftable into a standalone crate.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "bin/ione-conformance.rs"]
+mod conformance_kit;
+#[cfg(test)]
+mod contract_parity;
+
 use axum::Router;
 use sqlx::PgPool;
 use uuid::Uuid;

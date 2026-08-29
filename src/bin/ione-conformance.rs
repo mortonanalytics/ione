@@ -8,6 +8,10 @@
 //! Usage:
 //!   cargo run --bin ione-conformance -- --url https://app.example.com/mcp [options]
 //!
+//! A few predicates below are `pub` so the contract-parity harness
+//! (`src/contract_parity.rs`, issue #24) can pair them against production's.
+//! That adds no imports and does not affect lifting this file out.
+//!
 //! This file deliberately imports nothing from the `ione` crate. It depends only
 //! on axum, reqwest, serde_json, chrono, hmac, sha2, hex, url and tokio, so it
 //! can be lifted verbatim into a standalone crate by anyone who does not want to
@@ -92,7 +96,7 @@ impl Status {
 
 /// Accumulates the checks performed for one surface. Any recorded failure makes
 /// the surface FAIL; an explicit skip only survives if nothing failed.
-struct Surface {
+pub struct Surface {
     number: u8,
     name: &'static str,
     section: &'static str,
@@ -102,7 +106,19 @@ struct Surface {
 }
 
 impl Surface {
-    fn new(number: u8, name: &'static str, section: &'static str) -> Surface {
+    /// Failure count, for the contract-parity harness (issue #24). The kit
+    /// otherwise reports through `status()` and printing.
+    pub fn failures(&self) -> usize {
+        self.failures
+    }
+
+    /// Every line this surface recorded, so a parity failure can say what the
+    /// kit actually objected to.
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    pub fn new(number: u8, name: &'static str, section: &'static str) -> Surface {
         Surface {
             number,
             name,
@@ -501,7 +517,7 @@ impl McpClient {
 /// absent, `null` and the **empty string** terminate identically. The alias is
 /// resolved *before* the filters, so a present-but-null `nextCursor` still
 /// terminates when a stale `cursor` key sits beside it.
-fn next_cursor(result: &Value) -> Option<Value> {
+pub fn next_cursor(result: &Value) -> Option<Value> {
     result
         .get("nextCursor")
         .or_else(|| result.get("cursor"))
@@ -574,7 +590,7 @@ fn sse_data_payload(line: &str) -> Option<&str> {
 /// Mirrors `ione::services::peer_tokens::sse_event_payloads` by hand: this file
 /// imports nothing from the `ione` crate so it can be lifted into a standalone
 /// crate. The duplication is tracked in issue #24.
-fn sse_event_payloads(body: &str) -> Vec<String> {
+pub fn sse_event_payloads(body: &str) -> Vec<String> {
     let mut events = Vec::new();
     let mut pending: Vec<&str> = Vec::new();
     for line in body.lines() {
@@ -1186,7 +1202,7 @@ fn verify_signature_header(header: &str, secret: &str, body: &[u8]) -> Result<i6
 }
 
 /// Re-implements the §3.3 envelope constraints IONe enforces.
-fn verify_envelope(surface: &mut Surface, body: &[u8], peer_id: &str, timestamp: i64) {
+pub fn verify_envelope(surface: &mut Surface, body: &[u8], peer_id: &str, timestamp: i64) {
     let envelope: Value = match serde_json::from_slice(body) {
         Ok(value) => value,
         Err(err) => {
@@ -1630,7 +1646,7 @@ fn check_document_resource(surface: &mut Surface, uri: &str, resource: &Value, m
 /// `url_guard::ensure_safe_url`, whose only host rule that can bite an https URL
 /// is the link-local block. Loopback and RFC 1918 hosts over https are
 /// deliberately allowed so on-prem peers work.
-fn validate_panel_url(raw: &str, label: &str) -> Result<(), String> {
+pub fn validate_panel_url(raw: &str, label: &str) -> Result<(), String> {
     let url = Url::parse(raw).map_err(|err| format!("{label} '{raw}' is not a URL: {err}"))?;
     let host = url
         .host()
