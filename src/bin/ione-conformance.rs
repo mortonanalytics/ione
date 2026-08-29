@@ -566,14 +566,41 @@ fn sse_data_payload(line: &str) -> Option<&str> {
     (!data.is_empty()).then_some(data)
 }
 
+/// Split an SSE body into one payload per event.
+///
+/// The spec lets one event carry several `data:` lines, joined with newlines.
+/// A server that pretty-prints its JSON-RPC reply emits exactly that.
+///
+/// Mirrors `ione::services::peer_tokens::sse_event_payloads` by hand: this file
+/// imports nothing from the `ione` crate so it can be lifted into a standalone
+/// crate. The duplication is tracked in issue #24.
+fn sse_event_payloads(body: &str) -> Vec<String> {
+    let mut events = Vec::new();
+    let mut pending: Vec<&str> = Vec::new();
+    for line in body.lines() {
+        // A blank line terminates the event.
+        if line.trim().is_empty() {
+            if !pending.is_empty() {
+                events.push(pending.join("\n"));
+                pending.clear();
+            }
+            continue;
+        }
+        if let Some(data) = sse_data_payload(line) {
+            pending.push(data);
+        }
+    }
+    if !pending.is_empty() {
+        events.push(pending.join("\n"));
+    }
+    events
+}
+
 /// Pick the frame that answers our request out of an SSE-framed POST response.
 fn select_sse_reply(body: &str, expected_id: &Value) -> Result<Value, String> {
     let mut null_id_error: Option<Value> = None;
-    for line in body.lines() {
-        let Some(data) = sse_data_payload(line) else {
-            continue;
-        };
-        let Ok(message) = serde_json::from_str::<Value>(data) else {
+    for data in sse_event_payloads(body) {
+        let Ok(message) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
         // Server-initiated requests and notifications share the stream; they are
@@ -2711,5 +2738,44 @@ mod tests {
             "the strip must still be reported: {:?}",
             surface.lines
         );
+    }
+}
+
+#[cfg(test)]
+mod sse_tests {
+    use super::{select_sse_reply, sse_event_payloads};
+    use serde_json::json;
+
+    /// The kit must accept exactly what production accepts, or it lies to the
+    /// peer about what IONe understands.
+    #[test]
+    fn a_reply_split_across_data_lines_is_reassembled() {
+        let body = "event: message\ndata: {\ndata:   \"jsonrpc\": \"2.0\",\ndata:   \"id\": 7,\ndata:   \"result\": {\"ok\": true}\ndata: }\n\n";
+        let reply = select_sse_reply(body, &json!(7)).expect("reply should be found");
+        assert_eq!(reply["result"]["ok"], json!(true));
+    }
+
+    #[test]
+    fn a_single_line_reply_is_unaffected() {
+        let body = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+        let reply = select_sse_reply(body, &json!(1)).expect("reply should be found");
+        assert_eq!(reply["id"], json!(1));
+    }
+
+    #[test]
+    fn events_do_not_bleed_into_each_other() {
+        let body = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}\n",
+            "\n",
+            "data: {\n",
+            "data:   \"jsonrpc\": \"2.0\",\n",
+            "data:   \"id\": 2,\n",
+            "data:   \"result\": {}\n",
+            "data: }\n",
+            "\n",
+        );
+        assert_eq!(sse_event_payloads(body).len(), 2);
+        let reply = select_sse_reply(body, &json!(2)).expect("reply should be found");
+        assert_eq!(reply["id"], json!(2));
     }
 }

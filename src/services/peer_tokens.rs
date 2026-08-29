@@ -83,14 +83,39 @@ pub async fn read_jsonrpc_reply(resp: reqwest::Response, expected_id: &Value) ->
     }
 }
 
+/// Split an SSE body into one payload per event.
+///
+/// The SSE spec lets a single event carry several `data:` lines, which a client
+/// joins with newlines into one payload. A server that pretty-prints its
+/// JSON-RPC reply does exactly that, and treating each line as a whole message
+/// turns a conforming reply into a parse failure.
+pub fn sse_event_payloads(body: &str) -> Vec<String> {
+    let mut events = Vec::new();
+    let mut pending: Vec<&str> = Vec::new();
+    for line in body.lines() {
+        // A blank line terminates the event.
+        if line.trim().is_empty() {
+            if !pending.is_empty() {
+                events.push(pending.join("\n"));
+                pending.clear();
+            }
+            continue;
+        }
+        if let Some(data) = sse_data_payload(line) {
+            pending.push(data);
+        }
+    }
+    if !pending.is_empty() {
+        events.push(pending.join("\n"));
+    }
+    events
+}
+
 /// Pick the frame that answers our request out of an SSE-framed POST response.
 fn select_sse_reply(body: &str, expected_id: &Value) -> Result<Value> {
     let mut null_id_error: Option<Value> = None;
-    for line in body.lines() {
-        let Some(data) = sse_data_payload(line) else {
-            continue;
-        };
-        let Ok(message) = serde_json::from_str::<Value>(data) else {
+    for data in sse_event_payloads(body) {
+        let Ok(message) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
         // Server-initiated requests and notifications share the stream; they are
@@ -760,4 +785,54 @@ fn sha256_hex(input: &str) -> String {
         write!(hex, "{byte:02x}").unwrap();
     }
     hex
+}
+
+#[cfg(test)]
+mod sse_tests {
+    use super::{select_sse_reply, sse_event_payloads};
+    use serde_json::json;
+
+    /// The SSE spec joins an event's `data:` lines with newlines. A server that
+    /// pretty-prints its JSON-RPC reply emits exactly this, and reading each
+    /// line as a whole message turned a conforming reply into a parse failure.
+    #[test]
+    fn a_reply_split_across_data_lines_is_reassembled() {
+        let body = "event: message\ndata: {\ndata:   \"jsonrpc\": \"2.0\",\ndata:   \"id\": 7,\ndata:   \"result\": {\"ok\": true}\ndata: }\n\n";
+        let reply = select_sse_reply(body, &json!(7)).expect("reply should be found");
+        assert_eq!(reply["result"]["ok"], json!(true));
+    }
+
+    #[test]
+    fn a_single_line_reply_is_unaffected() {
+        let body = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+        let reply = select_sse_reply(body, &json!(1)).expect("reply should be found");
+        assert_eq!(reply["id"], json!(1));
+    }
+
+    /// Events are separated by a blank line, so an unrelated notification ahead
+    /// of the reply must not be glued onto it.
+    #[test]
+    fn events_do_not_bleed_into_each_other() {
+        let body = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}\n",
+            "\n",
+            "data: {\n",
+            "data:   \"jsonrpc\": \"2.0\",\n",
+            "data:   \"id\": 2,\n",
+            "data:   \"result\": {}\n",
+            "data: }\n",
+            "\n",
+        );
+        assert_eq!(sse_event_payloads(body).len(), 2);
+        let reply = select_sse_reply(body, &json!(2)).expect("reply should be found");
+        assert_eq!(reply["id"], json!(2));
+    }
+
+    /// A stream that ends without a trailing blank line still has an event.
+    #[test]
+    fn a_final_event_without_a_terminator_still_parses() {
+        let body = "data: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}";
+        let reply = select_sse_reply(body, &json!(3)).expect("reply should be found");
+        assert_eq!(reply["id"], json!(3));
+    }
 }
