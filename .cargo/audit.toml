@@ -1,0 +1,39 @@
+# `cargo audit` configuration.
+#
+# Every entry below is a finding we cannot fix from this repo: the vulnerable
+# crate arrives transitively behind a dependency that has not moved off an old
+# major. Each one names the path and why it is not reachable here. Nothing is
+# ignored because it is inconvenient — an ignore with no reason is how a real
+# advisory hides among the noise.
+#
+# Removing an entry is the goal, not the exception. Issue #57 tracks both roots.
+
+[advisories]
+ignore = [
+    # h2 0.3.27 — unbounded empty DATA frames (low severity, denial-of-service).
+    # Path: aws-config / aws-sdk-s3 -> aws-smithy-http-client -> hyper 0.14 -> h2 0.3.
+    # It is the AWS SDK's outbound client, talking to S3/MinIO endpoints we
+    # configure. The h2 0.4 copy in the tree is already patched.
+    "RUSTSEC-2026-0258",
+
+    # rustls-webpki 0.101.7, three advisories — name constraints accepted for a
+    # wildcard name, URI name constraints ignored, and a reachable panic parsing
+    # a CRL. Path: aws-smithy-http-client -> rustls 0.21 -> rustls-webpki 0.101.
+    # All three require a misissued certificate from a trusted CA; IONe parses no
+    # CRLs. The rustls-webpki 0.103 copy the rest of the tree uses is patched.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+
+    # rsa 0.9.10 — Marvin timing side channel, no fixed release exists.
+    # Path: openidconnect 3 -> rsa. The attack recovers a private key from
+    # timing on RSA *private-key* operations. IONe holds no RSA private key:
+    # openidconnect uses this crate to verify an identity provider's JWT
+    # signature, which is a public-key operation on data the provider published.
+    "RUSTSEC-2023-0071",
+
+    # rustls-pemfile 1.0.4 — unmaintained, not a vulnerability.
+    # Path: openidconnect 3 -> oauth2 4 -> reqwest 0.11. IONe's own reqwest is
+    # 0.12, which does not use it.
+    "RUSTSEC-2025-0134",
+]

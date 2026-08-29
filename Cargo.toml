@@ -39,6 +39,9 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 async-trait = "0.1"
+# Held at 0.4.1 in Cargo.lock: 0.4.2 moved to sqlx 0.9, which puts two
+# sqlx_core versions in the graph and breaks every `query_as` over a Vector
+# column. Bump this together with sqlx, not before it.
 pgvector = { version = "0.4", features = ["sqlx"] }
 evalexpr = "11"
 futures-util = "0.3"
