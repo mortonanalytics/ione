@@ -116,6 +116,7 @@ Unset `IONE_SKIP_LIVE` to exercise the live Ollama generator/critic/router paths
 |---|---|---|
 | `IONE_BIND` | `0.0.0.0:3000` | Server address |
 | `DATABASE_URL` | `postgres://ione:ione@localhost:5433/ione` | Postgres |
+| `IONE_DB_MAX_CONNECTIONS` | `10` | Postgres pool size. Lower it on constrained edge hardware, raise it on a loaded node; anything unparseable or zero falls back to the default |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama HTTP |
 | `OLLAMA_MODEL` | `llama3.2:latest` | Chat default |
 | `OLLAMA_GENERATOR_MODEL` | `qwen3:14b` | Signal generator |
