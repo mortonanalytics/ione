@@ -6,6 +6,14 @@ name: Auto backlog-ready
 # green — so nothing here waits on a human. `needs-human-auth` is Ryan's manual
 # hold: applying it to an issue keeps that one issue out of the loop. No agent
 # applies it to its own work.
+#
+# eo's equivalent workflow is an admission gate: it strips `backlog-ready` when
+# an `automation-pr` is already open or a WIP limit is hit, and Ryan re-applies
+# the label later. Do not port that here. In eo a stripped label lands back in
+# a human queue; in IONe nothing re-applies it, so a candidate filed while the
+# builder had a PR open would be dropped silently and forever. Promotion stays
+# unconditional and the queue is allowed to grow — the builder takes the oldest
+# one issue per run, which is the serialization that actually matters.
 on:
   issues:
     types: [labeled]

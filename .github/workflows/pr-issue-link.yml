@@ -1,0 +1,103 @@
+name: PR Issue Link
+
+# Every PR must cite something that lets an issue close when it merges.
+#
+# The loop files issues, promotes them, implements them, and merges its own PR.
+# Closing is the one step that depends on the PR body being right, and nothing
+# checks it today — a builder run that forgets `Closes #N` leaves the issue open
+# and the next run picks the same work up again.
+#
+# A PR must carry ONE of:
+#   * a closing reference GitHub itself resolves — Closes/Fixes/Resolves #N
+#   * `Refs #N` for work that advances an issue without finishing it
+#   * `no-issue: <reason>` for work that genuinely has no tracking item
+# Dependabot PRs are exempt.
+#
+# Deliberately NOT ported from eo's version: the requirement-ID branch, which
+# accepts an ID that already exists in the requirements matrix on origin/main.
+# `md/requirements/active/` uses prose, not IDs — one `AC-10` across seven
+# files, against a pattern that also matches `SHA-256`. Enforcing it here would
+# pass on a hash name and fail on everything real.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+  # Needed for the `Refs #N` existence check, and for GraphQL to populate
+  # closingIssuesReferences — without it that field comes back empty rather
+  # than erroring, so a PR that does cite an issue would fail the gate.
+  issues: read
+
+jobs:
+  require-reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+
+            if (pr.user?.login === 'dependabot[bot]') {
+              core.info('Dependabot PR; issue reference not required');
+              return;
+            }
+
+            const body = `${pr.title}\n\n${pr.body || ''}`;
+
+            // 1. Closing references, as GitHub itself resolves them.
+            const { repository } = await github.graphql(`
+              query($owner:String!, $repo:String!, $number:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  pullRequest(number:$number) {
+                    closingIssuesReferences(first:20) { nodes { number } }
+                  }
+                }
+              }`, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                number: pr.number,
+              });
+            const closing = repository.pullRequest.closingIssuesReferences.nodes;
+            if (closing.length > 0) {
+              core.info(`closing reference(s): ${closing.map(n => '#' + n.number).join(', ')}`);
+              return;
+            }
+
+            // 2. `Refs #N` — advances an issue without closing it. The issue
+            //    must actually exist; a dangling number is not a reference.
+            const refs = [...body.matchAll(/\bRefs?\s+#(\d+)\b/gi)].map(m => Number(m[1]));
+            for (const number of new Set(refs)) {
+              try {
+                await github.rest.issues.get({ ...context.repo, issue_number: number });
+                core.info(`Refs #${number} resolves to an existing issue`);
+                return;
+              } catch {
+                core.warning(`Refs #${number} does not resolve to an issue`);
+              }
+            }
+
+            // 3. Explicit, reasoned opt-out.
+            const optOut = body.match(/^\s*no-issue:\s*(.+)$/im);
+            if (optOut && optOut[1].trim().length >= 12) {
+              core.info(`no-issue: ${optOut[1].trim()}`);
+              return;
+            }
+            if (optOut) {
+              core.setFailed('`no-issue:` needs a real reason (at least 12 characters).');
+              return;
+            }
+
+            core.setFailed([
+              'This PR cites nothing that lets an issue close when it merges.',
+              '',
+              'Add ONE of the following to the PR body:',
+              '  Closes #123          finishes the issue',
+              '  Refs #123            advances it without finishing it',
+              '  no-issue: <reason>   genuinely untracked work',
+            ].join('\n'));
