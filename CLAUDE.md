@@ -58,6 +58,16 @@ issue body is the specification, since nobody reads it before the change lands.
 Ryan steers by filing issues. `needs-human-auth` on an issue holds it out of the
 loop; no agent applies that label to its own work.
 
+Enforcement lives in CI, not in skill prose:
+
+| Workflow | Enforces |
+|---|---|
+| branch protection on `main` | every CI check green before merge, admins included — this is what makes "green CI is the only merge authority" true rather than promised |
+| `pr-issue-link.yml` | every PR cites `Closes #N`, a resolvable `Refs #N`, or `no-issue: <reason>` |
+| `auto-merge.yml` | arms auto-merge at PR open, so the builder can exit instead of waiting out CI inside its run |
+| `loop-liveness.yml` | opens an issue when work is ready and nothing has merged in 7 days |
+| `audit.yml` + `dependabot.yml` | advisories against `Cargo.lock` and weekly bumps across cargo, npm, actions, docker |
+
 ## Secrets
 `IONE_TOKEN_KEY` / `IONE_WEBHOOK_SECRET_KEY` live in `.env` (gitignored).
 Never commit `.env` or embed key values in settings/permissions entries.

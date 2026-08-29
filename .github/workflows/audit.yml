@@ -1,0 +1,31 @@
+name: Cargo audit
+
+# The supply-chain half of the compliance loop. Dependabot raises version
+# bumps; this raises advisories against the versions actually in Cargo.lock,
+# including ones with no fixed release yet.
+#
+# rustsec/audit-check opens an issue per advisory and dedupes against issues it
+# already opened, so a standing advisory does not refile weekly.
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  push:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  checks: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

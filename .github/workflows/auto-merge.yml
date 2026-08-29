@@ -1,0 +1,61 @@
+name: Auto-merge
+
+# Arms GitHub auto-merge when a PR opens, so a green PR lands without a session
+# sitting on it. The builder currently blocks inside its scheduled run waiting
+# for CI — a ~20 minute wait it pays out of the same budget it needs for the
+# work. With auto-merge armed it can open the PR and exit; the merge happens
+# when the last check goes green.
+#
+# This bypasses nothing. Branch protection still requires every check, and the
+# builder's rule is unchanged: green CI is the only merge authority.
+#
+# AUTOMERGE_TOKEN must be a PAT, not GITHUB_TOKEN — a merge attributed to
+# GITHUB_TOKEN does not trigger downstream workflow runs. Without the secret
+# this job warns and no-ops, and the builder merges the PR itself as it does
+# today.
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  arm:
+    if: github.event.pull_request.draft == false && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          PR: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::warning::AUTOMERGE_TOKEN is not set; PRs will need auto-merge armed by hand."
+            exit 0
+          fi
+          gh pr merge --auto --squash "$PR"
+
+  arm-dependabot:
+    # Patch and minor bumps should never need a human. A major bump waits.
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Enable auto-merge for non-major updates
+        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          PR: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::warning::AUTOMERGE_TOKEN is not set; PRs will need auto-merge armed by hand."
+            exit 0
+          fi
+          gh pr merge --auto --squash "$PR"
