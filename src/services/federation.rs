@@ -1582,24 +1582,17 @@ fn catalog_content_hash(
     format!("{:x}", hasher.finalize())
 }
 
-/// NOTE: this is one of **three** hand-written `peers` column lists — the others
-/// are `PeerRepo::PEER_COLUMNS` and the join in
-/// `WorkspacePeerBindingRepo::list_active_peers_for_workspace`. Adding a column
-/// to `Peer` means adding it to all three. `Peer` marks the newer fields
-/// `#[sqlx(default)]`, so a missed list does **not** error — it silently yields
-/// the type default, which for `tool_allowlist_configured` reads as "not
-/// configured" and quietly disables the allowlist gate. That failure mode cost a
-/// debugging cycle; if you add a column here, grep for the other two.
+/// Renders from `Peer::COLUMNS`, like every other `peers` projection. This used
+/// to be one of three hand-written lists; a list that missed
+/// `tool_allowlist_configured` hydrated `false` and quietly disabled the
+/// allowlist gate (issue #26).
 async fn peer_by_prefix(state: &AppState, org_id: Uuid, prefix: &str) -> anyhow::Result<Peer> {
-    sqlx::query_as::<_, Peer>(
-        "SELECT id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-                oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-                refresh_token_ciphertext, token_expires_at, tool_allowlist,
-                tool_allowlist_configured, tool_prefix,
-                session_status, last_connected_at, last_session_error, last_manifest_jsonb
+    sqlx::query_as::<_, Peer>(&format!(
+        "SELECT {}
          FROM peers
          WHERE org_id = $1 AND tool_prefix = $2 AND status = 'active'",
-    )
+        Peer::COLUMNS
+    ))
     .bind(org_id)
     .bind(prefix)
     .fetch_optional(&state.pool)

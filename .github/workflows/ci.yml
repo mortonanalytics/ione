@@ -97,6 +97,7 @@ jobs:
                    credential_presentation_integration \
                    tool_allowlist_integration mcp_session_integration \
                    peer_join_followups_integration \
+                   peer_projection_contract_integration \
                    whoami_and_error_mapping_integration \
                    rls_enforcement_integration; do
             echo "=== $p ==="

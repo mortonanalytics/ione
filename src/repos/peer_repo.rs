@@ -4,12 +4,7 @@ use uuid::Uuid;
 
 use crate::models::{Peer, PeerStatus};
 
-const PEER_COLUMNS: &str =
-    "id, org_id, name, mcp_url, issuer_id, sharing_policy, status, created_at,
-    oauth_client_id, access_token_hash, refresh_token_hash, access_token_ciphertext,
-    refresh_token_ciphertext, token_expires_at, tool_allowlist, tool_allowlist_configured,
-    tool_prefix, session_status,
-    last_connected_at, last_session_error, last_manifest_jsonb";
+const PEER_COLUMNS: &str = Peer::COLUMNS;
 
 pub struct PeerRepo {
     pub(crate) pool: PgPool,
