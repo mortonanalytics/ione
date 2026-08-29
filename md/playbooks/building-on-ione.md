@@ -29,7 +29,12 @@ If unsure: build Section B first (you get a working IONe-rendered app in hours),
 
 ### A third relationship: *consume* IONe over MCP
 
-Beyond plugging *into* IONe (peer or artifact), your agent or app can **consume IONe's federated surface as an MCP client** — connect to IONe's `/mcp` server and call a unified `tools/list` across every connected peer, `tools/call` (routed to the owning peer, approval-gated where required), `resources/read`, and the aggregated `slice://`. This makes IONe-as-tool a peer to *your* agent, the mirror of the web shell. See [mcp-federation.md](../design/mcp-federation.md) "Consumption surfaces." Caveat: until the federation slice ships, IONe's `tools/list` is a hardcoded stub that does not reflect connected peers — don't rely on it for federated discovery yet.
+Beyond plugging *into* IONe (peer or artifact), your agent or app can **consume IONe's federated surface as an MCP client** — connect to IONe's `/mcp` server and call a unified `tools/list` across every connected peer, `tools/call` (routed to the owning peer, approval-gated where required), and `resources/read`. This makes IONe-as-tool a peer to *your* agent, the mirror of the web shell. See [mcp-federation.md](../design/mcp-federation.md) "Consumption surfaces."
+
+Two caveats, both about what exists today rather than what is planned:
+
+- IONe's `/mcp` advertises exactly one resource, `whoami://`, and answers `-32602` for anything else. There is **no aggregated `slice://`** to read; `slice://` is a resource *your app publishes* and IONe consumes (Section A, surface 5). An earlier revision of this playbook promised one — it never existed.
+- Until the federation slice ships, `tools/list` is a hardcoded stub that does not reflect connected peers. Don't rely on it for federated discovery yet.
 
 ---
 
