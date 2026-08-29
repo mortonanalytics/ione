@@ -21,7 +21,7 @@ name = "ione"
 path = "src/main.rs"
 
 [dependencies]
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "cookies"] }
