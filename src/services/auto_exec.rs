@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Mutex, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use tracing::{info, warn};
@@ -96,6 +100,16 @@ impl TokenBucket {
 
 // ── Rate-limit registry ───────────────────────────────────────────────────────
 
+/// Buckets untouched for longer than the refill window are discardable:
+/// `TokenBucket::refill` resets to full capacity after 60s, so recreating an
+/// expired entry gives the same answer as keeping it. Eviction here cannot
+/// change a rate-limit decision.
+const RATE_LIMIT_ENTRY_TTL: Duration = Duration::from_secs(60);
+/// Hard ceiling on distinct `(workspace, policy)` pairs held at once. Mirrors
+/// `funnel::MAX_RATE_LIMIT_SESSIONS`; without it the map grew for the life of
+/// the process, which matters most on a long-running edge node.
+const MAX_RATE_LIMIT_ENTRIES: usize = 10_000;
+
 static RATE_LIMIT_REGISTRY: std::sync::OnceLock<Mutex<HashMap<(Uuid, Uuid), TokenBucket>>> =
     std::sync::OnceLock::new();
 
@@ -103,10 +117,33 @@ fn registry() -> &'static Mutex<HashMap<(Uuid, Uuid), TokenBucket>> {
     RATE_LIMIT_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Make room for `key` when the map has reached its ceiling: drop expired
+/// entries first, then the least recently refilled one if that was not enough.
+///
+/// Below the ceiling this is a length check and nothing else — sweeping on
+/// every decision would put an O(n) scan on the hot path to bound a map that is
+/// already bounded.
+fn evict_stale(map: &mut HashMap<(Uuid, Uuid), TokenBucket>, key: (Uuid, Uuid)) {
+    if map.len() < MAX_RATE_LIMIT_ENTRIES || map.contains_key(&key) {
+        return;
+    }
+    map.retain(|_, bucket| bucket.last_refill.elapsed() < RATE_LIMIT_ENTRY_TTL);
+    if map.len() >= MAX_RATE_LIMIT_ENTRIES {
+        if let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, bucket)| bucket.last_refill)
+            .map(|(id, _)| *id)
+        {
+            map.remove(&oldest);
+        }
+    }
+}
+
 /// Peek: returns true if the bucket has tokens available (does not consume).
 fn bucket_peek(workspace_id: Uuid, policy_id: Uuid, capacity: u32) -> bool {
     let key = (workspace_id, policy_id);
     let mut map = registry().lock().expect("rate limit registry poisoned");
+    evict_stale(&mut map, key);
     let bucket = map.entry(key).or_insert_with(|| TokenBucket::new(capacity));
     bucket.peek()
 }
@@ -115,6 +152,7 @@ fn bucket_peek(workspace_id: Uuid, policy_id: Uuid, capacity: u32) -> bool {
 fn bucket_consume(workspace_id: Uuid, policy_id: Uuid, capacity: u32) -> bool {
     let key = (workspace_id, policy_id);
     let mut map = registry().lock().expect("rate limit registry poisoned");
+    evict_stale(&mut map, key);
     let bucket = map.entry(key).or_insert_with(|| TokenBucket::new(capacity));
     bucket.consume()
 }
@@ -633,4 +671,90 @@ async fn write_auto_exec_error(
         .await
         .context("failed to write auto_exec_error audit event")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{evict_stale, TokenBucket, MAX_RATE_LIMIT_ENTRIES, RATE_LIMIT_ENTRY_TTL};
+    use std::collections::HashMap;
+    use std::time::Instant;
+    use uuid::Uuid;
+
+    fn bucket_last_refilled(ago: std::time::Duration) -> TokenBucket {
+        let mut bucket = TokenBucket::new(5);
+        // A monotonic clock can sit close to its epoch shortly after boot, so
+        // fall back to "now" rather than panicking on an underflowing subtract.
+        if let Some(then) = Instant::now().checked_sub(ago) {
+            bucket.last_refill = then;
+        }
+        bucket
+    }
+
+    fn fill(map: &mut HashMap<(Uuid, Uuid), TokenBucket>, count: usize, age: std::time::Duration) {
+        for _ in 0..count {
+            map.insert((Uuid::new_v4(), Uuid::new_v4()), bucket_last_refilled(age));
+        }
+    }
+
+    /// The registry grew for the life of the process. It must not exceed its
+    /// ceiling no matter how many distinct (workspace, policy) pairs arrive.
+    #[test]
+    fn the_registry_stays_bounded_when_every_entry_is_fresh() {
+        let mut map = HashMap::new();
+        fill(&mut map, MAX_RATE_LIMIT_ENTRIES, std::time::Duration::ZERO);
+        for _ in 0..50 {
+            let key = (Uuid::new_v4(), Uuid::new_v4());
+            evict_stale(&mut map, key);
+            map.insert(key, TokenBucket::new(5));
+            assert!(
+                map.len() <= MAX_RATE_LIMIT_ENTRIES,
+                "registry grew past its ceiling: {}",
+                map.len()
+            );
+        }
+    }
+
+    /// Entries older than the refill window are the ones dropped first —
+    /// recreating them yields a full bucket, which is what refill would have
+    /// produced anyway, so eviction cannot change a rate-limit answer.
+    #[test]
+    fn expired_entries_go_before_live_ones() {
+        let mut map = HashMap::new();
+        fill(
+            &mut map,
+            MAX_RATE_LIMIT_ENTRIES - 1,
+            RATE_LIMIT_ENTRY_TTL * 2,
+        );
+        let live = (Uuid::new_v4(), Uuid::new_v4());
+        map.insert(live, TokenBucket::new(5));
+
+        let arriving = (Uuid::new_v4(), Uuid::new_v4());
+        evict_stale(&mut map, arriving);
+
+        assert!(map.contains_key(&live), "a live entry was evicted");
+        assert!(
+            map.len() < MAX_RATE_LIMIT_ENTRIES,
+            "the expired entries should have been swept, leaving room"
+        );
+    }
+
+    /// A key already in the map is a hit, not an insertion, so it must never
+    /// pay for a sweep.
+    #[test]
+    fn an_existing_key_is_left_alone() {
+        let mut map = HashMap::new();
+        fill(&mut map, MAX_RATE_LIMIT_ENTRIES, RATE_LIMIT_ENTRY_TTL * 2);
+        let existing = *map.keys().next().expect("seeded");
+        evict_stale(&mut map, existing);
+        assert_eq!(map.len(), MAX_RATE_LIMIT_ENTRIES);
+    }
+
+    /// A bucket recreated after eviction reports full capacity — the same
+    /// answer `refill` gives once the window has passed.
+    #[test]
+    fn a_recreated_bucket_reports_full_capacity() {
+        let mut bucket = TokenBucket::new(3);
+        assert!(bucket.consume());
+        assert!(TokenBucket::new(3).peek());
+    }
 }
