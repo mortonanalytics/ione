@@ -704,7 +704,7 @@ pub async fn workspace_credential(pool: &PgPool, peer: &Peer) -> Result<Option<S
         return Ok(None);
     };
     crate::repos::WorkspacePeerCredentialRepo::new(pool.clone())
-        .secret_for(workspace_id, peer.id)
+        .secret_for(peer.org_id, workspace_id, peer.id)
         .await
 }
 

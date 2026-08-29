@@ -141,8 +141,20 @@ pub async fn complete(state: &AppState, nonce: &str, code: &str) -> Result<Deleg
         .expires_in
         .map(|seconds| Utc::now() + Duration::seconds(seconds));
 
+    // The delegation write is org-scoped, and the pending row carries only
+    // (workspace, peer) — the OAuth callback arrives with no session and no org
+    // in hand. The peer is the authority on its own org, so read it first and
+    // thread that.
+    let peer_org_id = crate::repos::PeerRepo::new(state.pool.clone())
+        .get(pending.peer_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("delegated peer no longer exists")))?
+        .org_id;
+
     let delegation = repo
         .upsert_tokens(
+            peer_org_id,
             pending.workspace_id,
             pending.peer_id,
             &pending.oauth_client_id,
@@ -194,7 +206,10 @@ pub async fn resolve(pool: &PgPool, http: &reqwest::Client, peer: &Peer) -> Resu
         return Ok(None);
     };
     let repo = WorkspacePeerDelegationRepo::new(pool.clone());
-    let Some(material) = repo.material_for(workspace_id, peer.id).await? else {
+    let Some(material) = repo
+        .material_for(peer.org_id, workspace_id, peer.id)
+        .await?
+    else {
         return Ok(None);
     };
 
@@ -246,6 +261,7 @@ pub async fn resolve(pool: &PgPool, http: &reqwest::Client, peer: &Peer) -> Resu
         .context("failed to encrypt refreshed delegated peer refresh token")?;
     let expires_at = Utc::now() + Duration::seconds(tokens.expires_in.unwrap_or(3600));
     repo.update_refreshed(
+        peer.org_id,
         material.id,
         &access_ciphertext,
         refresh_ciphertext.as_deref(),
