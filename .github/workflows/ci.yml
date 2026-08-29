@@ -17,7 +17,10 @@ jobs:
     name: fmt · clippy · check
     runs-on: ubuntu-latest
     steps:
+      # Full history: the migration guard below diffs against the merge base.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -33,6 +36,11 @@ jobs:
       # between src/routes/ and src/services/; this keeps that from recurring.
       - name: contract citations resolve
         run: python3 scripts/check-contract-citations.py
+      # A comment edit to an applied migration changed its sqlx checksum and
+      # took down all 57 integration suites at once (7756e89). Migrations are
+      # append-only; this is what says so.
+      - name: migrations are append-only
+        run: bash scripts/check-migrations-immutable.sh
 
   test:
     name: integration tests

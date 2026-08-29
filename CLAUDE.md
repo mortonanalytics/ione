@@ -67,6 +67,7 @@ Enforcement lives in CI, not in skill prose:
 | `auto-merge.yml` | arms auto-merge at PR open, so the builder can exit instead of waiting out CI inside its run |
 | `loop-liveness.yml` | opens an issue when work is ready and nothing has merged in 7 days |
 | `audit.yml` + `dependabot.yml` | advisories against `Cargo.lock` and weekly bumps across cargo, npm, actions, docker |
+| `scripts/check-migrations-immutable.sh` (in CI) | migrations are append-only — editing an applied one breaks every existing database's checksum |
 
 ## Secrets
 `IONE_TOKEN_KEY` / `IONE_WEBHOOK_SECRET_KEY` live in `.env` (gitignored).
