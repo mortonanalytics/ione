@@ -15,6 +15,7 @@ pub mod oauth;
 pub mod organization;
 pub mod peer;
 pub mod pipeline_event;
+pub mod relay_mapping;
 pub mod role;
 pub mod routing_decision;
 pub mod rule_diagnostic;
@@ -48,6 +49,9 @@ pub use oauth::*;
 pub use organization::Organization;
 pub use peer::{Peer, PeerStatus};
 pub use pipeline_event::{PipelineEvent, PipelineEventInput, PipelineEventStage};
+pub use relay_mapping::{
+    alias_is_valid, NewRelayMapping, RelayRunLink, WorkspaceRelayMapping,
+};
 pub use role::Role;
 pub use routing_decision::{RoutingDecision, RoutingTarget};
 pub use rule_diagnostic::*;

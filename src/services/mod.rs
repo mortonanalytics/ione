@@ -23,6 +23,7 @@ pub mod peer_panels;
 pub mod peer_tokens;
 pub mod pipeline_bus;
 pub mod provisioning;
+pub mod relay_client;
 pub mod router;
 pub mod rules;
 pub mod scheduler;

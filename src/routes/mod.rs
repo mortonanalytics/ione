@@ -51,6 +51,7 @@ pub mod peers;
 pub mod pipeline_events;
 pub mod provision;
 pub mod public_issuers;
+pub mod relay;
 pub mod roles;
 pub mod rule_diagnostics;
 pub mod service_account_tokens;
@@ -161,6 +162,50 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/document-panels",
             get(document_panels::list_document_panels),
+        )
+        // ── Data Query ──────────────────────────────────────────────────
+        // A second door, not a change to the first one. Nothing here touches
+        // the conversation surface: the Ollama client, the generator, the
+        // critic, and the router are untouched, and these routes are absent
+        // from a deployment with no relay configured.
+        .route(
+            "/api/v1/workspaces/:id/relay/sources",
+            get(relay::available_sources),
+        )
+        .route("/api/v1/workspaces/:id/relay/ask", post(relay::ask))
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id",
+            get(relay::run_status),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/cancel",
+            post(relay::cancel_run),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/clarification",
+            post(relay::answer_clarification),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/events",
+            get(relay::run_events),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/result",
+            get(relay::run_result),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/receipts",
+            get(relay::run_receipts),
+        )
+        .route("/api/v1/workspaces/:id/relay/runs", get(relay::recent_runs))
+        // Workspace administration for the mappings themselves.
+        .route(
+            "/api/v1/workspaces/:id/relay/mappings",
+            get(relay::list_mappings).post(relay::create_mapping),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/mappings/:mapping_id",
+            put(relay::set_mapping_enabled),
         )
         .route(
             "/api/v1/workspaces/:id/event-aggregates",

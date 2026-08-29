@@ -81,6 +81,7 @@
         <button id="tab-chart" role="tab" aria-selected="false" aria-controls="panel-chart" class="tab">Charts</button>
         <button id="tab-table" role="tab" aria-selected="false" aria-controls="panel-table" class="tab">Tables</button>
         <button id="tab-document" role="tab" aria-selected="false" aria-controls="panel-document" class="tab">Documents</button>
+        <button id="tab-data" role="tab" aria-selected="false" aria-controls="panel-data" class="tab" hidden>Data Query</button>
         <button id="tab-catalog" role="tab" aria-selected="false" aria-controls="panel-catalog" class="tab tab--ops">Catalog</button>
         <button id="tab-connectors" role="tab" aria-selected="false" aria-controls="panel-connectors" class="tab tab--ops">Connectors</button>
         <button id="tab-signals" role="tab" aria-selected="false" aria-controls="panel-signals" class="tab tab--ops">Signals</button>
@@ -163,6 +164,105 @@
       </div>
 
       <!-- Chart panel -->
+      <div id="panel-data" role="tabpanel" aria-labelledby="tab-data" aria-label="Data query" hidden>
+        <div class="data-layout">
+          <aside class="data-sidebar" aria-label="Available data sources">
+            <div class="data-sidebar-header">
+              <h2 class="data-heading">Sources</h2>
+              <button id="data-refresh-sources" type="button">Refresh</button>
+            </div>
+            <p id="data-sources-empty" class="data-empty" hidden>
+              No data sources are available to you in this workspace. A workspace
+              admin can map one, and it will appear here once the data service
+              also grants it.
+            </p>
+            <ul id="data-source-list" role="list" aria-label="Sources"></ul>
+            <details class="data-limits">
+              <summary>Limits for this question</summary>
+              <p class="data-hint">
+                These may only lower what your grant already allows.
+              </p>
+              <label for="data-limit-rows">Maximum rows</label>
+              <input id="data-limit-rows" type="number" min="1" step="1" placeholder="grant default">
+              <label for="data-limit-seconds">Maximum seconds</label>
+              <input id="data-limit-seconds" type="number" min="1" step="1" placeholder="grant default">
+            </details>
+          </aside>
+
+          <section class="data-main" aria-label="Ask a question">
+            <form id="data-ask-form" class="data-ask">
+              <label for="data-ask-input" class="sr-only">Your question</label>
+              <textarea id="data-ask-input" rows="3"
+                placeholder="Ask a question of the selected sources."
+                aria-describedby="data-ask-hint"></textarea>
+              <p id="data-ask-hint" class="data-hint">
+                Read-only. The question and the table names go to the model; your
+                data does not.
+              </p>
+              <div class="data-ask-actions">
+                <button id="data-ask-submit" type="submit">Ask</button>
+                <button id="data-cancel" type="button" hidden>Cancel</button>
+              </div>
+            </form>
+
+            <div id="data-progress" class="data-progress" role="status" aria-live="polite" hidden>
+              <span id="data-progress-state">Queued</span>
+              <span id="data-progress-detail"></span>
+            </div>
+
+            <div id="data-disconnected" class="data-notice data-notice--warn" role="status" aria-live="polite" hidden>
+              <p>The live connection dropped. Reconnecting where it left off.</p>
+            </div>
+
+            <form id="data-clarification" class="data-notice data-notice--ask" hidden>
+              <p id="data-clarification-question"></p>
+              <div id="data-clarification-options" role="group" aria-label="Suggested answers"></div>
+              <label for="data-clarification-input" class="sr-only">Your answer</label>
+              <input id="data-clarification-input" type="text" placeholder="Your answer">
+              <button type="submit">Answer</button>
+            </form>
+
+            <div id="data-refusal" class="data-notice data-notice--refused" role="alert" hidden>
+              <h3>Not run</h3>
+              <p id="data-refusal-reason"></p>
+              <p id="data-refusal-detail" class="data-hint"></p>
+            </div>
+
+            <div id="data-error" class="data-notice data-notice--error" role="alert" hidden>
+              <p id="data-error-message"></p>
+              <button id="data-error-retry" type="button">Try again</button>
+            </div>
+
+            <div id="data-expired" class="data-notice data-notice--warn" role="status" hidden>
+              <p>This result has expired. Its receipts and audit trail remain.</p>
+            </div>
+
+            <div id="data-result" class="data-result" hidden>
+              <div id="data-truncated" class="data-notice data-notice--warn" role="status" hidden>
+                <p id="data-truncated-detail"></p>
+              </div>
+              <div class="data-table-scroll">
+                <table id="data-table" class="data-table">
+                  <caption id="data-table-caption" class="sr-only">Query result</caption>
+                  <thead></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <details id="data-details" class="data-details">
+                <summary>How this was answered</summary>
+                <h4>Query</h4>
+                <pre id="data-sql" class="data-sql"></pre>
+                <h4>Sources read</h4>
+                <ul id="data-receipts" role="list"></ul>
+                <h4>Usage</h4>
+                <p id="data-usage"></p>
+                <p><a id="data-audit-link" href="#">Audit trail for this run</a></p>
+              </details>
+            </div>
+          </section>
+        </div>
+      </div>
+
       <div id="panel-chart" role="tabpanel" aria-labelledby="tab-chart" aria-label="Charts" hidden>
         <div id="chart-loading" class="chart-state-overlay" aria-live="polite" hidden>
           <div class="chart-skeleton"></div>

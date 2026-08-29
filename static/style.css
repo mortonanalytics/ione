@@ -3865,3 +3865,284 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   gap: var(--space-2, 8px);
   margin-top: var(--space-2, 8px);
 }
+
+/* ── Data Query ───────────────────────────────────────────────────────────
+ *
+ * A two-column layout: sources on the left, the question and its answer on
+ * the right. Kept visually distinct from the conversation panel because they
+ * are different surfaces reaching different systems, and a person should be
+ * able to tell at a glance which one they are looking at.
+ */
+
+.data-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  gap: 1rem;
+  height: 100%;
+  min-height: 0;
+}
+
+.data-sidebar {
+  border-right: 1px solid var(--border, #2a2f3a);
+  padding: 0.75rem;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.data-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.data-heading {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.data-empty,
+.data-hint {
+  font-size: 0.8rem;
+  opacity: 0.75;
+  line-height: 1.4;
+}
+
+#data-source-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.data-source {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border-subtle, #232833);
+}
+
+.data-source label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.data-source-name {
+  flex: 1;
+}
+
+.data-source-alias {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+.data-source-entities {
+  margin: 0.25rem 0 0 1.5rem;
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+/* The assurance level is shown rather than hidden. A source relay could only
+ * take an operator's word for is a different thing from one it verified, and
+ * flattening that distinction would be the wrong kind of tidy. */
+.data-source-assurance {
+  display: inline-block;
+  margin: 0.25rem 0 0 1.5rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  background: var(--surface-2, #232833);
+  opacity: 0.85;
+}
+
+.data-limits {
+  margin-top: 1rem;
+  font-size: 0.85rem;
+}
+
+.data-limits label {
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.data-limits input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.data-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.data-ask textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font: inherit;
+}
+
+.data-ask-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.data-progress {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.9rem;
+}
+
+#data-progress-state {
+  font-weight: 600;
+}
+
+#data-progress-detail {
+  opacity: 0.7;
+  font-size: 0.85rem;
+}
+
+.data-notice {
+  padding: 0.6rem 0.75rem;
+  border-radius: 4px;
+  border-left: 3px solid var(--border, #2a2f3a);
+  background: var(--surface-2, #1c2029);
+}
+
+.data-notice p {
+  margin: 0 0 0.35rem;
+}
+
+.data-notice--warn   { border-left-color: #c9a227; }
+.data-notice--ask    { border-left-color: #3b82f6; }
+/* A refusal is the system working, not a crash. Amber, not red. */
+.data-notice--refused { border-left-color: #c9a227; }
+.data-notice--error  { border-left-color: #dc4c4c; }
+
+.data-notice--refused h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+#data-clarification-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+#data-clarification-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 0.5rem;
+}
+
+.data-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 0;
+}
+
+/* Wide results scroll inside their own container. The panel never scrolls
+ * sideways, because a horizontally scrolling page loses the tab bar. */
+.data-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.data-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: 0.85rem;
+}
+
+.data-table th,
+.data-table td {
+  border: 1px solid var(--border-subtle, #232833);
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.data-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-2, #1c2029);
+  white-space: nowrap;
+}
+
+.data-col-type {
+  display: block;
+  font-weight: 400;
+  font-size: 0.7rem;
+  opacity: 0.6;
+}
+
+/* Numbers right-aligned and tabular, so digits line up column-wise and a
+ * decimal that came back exact still reads as exact. */
+.data-cell-numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-details {
+  font-size: 0.85rem;
+}
+
+.data-details h4 {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.data-sql {
+  margin: 0;
+  padding: 0.5rem;
+  background: var(--surface-2, #1c2029);
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#data-receipts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.8rem;
+}
+
+#data-receipts li {
+  padding: 0.15rem 0;
+}
+
+/* One column below the breakpoint: a two-column layout on a phone leaves both
+ * columns too narrow to read. */
+@media (max-width: 800px) {
+  .data-layout {
+    grid-template-columns: 1fr;
+  }
+  .data-sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--border, #2a2f3a);
+    max-height: 40vh;
+  }
+}
+
+/* Keyboard focus stays visible on every control in this panel. */
+#panel-data :is(button, input, textarea, summary, a):focus-visible {
+  outline: 2px solid var(--focus, #3b82f6);
+  outline-offset: 2px;
+}

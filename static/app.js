@@ -652,6 +652,10 @@ function setActiveWorkspace(ws) {
   probePoliciesAccess(ws.id);
   // Tokens tab visibility: org-scoped service_accounts:manage probe (cached).
   probeTokensAccess();
+  // Data Query tab visibility: probe the relay sources endpoint (cached). A
+  // deployment without relay answers 404 and a caller without data:query
+  // answers 403; either hides the tab rather than showing one that errors.
+  probeDataQueryAccess(ws.id);
   renderActivationTracker(ws);
 }
 
@@ -1070,6 +1074,7 @@ const tabRoles         = document.getElementById('tab-roles');
 const tabPolicies      = document.getElementById('tab-policies');
 const tabTokens        = document.getElementById('tab-tokens');
 const tabCatalog       = document.getElementById('tab-catalog');
+const tabData          = document.getElementById('tab-data');
 const panelCatalog     = document.getElementById('panel-catalog');
 const panelChat        = document.getElementById('panel-chat');
 const panelMap         = document.getElementById('panel-map');
@@ -1084,6 +1089,7 @@ const panelAudit       = document.getElementById('panel-audit');
 const panelRoles       = document.getElementById('panel-roles');
 const panelPolicies    = document.getElementById('panel-policies');
 const panelTokens      = document.getElementById('panel-tokens');
+const panelData        = document.getElementById('panel-data');
 
 let activeTab = 'chat'; // 'chat' | 'map' | 'chart' | 'table' | 'document' | 'connectors' | 'signals' | 'survivors' | 'approvals' | 'audit'
 
@@ -1159,6 +1165,15 @@ function switchTab(name) {
   tabTokens.setAttribute('aria-selected', String(name === 'tokens'));
   tabTokens.classList.toggle('tab--active', name === 'tokens');
   panelTokens.hidden = name !== 'tokens';
+
+  tabData.setAttribute('aria-selected', String(name === 'data'));
+  tabData.classList.toggle('tab--active', name === 'data');
+  panelData.hidden = name !== 'data';
+  if (name === 'data') {
+    loadDataSources();
+  } else {
+    closeDataStream();
+  }
 
   if (name === 'catalog' && activeWorkspace) {
     loadCatalog();
@@ -1240,6 +1255,13 @@ const TAB_REGISTRY = [
   { id: 'approvals',  el: tabApprovals,  show: (p) => p.approvalsPending > 0 },
   { id: 'audit',      el: tabAudit,      always: true },
 ];
+
+// The Data Query tab is outside TAB_REGISTRY for the same reason Roles is:
+// its visibility comes from a probe (probeDataQueryAccess), not from the
+// workspace panels block. A deployment with no relay configured, or a caller
+// without `data:query`, never sees the tab at all -- rather than seeing one
+// that errors when clicked.
+tabData.addEventListener('click', () => switchTab('data'));
 
 TAB_REGISTRY.forEach((t) => {
   t.el.addEventListener('click', () => switchTab(t.id));
@@ -5644,6 +5666,7 @@ tokensRefreshBtn.addEventListener('click', loadTokens);
       probeRolesAccess(initial.id);
       probePoliciesAccess(initial.id);
       probeTokensAccess();
+      probeDataQueryAccess(initial.id);
     } else {
       workspaceNameEl.textContent = 'No workspaces';
     }
@@ -6208,3 +6231,534 @@ document.addEventListener('click', (ev) => {
   btn.textContent = 'Copied';
   setTimeout(() => { btn.textContent = orig; }, 1400);
 });
+
+/* ── Data Query ───────────────────────────────────────────────────────────
+ *
+ * A separate surface from the conversation composer, deliberately. The two
+ * reach different systems and fail in different ways, and overloading one
+ * input to mean both would make "why did this happen" harder to answer for
+ * both of them.
+ *
+ * Every request goes to IONe. There is no relay endpoint in this file and no
+ * relay credential: the proxy routes hold those server-side, which is what
+ * lets the page be a static asset with nothing to leak.
+ */
+
+const dataSourceList        = document.getElementById('data-source-list');
+const dataSourcesEmpty      = document.getElementById('data-sources-empty');
+const dataRefreshSources    = document.getElementById('data-refresh-sources');
+const dataAskForm           = document.getElementById('data-ask-form');
+const dataAskInput          = document.getElementById('data-ask-input');
+const dataAskSubmit         = document.getElementById('data-ask-submit');
+const dataCancelBtn         = document.getElementById('data-cancel');
+const dataProgress          = document.getElementById('data-progress');
+const dataProgressState     = document.getElementById('data-progress-state');
+const dataProgressDetail    = document.getElementById('data-progress-detail');
+const dataDisconnected      = document.getElementById('data-disconnected');
+const dataClarification     = document.getElementById('data-clarification');
+const dataClarificationQ    = document.getElementById('data-clarification-question');
+const dataClarificationOpts = document.getElementById('data-clarification-options');
+const dataClarificationIn   = document.getElementById('data-clarification-input');
+const dataRefusal           = document.getElementById('data-refusal');
+const dataRefusalReason     = document.getElementById('data-refusal-reason');
+const dataRefusalDetail     = document.getElementById('data-refusal-detail');
+const dataError             = document.getElementById('data-error');
+const dataErrorMessage      = document.getElementById('data-error-message');
+const dataErrorRetry        = document.getElementById('data-error-retry');
+const dataExpired           = document.getElementById('data-expired');
+const dataResult            = document.getElementById('data-result');
+const dataTruncated         = document.getElementById('data-truncated');
+const dataTruncatedDetail   = document.getElementById('data-truncated-detail');
+const dataTable             = document.getElementById('data-table');
+const dataTableCaption      = document.getElementById('data-table-caption');
+const dataDetails           = document.getElementById('data-details');
+const dataSql               = document.getElementById('data-sql');
+const dataReceipts          = document.getElementById('data-receipts');
+const dataUsage             = document.getElementById('data-usage');
+const dataAuditLink         = document.getElementById('data-audit-link');
+const dataLimitRows         = document.getElementById('data-limit-rows');
+const dataLimitSeconds      = document.getElementById('data-limit-seconds');
+
+const dataQueryAccessByWs = new Map();
+let dataSources = [];
+let dataSelected = new Set();
+let dataCurrentRunId = null;
+let dataEventSource = null;
+// The last event this browser saw. Sent on reconnect so relay replays exactly
+// what was missed rather than starting over.
+let dataLastEventId = null;
+
+/// Probe whether this caller has a Data Query surface at all. A deployment
+/// without relay answers 404 and a caller without `data:query` answers 403;
+/// either way the tab stays hidden rather than appearing and failing.
+async function probeDataQueryAccess(wsId) {
+  if (dataQueryAccessByWs.has(wsId)) {
+    applyDataTabVisibility(wsId);
+    return;
+  }
+  try {
+    await apiFetch(`/api/v1/workspaces/${wsId}/relay/sources`, { skipErrorToast: true });
+    dataQueryAccessByWs.set(wsId, true);
+  } catch (err) {
+    if (err && (err.status === 403 || err.status === 404)) {
+      dataQueryAccessByWs.set(wsId, false);
+    }
+    // Anything else -- a timeout, a 502 -- leaves it undecided so the next
+    // activation retries rather than hiding a surface that exists.
+  }
+  applyDataTabVisibility(wsId);
+}
+
+function applyDataTabVisibility(wsId) {
+  if (!activeWorkspace || activeWorkspace.id !== wsId) return;
+  tabData.hidden = dataQueryAccessByWs.get(wsId) !== true;
+}
+
+async function loadDataSources() {
+  if (!activeWorkspace) return;
+  try {
+    const body = await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/relay/sources`
+    );
+    dataSources = (body && body.sources) || [];
+  } catch (_) {
+    dataSources = [];
+  }
+  renderDataSources();
+}
+
+function renderDataSources() {
+  dataSourceList.innerHTML = '';
+  dataSourcesEmpty.hidden = dataSources.length > 0;
+
+  dataSources.forEach((source) => {
+    const li = document.createElement('li');
+    li.className = 'data-source';
+
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = source.mappingId;
+    checkbox.checked = dataSelected.has(source.mappingId);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) dataSelected.add(source.mappingId);
+      else dataSelected.delete(source.mappingId);
+      dataAskSubmit.disabled = dataSelected.size === 0;
+    });
+
+    const name = document.createElement('span');
+    name.className = 'data-source-name';
+    name.textContent = source.displayName;
+
+    const alias = document.createElement('code');
+    alias.className = 'data-source-alias';
+    alias.textContent = source.alias;
+
+    label.append(checkbox, name, alias);
+    li.append(label);
+
+    // What is readable, from relay. The assurance level is shown because a
+    // source relay could only attest to is a different thing from one it
+    // verified, and hiding that difference would be the wrong kind of tidy.
+    if (Array.isArray(source.entities) && source.entities.length) {
+      const entities = document.createElement('p');
+      entities.className = 'data-source-entities';
+      entities.textContent = source.entities.join(', ');
+      li.append(entities);
+    }
+    if (source.assurance) {
+      const assurance = document.createElement('span');
+      assurance.className = 'data-source-assurance';
+      assurance.textContent = source.assurance.replace(/_/g, ' ');
+      li.append(assurance);
+    }
+
+    dataSourceList.append(li);
+  });
+
+  dataAskSubmit.disabled = dataSelected.size === 0;
+}
+
+function resetDataPanels() {
+  dataProgress.hidden = true;
+  dataDisconnected.hidden = true;
+  dataClarification.hidden = true;
+  dataRefusal.hidden = true;
+  dataError.hidden = true;
+  dataExpired.hidden = true;
+  dataResult.hidden = true;
+  dataTruncated.hidden = true;
+  dataCancelBtn.hidden = true;
+}
+
+function closeDataStream() {
+  if (dataEventSource) {
+    dataEventSource.close();
+    dataEventSource = null;
+  }
+}
+
+function setDataProgress(state, detail) {
+  dataProgress.hidden = false;
+  dataProgressState.textContent = state;
+  dataProgressDetail.textContent = detail || '';
+}
+
+dataRefreshSources?.addEventListener('click', () => loadDataSources());
+
+dataAskForm?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!activeWorkspace) return;
+
+  const ask = dataAskInput.value.trim();
+  if (!ask || dataSelected.size === 0) return;
+
+  resetDataPanels();
+  closeDataStream();
+  dataLastEventId = null;
+  setDataProgress('Queued', '');
+  dataCancelBtn.hidden = false;
+  dataAskSubmit.disabled = true;
+
+  const limits = {};
+  if (dataLimitRows.value) limits.max_result_rows = Number(dataLimitRows.value);
+  if (dataLimitSeconds.value) limits.max_wall_seconds = Number(dataLimitSeconds.value);
+
+  try {
+    const body = await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/relay/ask`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ask,
+          mappingIds: Array.from(dataSelected),
+          limits: Object.keys(limits).length ? limits : undefined,
+        }),
+        skipErrorToast: true,
+      }
+    );
+    handleDataResponse(body);
+  } catch (err) {
+    showDataError(err);
+  } finally {
+    dataAskSubmit.disabled = dataSelected.size === 0;
+  }
+});
+
+function handleDataResponse(body) {
+  const run = body && body.run;
+  const outcome = (body && body.outcome) || {};
+  dataCurrentRunId = run && run.id;
+
+  switch (outcome.kind) {
+    case 'clarification_required':
+      showDataClarification(outcome);
+      break;
+    case 'refused':
+      showDataRefusal(outcome);
+      break;
+    case 'canceled':
+      setDataProgress('Cancelled', '');
+      dataCancelBtn.hidden = true;
+      break;
+    case 'failed':
+      showDataError(new ApiError(outcome.code || 'The question could not be answered.', 0));
+      break;
+    case 'succeeded':
+      loadDataResult();
+      break;
+    default:
+      // Still running. Watch the stream.
+      openDataStream();
+  }
+}
+
+function openDataStream() {
+  if (!activeWorkspace || !dataCurrentRunId) return;
+  closeDataStream();
+
+  // Reconnect resumes at the last id this browser saw, so a dropped
+  // connection replays exactly what was missed rather than the whole run.
+  const suffix = dataLastEventId ? `?lastEventId=${encodeURIComponent(dataLastEventId)}` : '';
+  const url =
+    `/api/v1/workspaces/${activeWorkspace.id}/relay/runs/${dataCurrentRunId}/events${suffix}`;
+  dataEventSource = new EventSource(url);
+
+  dataEventSource.onopen = () => {
+    dataDisconnected.hidden = true;
+  };
+  dataEventSource.onerror = () => {
+    // The browser reconnects on its own; this only says so.
+    dataDisconnected.hidden = false;
+  };
+  dataEventSource.onmessage = (event) => {
+    if (event.lastEventId) dataLastEventId = event.lastEventId;
+  };
+
+  ['queued', 'planning', 'executing'].forEach((kind) => {
+    dataEventSource.addEventListener(kind, (event) => {
+      if (event.lastEventId) dataLastEventId = event.lastEventId;
+      setDataProgress(kind.charAt(0).toUpperCase() + kind.slice(1), '');
+    });
+  });
+
+  dataEventSource.addEventListener('clarification_requested', async (event) => {
+    if (event.lastEventId) dataLastEventId = event.lastEventId;
+    await loadDataStatusForClarification();
+  });
+
+  dataEventSource.addEventListener('refused', (event) => {
+    if (event.lastEventId) dataLastEventId = event.lastEventId;
+    let payload = {};
+    try { payload = JSON.parse(event.data); } catch (_) {}
+    showDataRefusal({ reason: payload.reason, detail: '' });
+    closeDataStream();
+  });
+
+  dataEventSource.addEventListener('succeeded', (event) => {
+    if (event.lastEventId) dataLastEventId = event.lastEventId;
+    closeDataStream();
+    loadDataResult();
+  });
+
+  dataEventSource.addEventListener('canceled', () => {
+    setDataProgress('Cancelled', '');
+    dataCancelBtn.hidden = true;
+    closeDataStream();
+  });
+
+  dataEventSource.addEventListener('failed', (event) => {
+    let payload = {};
+    try { payload = JSON.parse(event.data); } catch (_) {}
+    showDataError(new ApiError(payload.code || 'The question could not be answered.', 0));
+    closeDataStream();
+  });
+
+  dataEventSource.addEventListener('end', () => closeDataStream());
+}
+
+async function loadDataStatusForClarification() {
+  if (!activeWorkspace || !dataCurrentRunId) return;
+  try {
+    const receipts = await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/relay/runs/${dataCurrentRunId}/receipts`,
+      { skipErrorToast: true }
+    );
+    const pending = (receipts.clarifications || []).find((c) => c.answer == null);
+    if (pending) {
+      showDataClarification({ seq: pending.seq, question: pending.question, options: pending.options });
+    }
+  } catch (_) {
+    // Leave the progress state alone; the stream will say more.
+  }
+}
+
+function showDataClarification(outcome) {
+  resetDataPanels();
+  dataClarification.hidden = false;
+  dataClarification.dataset.seq = outcome.seq;
+  dataClarificationQ.textContent = outcome.question || '';
+  dataClarificationOpts.innerHTML = '';
+  dataClarificationIn.value = '';
+
+  (outcome.options || []).forEach((option) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = option;
+    button.addEventListener('click', () => {
+      dataClarificationIn.value = option;
+    });
+    dataClarificationOpts.append(button);
+  });
+  dataClarificationIn.focus();
+}
+
+dataClarification?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!activeWorkspace || !dataCurrentRunId) return;
+  const answer = dataClarificationIn.value.trim();
+  if (!answer) return;
+
+  const seq = Number(dataClarification.dataset.seq);
+  try {
+    await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/relay/runs/${dataCurrentRunId}/clarification`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ seq, answer }),
+        skipErrorToast: true,
+      }
+    );
+    resetDataPanels();
+    // The same run continues. The original question is unchanged; the answer
+    // is added context, which is why the run keeps one identity.
+    setDataProgress('Planning', 'with your answer');
+    dataCancelBtn.hidden = false;
+    openDataStream();
+  } catch (err) {
+    showDataError(err);
+  }
+});
+
+dataCancelBtn?.addEventListener('click', async () => {
+  if (!activeWorkspace || !dataCurrentRunId) return;
+  try {
+    await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/relay/runs/${dataCurrentRunId}/cancel`,
+      { method: 'POST', skipErrorToast: true }
+    );
+    setDataProgress('Cancelling', '');
+  } catch (err) {
+    showDataError(err);
+  }
+});
+
+dataErrorRetry?.addEventListener('click', () => {
+  resetDataPanels();
+  dataAskForm.dispatchEvent(new Event('submit'));
+});
+
+function showDataRefusal(outcome) {
+  resetDataPanels();
+  dataRefusal.hidden = false;
+  // A refusal is the system working. It says which rule stopped the question
+  // rather than reporting a generic failure.
+  dataRefusalReason.textContent = humanizeRefusal(outcome.reason);
+  dataRefusalDetail.textContent = outcome.detail || '';
+}
+
+function humanizeRefusal(reason) {
+  const phrases = {
+    unauthorized: 'You are not authorized to read one of the selected sources.',
+    out_of_scope: 'The question reached outside what this workspace may read.',
+    unknown_relation: 'The question named a table that is not available here.',
+    mutation_attempted: 'The generated query would have changed data, so it was not run.',
+    side_effect_attempted: 'The generated query would have had a side effect, so it was not run.',
+    budget_exceeded: 'Answering would have exceeded the limits set for this workspace.',
+    policy_violation: 'The generated query broke a rule this workspace enforces.',
+    classification_violation: 'The answer would have carried data that may not leave.',
+    combination_forbidden: 'Those two sources may not be combined.',
+    schema_drift: 'A source changed shape and needs review before it can be queried.',
+    assurance_insufficient: 'A source cannot demonstrate it is read-only.',
+    clarification_unanswered: 'The question still needs an answer to continue.',
+    unparseable: 'The model did not produce a usable query.',
+    egress_forbidden: 'A source pointed somewhere this deployment may not reach.',
+  };
+  return phrases[reason] || 'The question was not run.';
+}
+
+function showDataError(err) {
+  resetDataPanels();
+  dataError.hidden = false;
+  dataErrorMessage.textContent =
+    (err && err.message) || 'The question could not be answered.';
+  dataCancelBtn.hidden = true;
+}
+
+async function loadDataResult() {
+  if (!activeWorkspace || !dataCurrentRunId) return;
+  resetDataPanels();
+
+  let result;
+  try {
+    result = await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/relay/runs/${dataCurrentRunId}/result`,
+      { skipErrorToast: true }
+    );
+  } catch (err) {
+    if (err && err.status === 404 && /expire/i.test(err.message || '')) {
+      dataExpired.hidden = false;
+      return;
+    }
+    showDataError(err);
+    return;
+  }
+
+  dataResult.hidden = false;
+  renderDataTable(result);
+
+  if (result.truncated) {
+    dataTruncated.hidden = false;
+    const reasons = (result.omissions || []).map((o) => o.reason).join('; ');
+    dataTruncatedDetail.textContent =
+      reasons || 'Some rows were left out because the result reached a limit.';
+  }
+
+  try {
+    const receipts = await apiFetch(
+      `/api/v1/workspaces/${activeWorkspace.id}/relay/runs/${dataCurrentRunId}/receipts`,
+      { skipErrorToast: true }
+    );
+    renderDataReceipts(receipts);
+  } catch (_) {
+    // The table is the answer; the receipts are the explanation. A missing
+    // explanation should not hide the answer.
+  }
+}
+
+function renderDataTable(result) {
+  const thead = dataTable.querySelector('thead');
+  const tbody = dataTable.querySelector('tbody');
+  thead.innerHTML = '';
+  tbody.innerHTML = '';
+
+  const headerRow = document.createElement('tr');
+  (result.schema || []).forEach((field) => {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.textContent = field.name;
+    const type = document.createElement('span');
+    type.className = 'data-col-type';
+    type.textContent = field.ty;
+    th.append(type);
+    headerRow.append(th);
+  });
+  thead.append(headerRow);
+
+  (result.rows || []).forEach((row) => {
+    const tr = document.createElement('tr');
+    row.forEach((cell) => {
+      const td = document.createElement('td');
+      // Every value is tagged with its type. Rendering the tag rather than
+      // the raw JSON is what keeps a large integer or an exact decimal from
+      // being reformatted by the browser on the way to the screen.
+      td.textContent = cell && cell.t === 'null' ? '' : String(cell?.v ?? '');
+      if (cell && (cell.t === 'int64' || cell.t === 'decimal' || cell.t === 'float64')) {
+        td.className = 'data-cell-numeric';
+      }
+      tr.append(td);
+    });
+    tbody.append(tr);
+  });
+
+  dataTableCaption.textContent =
+    `${result.row_count} row${result.row_count === 1 ? '' : 's'}` +
+    (result.truncated ? ', truncated' : '');
+}
+
+function renderDataReceipts(receipts) {
+  dataSql.textContent = receipts.sql || '';
+  dataReceipts.innerHTML = '';
+
+  (receipts.sources || []).forEach((entry) => {
+    const li = document.createElement('li');
+    const receipt = entry.receipt || {};
+    li.textContent =
+      `${entry.alias}: ${receipt.rows_returned ?? 0} rows, ` +
+      `${receipt.requests ?? 0} request${receipt.requests === 1 ? '' : 's'}`;
+    dataReceipts.append(li);
+  });
+
+  const usage = receipts.usage || {};
+  dataUsage.textContent =
+    `${usage.prompt_tokens ?? 0} prompt tokens, ` +
+    `${usage.completion_tokens ?? 0} completion tokens, ` +
+    `${usage.attempts ?? 0} model call${usage.attempts === 1 ? '' : 's'}`;
+
+  if (activeWorkspace && dataCurrentRunId) {
+    dataAuditLink.href =
+      `/api/v1/workspaces/${activeWorkspace.id}/relay/runs`;
+  }
+}
