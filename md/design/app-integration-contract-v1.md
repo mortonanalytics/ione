@@ -349,7 +349,7 @@ Rules that hold for all four:
 | `bounds` | `[west, south, east, north]` | no | Passed through verbatim, any JSON value accepted | **Specified** (shape not validated) |
 | `attribution` | string | no | Rendered as **text**; HTML is not interpreted | **Enforced** as optional |
 | `layer_name` | string | no | Overrides resource `name` in layer controls | **Enforced** as optional |
-| `opacity` | number | no | `0.0`–`1.0`; omitted ⇒ opaque. Range not clamped. | **Specified** |
+| `opacity` | number | no | `0.0`–`1.0`; omitted ⇒ opaque. Out-of-range values are clamped into the range; a non-finite value falls back to the default. | **Enforced** — `map_layers.rs` |
 | `vector_url` | string | no | Pass-through only; **v1 does not render it**. Validated to the same bar as `tile_url`; if unsafe it is **stripped to `null`** and the layer survives (an unrendered optional field must not cost a valid tile layer). | **Enforced** as optional |
 
 > **Scheme tightening, 2026-07-25 (issue #18).** At freeze time `tile_url`

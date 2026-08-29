@@ -182,10 +182,18 @@ fn extract_map_layer(peer_id: Uuid, peer_name: &str, resource: Value) -> Option<
                 .get("layer_name")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
-            opacity: meta.get("opacity").and_then(|v| v.as_f64()),
+            opacity: clamp_opacity(meta.get("opacity").and_then(|v| v.as_f64())),
             vector_url,
         },
     })
+}
+
+/// Hold a peer-supplied `opacity` to the 0.0–1.0 range contract v1 §4.2
+/// specifies. A non-finite value has no sensible end of the range to clamp to,
+/// so it falls back to the default instead of being coerced.
+fn clamp_opacity(raw: Option<f64>) -> Option<f64> {
+    raw.filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 1.0))
 }
 
 /// Same bar as `document_panels::validate_document_url`: https-only, then the
@@ -204,9 +212,51 @@ fn validate_layer_url(raw: &str, label: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_map_layer, validate_layer_url};
+    use super::{clamp_opacity, extract_map_layer, validate_layer_url};
     use serde_json::json;
     use uuid::Uuid;
+
+    /// Contract v1 §4.2 gives `opacity` a range of 0.0–1.0. It was documented
+    /// as **Specified** — relied on by consumers, never enforced — so a peer
+    /// sending 1.7 broke the map while IONe's own conformance kit told that
+    /// peer the value was out of range.
+    #[test]
+    fn peer_opacity_is_clamped_into_range() {
+        assert_eq!(clamp_opacity(Some(0.7)), Some(0.7));
+        assert_eq!(clamp_opacity(Some(1.7)), Some(1.0));
+        assert_eq!(clamp_opacity(Some(-0.4)), Some(0.0));
+        assert_eq!(clamp_opacity(Some(0.0)), Some(0.0));
+        assert_eq!(clamp_opacity(Some(1.0)), Some(1.0));
+    }
+
+    /// A non-finite value has no sensible end of the range to clamp to, so it
+    /// falls back to the default rather than being coerced to 0 or 1.
+    #[test]
+    fn a_non_finite_opacity_falls_back_to_the_default() {
+        assert_eq!(clamp_opacity(Some(f64::NAN)), None);
+        assert_eq!(clamp_opacity(Some(f64::INFINITY)), None);
+        assert_eq!(clamp_opacity(Some(f64::NEG_INFINITY)), None);
+        assert_eq!(clamp_opacity(None), None);
+    }
+
+    #[test]
+    fn an_out_of_range_opacity_reaches_the_layer_clamped() {
+        let layer = extract_map_layer(
+            Uuid::new_v4(),
+            "Peer",
+            json!({
+                "uri": "peer://layer/1",
+                "name": "Loud",
+                "metadata": {
+                    "ione_view": "map",
+                    "tile_url": "https://tiles.example.com/{z}/{x}/{y}.png",
+                    "opacity": 42.0,
+                },
+            }),
+        )
+        .expect("layer should render");
+        assert_eq!(layer.meta.opacity, Some(1.0));
+    }
 
     #[test]
     fn layer_urls_are_https_only_but_allow_on_prem_https() {
