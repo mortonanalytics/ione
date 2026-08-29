@@ -588,11 +588,18 @@ opportunistically and does not reject a slice for missing fields.
 
 A v1 slice targets **< 2 KiB** serialized.
 
-**Enforcement status: Enforced as truncation, not rejection.** At prompt-assembly
-time IONe truncates the serialized slice to `MAX_SLICE_BYTES = 2048` on a UTF-8
-character boundary (`src/services/federation.rs:1260-1280`). An oversized slice is
-**silently cut off**, not rejected — a peer that exceeds the limit loses the tail
-of its own capability description.
+**Enforcement status: Enforced as structural truncation, not rejection.** At
+prompt-assembly time IONe fits the slice under `MAX_SLICE_BYTES = 2048` by
+dropping whole `tool_index` entries from the end, and sets `_ione_truncated` to
+a sentence naming how many went (`src/services/federation.rs`, `fit_slice_body`).
+If there is no `tool_index` to drop, the slice falls back to its `summary` plus
+that marker. Every path emits parseable JSON, and every truncating path is
+visible to the model reading it and to the operator via a `warn!`.
+
+A peer that exceeds the limit still loses part of its own capability
+description — it is just no longer silent about it, and no longer cut
+mid-serialization. Until 2026-08-29 (#28) this was a byte-offset cut that could
+leave malformed JSON in the prompt.
 
 ### 5.2 Fallback when `slice://` is absent
 
@@ -893,7 +900,7 @@ conforming peer, fixed the same day (§8.1).
 | Table rows | 5 000 → 413 | **Enforced** (`src/services/table_data.rs` (`MAX_TABLE_ROWS`)) |
 | Table columns | 64 → 413 | **Enforced** (`src/services/table_data.rs` (`MAX_TABLE_COLUMNS`)) |
 | Chart `resources/read` body | 2 MiB → 413 | **Enforced** (`chart_data.rs`, §4.3) |
-| Context slice | 2 KiB | **Enforced as truncation** (§5.1) |
+| Context slice | 2 KiB | **Enforced as structural truncation** (§5.1) |
 | Catalog `description` | 512 chars | **Enforced as truncation** (`federation.rs:1282`) |
 | Pagination pages per list call | 50 | **Enforced** on manifest and panel paths (§8.1, §8.2) |
 

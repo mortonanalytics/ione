@@ -1781,12 +1781,21 @@ pub async fn assigned_prefix_for_org(
 /// Truncation is on a UTF-8 char boundary to prevent panics on multi-byte chars.
 const MAX_SLICE_BYTES: usize = 2048;
 
-pub fn sanitize_slice_text(input: &str) -> String {
-    // Strip sentinel substrings before insertion so a malicious peer cannot
-    // break out of the <<<IONE_PEER_SLICE ...>>> ... <<<END_IONE_PEER_SLICE>>> fence.
-    let stripped = input
+/// Strip sentinel substrings so a malicious peer cannot break out of the
+/// `<<<IONE_PEER_SLICE ...>>> ... <<<END_IONE_PEER_SLICE>>>` fence.
+///
+/// Separate from [`sanitize_slice_text`] because slice bodies are fitted
+/// structurally (see `fit_slice_body`) and must be measured after stripping but
+/// before any cut — otherwise the size check reads a string the cut already
+/// shortened, and never fires.
+fn strip_slice_sentinels(input: &str) -> String {
+    input
         .replace("<<<IONE_PEER_SLICE", "[removed-sentinel]")
-        .replace("<<<END_IONE_PEER_SLICE>>>", "[removed-sentinel]");
+        .replace("<<<END_IONE_PEER_SLICE>>>", "[removed-sentinel]")
+}
+
+pub fn sanitize_slice_text(input: &str) -> String {
+    let stripped = strip_slice_sentinels(input);
     // Truncate on a char boundary at or before MAX_SLICE_BYTES bytes.
     if stripped.len() <= MAX_SLICE_BYTES {
         return stripped;
@@ -1816,10 +1825,90 @@ pub fn sanitize_catalog_text(input: &str) -> String {
         .collect()
 }
 
+/// Marker key IONe sets on a slice it had to shorten. The value is a sentence,
+/// not a struct: its reader is a language model, and "12 of 40 entries were
+/// dropped" is something a model can act on where `{"dropped": 12}` is not.
+const SLICE_TRUNCATION_KEY: &str = "_ione_truncated";
+
+/// Fit a peer's slice under [`MAX_SLICE_BYTES`] without emitting malformed JSON.
+///
+/// A byte-offset cut on a serialized document leaves the model reasoning over a
+/// half-finished payload it cannot tell apart from a complete one (issue #28).
+/// Dropping whole `tool_index` entries keeps the result a smaller *true*
+/// document, and the marker says it is partial.
+fn fit_slice_body(peer_id: Uuid, body: &Value) -> String {
+    let full = strip_slice_sentinels(&body.to_string());
+    if full.len() <= MAX_SLICE_BYTES {
+        return full;
+    }
+    let original_len = full.len();
+
+    // Structural: drop `tool_index` entries from the end, longest tail first.
+    if let Some(tools) = body.get("tool_index").and_then(Value::as_array) {
+        let total = tools.len();
+        for keep in (0..total).rev() {
+            let mut candidate = body.clone();
+            let Some(object) = candidate.as_object_mut() else {
+                break;
+            };
+            object.insert("tool_index".into(), Value::Array(tools[..keep].to_vec()));
+            object.insert(
+                SLICE_TRUNCATION_KEY.into(),
+                Value::String(format!(
+                    "IONe dropped {} of {total} tool_index entries to fit the \
+                     {MAX_SLICE_BYTES}-byte slice limit.",
+                    total - keep
+                )),
+            );
+            let rendered = strip_slice_sentinels(&candidate.to_string());
+            if rendered.len() <= MAX_SLICE_BYTES {
+                tracing::warn!(
+                    %peer_id,
+                    original_bytes = original_len,
+                    final_bytes = rendered.len(),
+                    dropped_tool_index_entries = total - keep,
+                    "peer slice exceeded the size limit; dropped tool_index entries"
+                );
+                return rendered;
+            }
+        }
+    }
+
+    // Floor: keep the summary and the marker, shortening the summary on a
+    // character boundary until the whole document fits.
+    let mut summary: String = body
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    loop {
+        let candidate = json!({
+            "summary": summary,
+            SLICE_TRUNCATION_KEY: format!(
+                "IONe shortened this slice to fit the {MAX_SLICE_BYTES}-byte limit; \
+                 the peer's tool index and other fields were dropped."
+            ),
+        });
+        let rendered = strip_slice_sentinels(&candidate.to_string());
+        if rendered.len() <= MAX_SLICE_BYTES || summary.is_empty() {
+            tracing::warn!(
+                %peer_id,
+                original_bytes = original_len,
+                final_bytes = rendered.len(),
+                "peer slice exceeded the size limit; reduced to summary only"
+            );
+            return rendered;
+        }
+        // Drop a chunk of characters, never a byte, so multi-byte text survives.
+        let keep_chars = (summary.chars().count() * 9 / 10).saturating_sub(1);
+        summary = summary.chars().take(keep_chars).collect();
+    }
+}
+
 pub fn build_slice_context(entries: &[SliceEntry]) -> String {
     let mut grouped = HashMap::new();
     for entry in entries {
-        grouped.insert(entry.peer_id, sanitize_slice_text(&entry.body.to_string()));
+        grouped.insert(entry.peer_id, fit_slice_body(entry.peer_id, &entry.body));
     }
     grouped
         .into_iter()
@@ -1864,6 +1953,77 @@ mod tests {
             Some(json!("legacy"))
         );
         assert_eq!(next_cursor(&json!({ "tools": [], "cursor": null })), None);
+    }
+
+    /// A slice cut at a byte offset is no longer JSON, and the model has no way
+    /// to tell a smaller true statement from a malformed one. This is the test
+    /// that fails against byte truncation.
+    #[test]
+    fn an_oversized_slice_stays_parseable_json() {
+        let tools: Vec<Value> = (0..60)
+            .map(|i| json!({ "name": format!("tool_{i}"), "description": "x".repeat(80) }))
+            .collect();
+        let entries = vec![SliceEntry {
+            peer_id: Uuid::nil(),
+            body: json!({ "summary": "a wide peer", "tool_index": tools }),
+            fetched_at: Utc::now(),
+        }];
+
+        let context = build_slice_context(&entries);
+        let body = slice_body_of(&context);
+        assert!(
+            body.len() <= MAX_SLICE_BYTES,
+            "slice was not held under the limit: {} bytes",
+            body.len()
+        );
+        let parsed: Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("truncated slice is not JSON: {e}\n{body}"));
+        assert_eq!(parsed["summary"], json!("a wide peer"));
+        assert!(
+            parsed["_ione_truncated"].is_string(),
+            "a truncated slice must say so: {parsed}"
+        );
+        let entries_kept = parsed["tool_index"].as_array().map_or(0, Vec::len);
+        assert!(entries_kept < 60, "nothing was dropped");
+    }
+
+    /// The floor: no `tool_index` to drop, so only the summary can give.
+    #[test]
+    fn an_oversized_slice_with_nothing_structural_to_drop_still_parses() {
+        let entries = vec![SliceEntry {
+            peer_id: Uuid::nil(),
+            body: json!({ "summary": "y".repeat(4000), "domain_tags": ["a", "b"] }),
+            fetched_at: Utc::now(),
+        }];
+        let body = slice_body_of(&build_slice_context(&entries));
+        assert!(body.len() <= MAX_SLICE_BYTES, "{} bytes", body.len());
+        let parsed: Value =
+            serde_json::from_str(&body).unwrap_or_else(|e| panic!("not JSON: {e}\n{body}"));
+        assert!(parsed["_ione_truncated"].is_string());
+        assert!(parsed["summary"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+
+    /// The common case must be byte-identical to what it was.
+    #[test]
+    fn a_slice_under_the_limit_is_untouched() {
+        let body_value = json!({ "summary": "small", "tool_index": [{ "name": "t" }] });
+        let entries = vec![SliceEntry {
+            peer_id: Uuid::nil(),
+            body: body_value.clone(),
+            fetched_at: Utc::now(),
+        }];
+        let body = slice_body_of(&build_slice_context(&entries));
+        assert_eq!(body, body_value.to_string());
+        assert!(!body.contains("_ione_truncated"));
+    }
+
+    /// Pull the payload out from between the fence sentinels.
+    fn slice_body_of(context: &str) -> String {
+        let start = context.find(" untrusted>>>\n").expect("open fence") + " untrusted>>>\n".len();
+        let end = context
+            .find("\n<<<END_IONE_PEER_SLICE>>>")
+            .expect("close fence");
+        context[start..end].to_string()
     }
 
     #[test]
