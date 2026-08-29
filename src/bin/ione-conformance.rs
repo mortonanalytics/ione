@@ -1739,8 +1739,9 @@ async fn check_slice(client: &McpClient, peer_answered: bool) -> Surface {
         size <= 2048,
         format!("slice is {size} bytes (limit 2 048)"),
         format!(
-            "slice is {size} bytes. IONe truncates to MAX_SLICE_BYTES = 2 048 on a UTF-8 boundary \
-             and does not reject, so you silently lose the tail of your own description (§5.1)"
+            "slice is {size} bytes. IONe fits it under MAX_SLICE_BYTES = 2 048 by dropping whole \
+             tool_index entries and marking the payload `_ione_truncated`, rather than rejecting \
+             it — so the model sees a valid but partial description of what you can do (§5.1)"
         ),
     );
 
