@@ -29,6 +29,7 @@ test("retry keeps identity, new ask gets a new identity, and missing receipts re
   await expect(page.locator("#data-error")).toBeVisible();
   await page.locator("#data-ask-submit").click();
   await expect(page.locator("#data-table tbody")).toHaveText("18446744073709551615");
+  await expect(page.locator("#data-table tbody td")).toHaveClass("data-cell-numeric");
   await page.locator("#data-details summary").click();
   await expect(page.locator("#data-receipts")).toContainText("unknown rows");
   await expect(page.locator("#data-usage")).toContainText("unknown prompt tokens");
@@ -57,5 +58,6 @@ test("clarification continues the same run and SSE success retrieves its typed r
   await page.getByRole("button", { name: "All rows", exact: true }).click();
   await page.locator("#data-clarification button[type=submit]").click();
   await expect(page.locator("#data-table tbody")).toHaveText("18446744073709551615");
+  await expect(page.locator("#data-table tbody td")).toHaveClass("data-cell-numeric");
   expect(answered).toBe(true);
 });

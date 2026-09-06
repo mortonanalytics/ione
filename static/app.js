@@ -6735,7 +6735,7 @@ function renderDataTable(result) {
       // the raw JSON is what keeps a large integer or an exact decimal from
       // being reformatted by the browser on the way to the screen.
       td.textContent = cell && cell.t === 'null' ? '' : String(cell?.v ?? '');
-      if (cell && (cell.t === 'int64' || cell.t === 'decimal' || cell.t === 'float64')) {
+      if (cell && (cell.t === 'int64' || cell.t === 'uint64' || cell.t === 'decimal' || cell.t === 'float64')) {
         td.className = 'data-cell-numeric';
       }
       tr.append(td);
