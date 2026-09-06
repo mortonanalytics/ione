@@ -16,7 +16,7 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
@@ -74,7 +74,9 @@ fn map_error(error: RelayError) -> AppError {
         RelayError::NotConfigured => {
             AppError::NotFound("relay is not configured for this deployment".into())
         }
-        RelayError::Unreachable(_) => AppError::RelayUpstream("the data service is unreachable".into()),
+        RelayError::Unreachable(_) => {
+            AppError::RelayUpstream("the data service is unreachable".into())
+        }
         RelayError::Refused { code, message } => match code.as_str() {
             "not_found" | "gone" => AppError::NotFound(message),
             "forbidden" | "unauthorized" | "scope_invalid" | "scope_replay" => AppError::Forbidden,
@@ -238,6 +240,8 @@ pub async fn available_sources(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AskInput {
+    #[serde(default)]
+    pub request_id: Option<Uuid>,
     pub ask: String,
     /// Mapping ids, not connection ids. The browser names something IONe
     /// issued; the connection id it resolves to comes from the database.
@@ -309,17 +313,13 @@ pub async fn ask(
         limits: input.limits,
     };
 
-    // Idempotent per person, per workspace, per question. A double-submit from
-    // a reconnecting browser returns the original run rather than paying twice.
     let idempotency_key = {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(workspace_id.as_bytes());
         h.update(ctx.user_id.as_bytes());
-        h.update(input.ask.trim().as_bytes());
-        for id in &used {
-            h.update(id.as_bytes());
-        }
+        h.update(input.request_id.unwrap_or_else(Uuid::new_v4).as_bytes());
+        h.update(serde_json::to_vec(&request).map_err(|e| AppError::Internal(e.into()))?);
         hex::encode(h.finalize())
     };
 
@@ -341,35 +341,39 @@ pub async fn ask(
             .and_then(|o| o.get("kind"))
             .and_then(|k| k.as_str())
             .unwrap_or("started");
-        let _ = repo
-            .record_run(
-                ctx.org_id,
-                workspace_id,
-                ctx.user_id,
-                run_id,
-                outcome,
-                &used,
-                response
-                    .get("outcome")
-                    .and_then(|o| o.get("rows"))
-                    .and_then(|r| r.as_i64()),
-                response
-                    .get("outcome")
-                    .and_then(|o| o.get("truncated"))
-                    .and_then(|t| t.as_bool())
-                    .unwrap_or(false),
-                response
-                    .get("outcome")
-                    .and_then(|o| o.get("reason"))
-                    .and_then(|r| r.as_str()),
-                response
-                    .get("run")
-                    .and_then(|r| r.get("plan_hash"))
-                    .and_then(|h| h.as_str()),
-                None,
-                serde_json::json!({}),
-            )
-            .await;
+        repo.record_run(
+            ctx.org_id,
+            workspace_id,
+            ctx.user_id,
+            run_id,
+            outcome,
+            &used,
+            response
+                .get("outcome")
+                .and_then(|o| o.get("rows"))
+                .and_then(|r| r.as_i64()),
+            response
+                .get("outcome")
+                .and_then(|o| o.get("truncated"))
+                .and_then(|t| t.as_bool())
+                .unwrap_or(false),
+            response
+                .get("outcome")
+                .and_then(|o| o.get("reason"))
+                .and_then(|r| r.as_str()),
+            response
+                .get("run")
+                .and_then(|r| r.get("plan_hash"))
+                .and_then(|h| h.as_str()),
+            None,
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(AppError::Internal)?;
+    } else {
+        return Err(AppError::RelayUpstream(
+            "the data service returned no run identity".into(),
+        ));
     }
 
     Ok(Json(response))
@@ -386,13 +390,10 @@ async fn authorize_run(
     ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     require_permission(ctx, &state.pool, workspace_id, DATA_QUERY).await?;
 
-    let links = RelayMappingRepo::new(state.pool.clone())
-        .recent_runs(ctx.org_id, workspace_id, 500)
+    let known = RelayMappingRepo::new(state.pool.clone())
+        .has_run(ctx.org_id, workspace_id, ctx.user_id, run_id)
         .await
         .map_err(AppError::Internal)?;
-    let known = links
-        .iter()
-        .any(|l| l.relay_run_id == run_id && l.user_id == ctx.user_id);
     if !known {
         // The same not-found a nonexistent run gets, so a caller cannot learn
         // which run ids exist by asking.
@@ -442,7 +443,12 @@ pub async fn answer_clarification(
 ) -> Result<Json<serde_json::Value>, AppError> {
     authorize_run(&state, &ctx, workspace_id, run_id).await?;
     relay(&state)?
-        .answer_clarification(&scope_for(&ctx, workspace_id), run_id, input.seq, &input.answer)
+        .answer_clarification(
+            &scope_for(&ctx, workspace_id),
+            run_id,
+            input.seq,
+            &input.answer,
+        )
         .await
         .map(Json)
         .map_err(map_error)
@@ -490,15 +496,20 @@ pub async fn run_events(
     Extension(ctx): Extension<AuthContext>,
     Path((workspace_id, run_id)): Path<(Uuid, Uuid)>,
     Query(query): Query<EventsQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     authorize_run(&state, &ctx, workspace_id, run_id).await?;
 
+    let last_event_id = match headers.get("last-event-id") {
+        Some(value) => Some(
+            value
+                .to_str()
+                .map_err(|_| AppError::BadRequest("invalid event cursor".into()))?,
+        ),
+        None => query.last_event_id.as_deref(),
+    };
     let upstream = relay(&state)?
-        .events(
-            &scope_for(&ctx, workspace_id),
-            run_id,
-            query.last_event_id.as_deref(),
-        )
+        .events(&scope_for(&ctx, workspace_id), run_id, last_event_id)
         .await
         .map_err(map_error)?;
 

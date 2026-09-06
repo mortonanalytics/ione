@@ -191,6 +191,28 @@ impl RelayMappingRepo {
         Ok(id)
     }
 
+    pub async fn has_run(
+        &self,
+        org_id: Uuid,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        run_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM relay_run_links
+             WHERE org_id = $1 AND workspace_id = $2 AND user_id = $3 AND relay_run_id = $4)",
+        )
+        .bind(org_id)
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(run_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(exists)
+    }
+
     pub async fn recent_runs(
         &self,
         org_id: Uuid,

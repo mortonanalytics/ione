@@ -6406,6 +6406,8 @@ function setDataProgress(state, detail) {
 
 dataRefreshSources?.addEventListener('click', () => loadDataSources());
 
+let dataPendingRequest = null;
+
 dataAskForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!activeWorkspace) return;
@@ -6424,20 +6426,28 @@ dataAskForm?.addEventListener('submit', async (event) => {
   if (dataLimitRows.value) limits.max_result_rows = Number(dataLimitRows.value);
   if (dataLimitSeconds.value) limits.max_wall_seconds = Number(dataLimitSeconds.value);
 
+  const request = {
+    ask,
+    mappingIds: Array.from(dataSelected),
+    limits: Object.keys(limits).length ? limits : undefined,
+  };
+  const fingerprint = JSON.stringify({ workspace: activeWorkspace.id, request });
+  if (!dataPendingRequest || dataPendingRequest.fingerprint !== fingerprint) {
+    dataPendingRequest = { fingerprint, id: crypto.randomUUID() };
+  }
+  request.requestId = dataPendingRequest.id;
+
   try {
     const body = await apiFetch(
       `/api/v1/workspaces/${activeWorkspace.id}/relay/ask`,
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          ask,
-          mappingIds: Array.from(dataSelected),
-          limits: Object.keys(limits).length ? limits : undefined,
-        }),
+        body: JSON.stringify(request),
         skipErrorToast: true,
       }
     );
+    dataPendingRequest = null;
     handleDataResponse(body);
   } catch (err) {
     showDataError(err);
@@ -6746,16 +6756,16 @@ function renderDataReceipts(receipts) {
     const li = document.createElement('li');
     const receipt = entry.receipt || {};
     li.textContent =
-      `${entry.alias}: ${receipt.rows_returned ?? 0} rows, ` +
-      `${receipt.requests ?? 0} request${receipt.requests === 1 ? '' : 's'}`;
+      `${entry.alias}: ${receipt.rows_returned ?? 'unknown'} rows, ` +
+      `${receipt.requests ?? 'unknown'} request${receipt.requests === 1 ? '' : 's'}`;
     dataReceipts.append(li);
   });
 
   const usage = receipts.usage || {};
   dataUsage.textContent =
-    `${usage.prompt_tokens ?? 0} prompt tokens, ` +
-    `${usage.completion_tokens ?? 0} completion tokens, ` +
-    `${usage.attempts ?? 0} model call${usage.attempts === 1 ? '' : 's'}`;
+    `${usage.prompt_tokens ?? 'unknown'} prompt tokens, ` +
+    `${usage.completion_tokens ?? 'unknown'} completion tokens, ` +
+    `${usage.attempts ?? 'unknown'} model call${usage.attempts === 1 ? '' : 's'}`;
 
   if (activeWorkspace && dataCurrentRunId) {
     dataAuditLink.href =

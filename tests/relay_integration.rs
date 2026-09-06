@@ -223,7 +223,11 @@ async fn workspace_relay_mappings_are_org_scoped() {
         .expect("parse url")
         .username("ione_app")
         .password("ione_app");
-    let Ok(restricted) = PgPoolOptions::new().max_connections(2).connect_with(options).await else {
+    let Ok(restricted) = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+    else {
         eprintln!("SKIP: the ione_app role is not reachable");
         return;
     };
@@ -491,7 +495,10 @@ async fn a_run_link_records_counts_and_no_values() {
     )
     .await
     .expect("record again");
-    assert_eq!(repo.recent_runs(org, ws, 10).await.expect("recent").len(), 1);
+    assert_eq!(
+        repo.recent_runs(org, ws, 10).await.expect("recent").len(),
+        1
+    );
 }
 
 // ─── the conversation surface is unchanged ───────────────────────────────────
@@ -535,8 +542,12 @@ async fn the_ollama_error_contract_is_unchanged() {
         if let Some(error) = body["error"].as_str() {
             if error.starts_with("ollama") {
                 assert!(
-                    ["ollama_unreachable", "ollama_upstream", "ollama_model_missing"]
-                        .contains(&error),
+                    [
+                        "ollama_unreachable",
+                        "ollama_upstream",
+                        "ollama_model_missing"
+                    ]
+                    .contains(&error),
                     "the ollama error contract changed: {error}"
                 );
             }
@@ -615,10 +626,7 @@ async fn the_static_assets_carry_no_relay_secret() {
             "x-relay-signature",
             "relay.sig.v1",
         ] {
-            assert!(
-                !body.contains(forbidden),
-                "{asset} carries {forbidden}"
-            );
+            assert!(!body.contains(forbidden), "{asset} carries {forbidden}");
         }
         for shape in ["postgres://", "AKIA", "-----BEGIN"] {
             assert!(!body.contains(shape), "{asset} carries {shape}");
@@ -631,4 +639,221 @@ async fn the_static_assets_carry_no_relay_secret() {
             );
         }
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn configured_relay_lifecycle_preserves_request_identity_and_run_access() {
+    use std::sync::Arc;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    let (_unused, pool) = spawn_app().await;
+    let ws = ops_workspace_id(&pool).await;
+    let org = org_id(&pool).await;
+    let user = default_user_id(&pool).await;
+    set_member_permissions(&pool, ws, json!(["data:query", "workspace:write"])).await;
+    let mock = MockServer::start().await;
+    let (_, mut state) = ione::app_with_state(pool.clone()).await;
+    let mut config = (*state.config).clone();
+    config.relay = Some(Arc::new(ione::config::RelayConfig {
+        base_url: mock.uri(),
+        deployment_id: Uuid::new_v4(),
+        runtime_token: "test-runtime".into(),
+        signing_key_id: "test-key".into(),
+        signing_key: "test-signing-key".into(),
+        callback_verification_key: "test-callback".into(),
+        default_model: "fixture-model".into(),
+        timeout_ms: 5000,
+    }));
+    state.relay = Some(Arc::new(
+        ione::services::relay_client::RelayClient::new(config.relay.clone().unwrap()).unwrap(),
+    ));
+    state.config = Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, ione::routes::router(state))
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let connection = Uuid::new_v4();
+    Mock::given(method("GET"))
+        .and(path("/v1/connections/available"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"connections":[{"connection_id":connection}]})),
+        )
+        .mount(&mock)
+        .await;
+    let mapping: Value = client
+        .post(format!("{base}/api/v1/workspaces/{ws}/relay/mappings"))
+        .json(&json!({"relayConnectionId":connection,"displayName":"Fixture","alias":"pg"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let sources: Value = client
+        .get(sources_url(&base, ws))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sources["sources"].as_array().unwrap().len(), 1);
+    let run = Uuid::new_v4();
+    Mock::given(method("POST"))
+        .and(path("/v1/runs"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"run":{"id":run},"outcome":{"kind":"clarification_required"}}),
+            ),
+        )
+        .mount(&mock)
+        .await;
+    let mut ask = json!({"requestId":Uuid::new_v4(),"ask":"Count rows","mappingIds":[mapping["id"]],"limits":{"max_result_rows":10}});
+    for _ in 0..2 {
+        client
+            .post(ask_url(&base, ws))
+            .json(&ask)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+    ask["limits"]["max_result_rows"] = json!(5);
+    client
+        .post(ask_url(&base, ws))
+        .json(&ask)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    ask["requestId"] = json!(Uuid::new_v4());
+    client
+        .post(ask_url(&base, ws))
+        .json(&ask)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let requests = mock.received_requests().await.unwrap();
+    let asks: Vec<_> = requests
+        .iter()
+        .filter(|r| r.url.path() == "/v1/runs")
+        .collect();
+    let key = |i: usize| {
+        asks[i]
+            .headers
+            .get("idempotency-key")
+            .unwrap()
+            .to_str()
+            .unwrap()
+    };
+    assert_eq!(key(0), key(1));
+    assert_ne!(key(1), key(2));
+    assert_ne!(key(2), key(3));
+    for request in &asks {
+        assert!(request.headers.contains_key("x-relay-signature"));
+        let scope: Value =
+            serde_json::from_str(request.headers["x-relay-scope"].to_str().unwrap()).unwrap();
+        assert_eq!(scope["workspace_id"], ws.to_string());
+        assert_eq!(scope["actor_id"], user.to_string());
+    }
+    sqlx::query("INSERT INTO relay_run_links (org_id,workspace_id,user_id,relay_run_id,outcome,mapping_ids,truncated,usage) SELECT $1,$2,$3,gen_random_uuid(),'started','{}',false,'{}' FROM generate_series(1,501)")
+        .bind(org).bind(ws).bind(user).execute(&pool).await.unwrap();
+    let repo = ione::repos::RelayMappingRepo::new(pool.clone());
+    assert!(repo.has_run(org, ws, user, run).await.unwrap());
+    assert!(!repo.has_run(org, ws, Uuid::new_v4(), run).await.unwrap());
+    assert!(!repo.has_run(org, Uuid::new_v4(), user, run).await.unwrap());
+    assert!(!repo.has_run(Uuid::new_v4(), ws, user, run).await.unwrap());
+    let run_url = format!("{base}/api/v1/workspaces/{ws}/relay/runs/{run}");
+    for suffix in ["", "/result", "/receipts"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/runs/{run}{suffix}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+            .mount(&mock)
+            .await;
+        client
+            .get(format!("{run_url}{suffix}"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+    for suffix in ["/clarification", "/cancel"] {
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/runs/{run}{suffix}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+            .mount(&mock)
+            .await;
+        client
+            .post(format!("{run_url}{suffix}"))
+            .json(&json!({"seq":1,"answer":"All rows"}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/runs/{run}/events")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("id: 8\nevent: succeeded\ndata: {}\n\n"),
+        )
+        .mount(&mock)
+        .await;
+    let events = client
+        .get(format!("{run_url}/events?lastEventId=1"))
+        .header("last-event-id", "7")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(events.contains("id: 8"));
+    let requests = mock.received_requests().await.unwrap();
+    let event_request = requests
+        .iter()
+        .find(|r| r.url.path().ends_with("/events"))
+        .unwrap();
+    assert_eq!(event_request.headers["last-event-id"], "7");
+    sqlx::query("CREATE FUNCTION reject_relay_link() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture reject'; END $$")
+        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_relay_link BEFORE INSERT ON relay_run_links FOR EACH ROW EXECUTE FUNCTION reject_relay_link()")
+        .execute(&pool).await.unwrap();
+    let status = client
+        .post(ask_url(&base, ws))
+        .json(&ask)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    sqlx::query("DROP TRIGGER reject_relay_link ON relay_run_links")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION reject_relay_link()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(status.is_server_error());
 }
