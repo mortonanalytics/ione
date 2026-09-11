@@ -559,6 +559,12 @@ function setActiveWorkspace(ws) {
   if (!activeWorkspace || activeWorkspace.id !== ws.id) {
     document.getElementById('data-source-form').reset();
     document.getElementById('data-source-status').textContent = '';
+    resetDatasetWorkspace();
+    closeDataStream();
+    dataCurrentRunId = null;
+    dataSelected.clear();
+    dataPendingRequest = null;
+    resetDataPanels();
   }
   if (workspaceEventSource) {
     workspaceEventSource.close();
@@ -567,6 +573,7 @@ function setActiveWorkspace(ws) {
 
   activeWorkspace = ws;
   window.activeWorkspace = ws;
+  if (activeTab === 'data') loadDataSources();
   if (isDemoWorkspace(ws) && !trackedDemoView) {
     trackedDemoView = true;
     track('demo_viewed', null, ws.id);
@@ -6322,6 +6329,8 @@ function applyDataTabVisibility(wsId) {
 
 async function loadDataSources() {
   if (!activeWorkspace) return;
+  loadDatasetDestinations();
+  loadDatasetLibrary();
   const sourceWorkspace = activeWorkspace.id;
   const sourceAdmin = document.getElementById('data-source-admin');
   sourceAdmin.hidden = true;
@@ -6332,10 +6341,12 @@ async function loadDataSources() {
 
   try {
     const body = await apiFetch(
-      `/api/v1/workspaces/${activeWorkspace.id}/relay/sources`
+      `/api/v1/workspaces/${sourceWorkspace}/relay/sources`
     );
+    if (!activeWorkspace || activeWorkspace.id !== sourceWorkspace) return;
     dataSources = (body && body.sources) || [];
   } catch (_) {
+    if (!activeWorkspace || activeWorkspace.id !== sourceWorkspace) return;
     dataSources = [];
   }
   renderDataSources();
@@ -6426,6 +6437,8 @@ dataAskForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!activeWorkspace) return;
 
+  const requestWorkspace = activeWorkspace.id;
+  document.getElementById('data-published').textContent = '';
   const ask = dataAskInput.value.trim();
   if (!ask || dataSelected.size === 0) return;
 
@@ -6445,7 +6458,18 @@ dataAskForm?.addEventListener('submit', async (event) => {
     mappingIds: Array.from(dataSelected),
     limits: Object.keys(limits).length ? limits : undefined,
   };
-  const fingerprint = JSON.stringify({ workspace: activeWorkspace.id, request });
+  if (document.getElementById('data-save-dataset').checked) {
+    const name = document.getElementById('data-dataset-name').value.trim();
+    const destinationId = document.getElementById('data-destination').value;
+    const ttlSeconds = Number(document.getElementById('data-dataset-ttl').value);
+    if (!name || !destinationId || !Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 3600) {
+      showDataError(new Error('Choose storage, a dataset name, and a valid retention period.'));
+      dataAskSubmit.disabled = false;
+      return;
+    }
+    request.publication = { destinationId, datasetName: name, ttlSeconds };
+  }
+  const fingerprint = JSON.stringify({ workspace: requestWorkspace, request });
   if (!dataPendingRequest || dataPendingRequest.fingerprint !== fingerprint) {
     dataPendingRequest = { fingerprint, id: crypto.randomUUID() };
   }
@@ -6453,7 +6477,7 @@ dataAskForm?.addEventListener('submit', async (event) => {
 
   try {
     const body = await apiFetch(
-      `/api/v1/workspaces/${activeWorkspace.id}/relay/ask`,
+      `/api/v1/workspaces/${requestWorkspace}/relay/ask`,
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -6461,12 +6485,13 @@ dataAskForm?.addEventListener('submit', async (event) => {
         skipErrorToast: true,
       }
     );
+    if (!activeWorkspace || activeWorkspace.id !== requestWorkspace) return;
     dataPendingRequest = null;
     handleDataResponse(body);
   } catch (err) {
-    showDataError(err);
+    if (activeWorkspace && activeWorkspace.id === requestWorkspace) showDataError(err);
   } finally {
-    dataAskSubmit.disabled = dataSelected.size === 0;
+    if (activeWorkspace && activeWorkspace.id === requestWorkspace) dataAskSubmit.disabled = dataSelected.size === 0;
   }
 });
 
@@ -6508,31 +6533,41 @@ function openDataStream() {
   const url =
     `/api/v1/workspaces/${activeWorkspace.id}/relay/runs/${dataCurrentRunId}/events${suffix}`;
   dataEventSource = new EventSource(url);
+  const stream = dataEventSource;
+  const workspace = activeWorkspace.id;
+  const run = dataCurrentRunId;
+  const isCurrent = () => activeWorkspace && activeWorkspace.id === workspace && dataCurrentRunId === run && dataEventSource === stream;
 
   dataEventSource.onopen = () => {
+    if (!isCurrent()) return;
     dataDisconnected.hidden = true;
   };
   dataEventSource.onerror = () => {
+    if (!isCurrent()) return;
     // The browser reconnects on its own; this only says so.
     dataDisconnected.hidden = false;
   };
   dataEventSource.onmessage = (event) => {
+    if (!isCurrent()) return;
     if (event.lastEventId) dataLastEventId = event.lastEventId;
   };
 
   ['queued', 'planning', 'executing'].forEach((kind) => {
     dataEventSource.addEventListener(kind, (event) => {
+      if (!isCurrent()) return;
       if (event.lastEventId) dataLastEventId = event.lastEventId;
       setDataProgress(kind.charAt(0).toUpperCase() + kind.slice(1), '');
     });
   });
 
   dataEventSource.addEventListener('clarification_requested', async (event) => {
+    if (!isCurrent()) return;
     if (event.lastEventId) dataLastEventId = event.lastEventId;
     await loadDataStatusForClarification();
   });
 
   dataEventSource.addEventListener('refused', (event) => {
+    if (!isCurrent()) return;
     if (event.lastEventId) dataLastEventId = event.lastEventId;
     let payload = {};
     try { payload = JSON.parse(event.data); } catch (_) {}
@@ -6541,18 +6576,21 @@ function openDataStream() {
   });
 
   dataEventSource.addEventListener('succeeded', (event) => {
+    if (!isCurrent()) return;
     if (event.lastEventId) dataLastEventId = event.lastEventId;
     closeDataStream();
     loadDataResult();
   });
 
   dataEventSource.addEventListener('canceled', () => {
+    if (!isCurrent()) return;
     setDataProgress('Cancelled', '');
     dataCancelBtn.hidden = true;
     closeDataStream();
   });
 
   dataEventSource.addEventListener('failed', (event) => {
+    if (!isCurrent()) return;
     let payload = {};
     try { payload = JSON.parse(event.data); } catch (_) {}
     showDataError(new ApiError(payload.code || 'The question could not be answered.', 0));
@@ -6683,15 +6721,19 @@ function showDataError(err) {
 
 async function loadDataResult() {
   if (!activeWorkspace || !dataCurrentRunId) return;
+  const resultWorkspace = activeWorkspace.id;
+  const resultRun = dataCurrentRunId;
+  loadDatasetLibrary(resultRun);
   resetDataPanels();
 
   let result;
   try {
     result = await apiFetch(
-      `/api/v1/workspaces/${activeWorkspace.id}/relay/runs/${dataCurrentRunId}/result`,
+      `/api/v1/workspaces/${resultWorkspace}/relay/runs/${resultRun}/result`,
       { skipErrorToast: true }
     );
   } catch (err) {
+    if (!activeWorkspace || activeWorkspace.id !== resultWorkspace || dataCurrentRunId !== resultRun) return;
     if (err && err.status === 404 && /expire/i.test(err.message || '')) {
       dataExpired.hidden = false;
       return;
@@ -6700,6 +6742,7 @@ async function loadDataResult() {
     return;
   }
 
+  if (!activeWorkspace || activeWorkspace.id !== resultWorkspace || dataCurrentRunId !== resultRun) return;
   dataResult.hidden = false;
   renderDataTable(result);
 
@@ -6712,10 +6755,10 @@ async function loadDataResult() {
 
   try {
     const receipts = await apiFetch(
-      `/api/v1/workspaces/${activeWorkspace.id}/relay/runs/${dataCurrentRunId}/receipts`,
+      `/api/v1/workspaces/${resultWorkspace}/relay/runs/${resultRun}/receipts`,
       { skipErrorToast: true }
     );
-    renderDataReceipts(receipts);
+    if (activeWorkspace && activeWorkspace.id === resultWorkspace && dataCurrentRunId === resultRun) renderDataReceipts(receipts);
   } catch (_) {
     // The table is the answer; the receipts are the explanation. A missing
     // explanation should not hide the answer.
@@ -6822,4 +6865,124 @@ dataSourceForm.addEventListener('submit', async (event) => {
     dataSourceForm.elements.password.value = '';
     submit.disabled = false;
   }
+});
+
+function resetDatasetWorkspace() {
+  document.getElementById('data-destination-form').reset();
+  document.getElementById('data-destination-admin').hidden = true;
+  document.getElementById('data-destination-status').textContent = '';
+  document.getElementById('data-publication').hidden = true;
+  document.getElementById('data-save-dataset').checked = false;
+  document.getElementById('data-publication-fields').hidden = true;
+  document.getElementById('data-dataset-name').value = '';
+  document.getElementById('data-dataset-ttl').value = '3600';
+  document.getElementById('data-destination').replaceChildren(new Option('Choose storage', ''));
+  document.getElementById('data-dataset-list').replaceChildren();
+  document.getElementById('data-dataset-status').textContent = '';
+  document.getElementById('data-published').textContent = '';
+}
+
+document.getElementById('data-save-dataset').addEventListener('change', (event) => {
+  document.getElementById('data-publication-fields').hidden = !event.target.checked;
+});
+
+async function loadDatasetDestinations() {
+  if (!activeWorkspace) return;
+  const workspace = activeWorkspace.id;
+  try {
+    const result = await apiFetch(`/api/v1/workspaces/${workspace}/relay/destinations`, { skipErrorToast: true });
+    if (!activeWorkspace || activeWorkspace.id !== workspace) return;
+    document.getElementById('data-publication').hidden = result.canPublish !== true;
+    document.getElementById('data-destination-admin').hidden = result.canManage !== true;
+    if (result.canPublish !== true) document.getElementById('data-save-dataset').checked = false;
+    const select = document.getElementById('data-destination');
+    const selected = select.value;
+    select.replaceChildren(new Option('Choose storage', ''));
+    (result.destinations || []).filter((d) => d.can_publish === true).forEach((d) => {
+      const option = new Option(d.name, d.id);
+      option.dataset.ttl = String(Math.min(3600, d.policy?.max_ttl_seconds || 3600));
+      select.add(option);
+    });
+    select.value = selected;
+    select.dispatchEvent(new Event('change'));
+  } catch (_) {
+    if (!activeWorkspace || activeWorkspace.id !== workspace) return;
+    document.getElementById('data-publication').hidden = true;
+    document.getElementById('data-save-dataset').checked = false;
+    document.getElementById('data-destination-admin').hidden = true;
+  }
+}
+
+async function loadDatasetLibrary(runId = null) {
+  if (!activeWorkspace) return;
+  const workspace = activeWorkspace.id;
+  const status = document.getElementById('data-dataset-status');
+  try {
+    const result = await apiFetch(`/api/v1/workspaces/${workspace}/relay/datasets`, { skipErrorToast: true });
+    if (!activeWorkspace || activeWorkspace.id !== workspace) return;
+    const list = document.getElementById('data-dataset-list');
+    list.replaceChildren();
+    (result.datasets || []).forEach((version) => {
+      const item = document.createElement('li');
+      const description = document.createElement('span');
+      description.textContent = `${version.dataset_name} — ${version.row_count} complete rows, ${version.column_count} columns. Expires ${new Date(version.expires_at).toLocaleString()}. `;
+      const link = document.createElement('a');
+      link.textContent = 'Download Arrow';
+      link.href = `/api/v1/workspaces/${encodeURIComponent(workspace)}/relay/datasets/${encodeURIComponent(version.dataset_id)}/versions/${encodeURIComponent(version.version_id)}/arrow`;
+      link.download = 'dataset.arrow';
+      item.append(description, link);
+      list.append(item);
+    });
+    status.textContent = (result.datasets || []).length ? '' : 'No saved datasets are available.';
+    if (runId) {
+      const published = await apiFetch(`/api/v1/workspaces/${workspace}/relay/runs/${runId}/dataset`, { skipErrorToast: true });
+      if (!activeWorkspace || activeWorkspace.id !== workspace || dataCurrentRunId !== runId) return;
+      document.getElementById('data-published').textContent = (published.datasets || []).map((d) => `Saved ${d.dataset_name}: ${d.row_count} complete rows, ${d.column_count} columns. The table below is a preview.`).join(' ');
+    }
+  } catch (_) {
+    if (!activeWorkspace || activeWorkspace.id !== workspace) return;
+    document.getElementById('data-dataset-list').replaceChildren();
+    status.textContent = 'Saved datasets could not be loaded. Refresh to retry.';
+  }
+}
+
+document.getElementById('data-datasets-refresh').addEventListener('click', () => {
+  loadDatasetDestinations();
+  loadDatasetLibrary();
+});
+
+document.getElementById('data-destination-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!activeWorkspace) return;
+  const workspace = activeWorkspace.id;
+  const form = event.target;
+  const fields = Object.fromEntries(new FormData(form));
+  const name = fields.name;
+  delete fields.name;
+  const policy = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, key === 'max_classification' ? value : Number(value)]));
+  const status = document.getElementById('data-destination-status');
+  const button = form.querySelector('button[type=submit]');
+  button.disabled = true;
+  try {
+    const created = await apiFetch(`/api/v1/workspaces/${workspace}/relay/destinations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, policy }), skipErrorToast: true });
+    if (!activeWorkspace || activeWorkspace.id !== workspace) return;
+    await loadDatasetDestinations();
+    if (!activeWorkspace || activeWorkspace.id !== workspace) return;
+    document.getElementById('data-destination').value = created.id;
+    form.reset();
+    status.textContent = 'Storage ready. Select Save dataset when asking your question.';
+  } catch (_) {
+    if (!activeWorkspace || activeWorkspace.id !== workspace) return;
+    await loadDatasetDestinations();
+    if (!activeWorkspace || activeWorkspace.id !== workspace) return;
+    status.textContent = 'Storage creation was not confirmed. Check the refreshed storage list before retrying.';
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById('data-destination').addEventListener('change', (event) => {
+  const ttl = document.getElementById('data-dataset-ttl');
+  ttl.max = event.target.selectedOptions[0]?.dataset.ttl || '3600';
+  ttl.value = String(Math.min(Number(ttl.value) || 3600, Number(ttl.max)));
 });

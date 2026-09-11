@@ -176,6 +176,26 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces/:id/relay/source-admin",
             get(relay::source_admin_status),
         )
+        .route(
+            "/api/v1/workspaces/:id/relay/destinations",
+            get(relay::dataset_destinations).post(relay::create_dataset_destination),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/datasets",
+            get(relay::dataset_list),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/dataset",
+            get(relay::run_datasets),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id",
+            get(relay::dataset_version),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id/arrow",
+            get(relay::dataset_arrow),
+        )
         .route("/api/v1/workspaces/:id/relay/ask", post(relay::ask))
         .route(
             "/api/v1/workspaces/:id/relay/runs/:run_id",

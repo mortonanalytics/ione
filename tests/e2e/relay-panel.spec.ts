@@ -121,3 +121,63 @@ test("switching workspace clears the source registration draft", async ({ page }
   await expect(form.locator("[name=password]")).toHaveValue("");
   await expect(form.locator("[name=host]")).toHaveValue("");
 });
+
+test("saved datasets show full counts beside a truncated preview and survive reload", async ({ page }) => {
+  const destination = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+  const dataset = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+  const version = "11111111-1111-1111-1111-111111111111";
+  const saved = { dataset_id: dataset, version_id: version, dataset_name: "Sales report", row_count: 4000, column_count: 3, expires_at: "2026-10-01T00:00:00Z" };
+  await page.route("**/relay/destinations", (route) => route.fulfill({ json: { canManage: true, canPublish: true, destinations: [{ id: destination, name: "Reports", can_publish: true }] } }));
+  await page.route("**/relay/datasets", (route) => route.fulfill({ json: { datasets: [saved] } }));
+  await page.route("**/relay/runs/*/dataset", (route) => route.fulfill({ json: { datasets: [saved] } }));
+  await page.route("**/relay/runs/*/result", (route) => route.fulfill({ json: { schema: [{ name: "n", ty: "int64" }], rows: [[{ t: "int64", v: "1" }]], row_count: 1, truncated: true, omissions: [{ reason: "Preview row limit" }] } }));
+  let submitted: any;
+  await page.route("**/relay/ask", (route) => { submitted = route.request().postDataJSON(); return route.fulfill({ json: { run: { id: run }, outcome: { kind: "succeeded" } } }); });
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await page.locator("#data-source-list input").check();
+  await page.locator("#data-save-dataset").check();
+  await page.locator("#data-dataset-name").fill("Sales report");
+  await page.locator("#data-destination").selectOption(destination);
+  await page.locator("#data-ask-input").fill("Total sales by customer");
+  await page.locator("#data-ask-submit").click();
+  await expect(page.locator("#data-published")).toContainText("4000 complete rows, 3 columns");
+  await expect(page.locator("#data-truncated")).toBeVisible();
+  expect(submitted.publication).toEqual({ destinationId: destination, datasetName: "Sales report", ttlSeconds: 3600 });
+  await expect(page.locator("#data-dataset-list a")).toHaveAttribute("href", `/api/v1/workspaces/${workspace}/relay/datasets/${dataset}/versions/${version}/arrow`);
+  await page.reload();
+  await page.locator("#tab-data").click();
+  await expect(page.locator("#data-dataset-list")).toContainText("4000 complete rows");
+  await expect(page.locator("#data-save-dataset")).not.toBeChecked();
+});
+
+test("storage creation uses bounded defaults and workspace changes discard drafts and stale results", async ({ page }) => {
+  const other = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+  let created: any;
+  await page.route("**/relay/destinations", async (route) => {
+    if (route.request().method() === "POST") {
+      created = route.request().postDataJSON();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return route.fulfill({ json: { id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" } });
+    }
+    return route.fulfill({ json: { canManage: true, canPublish: true, destinations: [] } });
+  });
+  await page.route("**/relay/datasets", (route) => route.fulfill({ json: { datasets: [] } }));
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await page.locator("#data-destination-admin summary").click();
+  await page.locator("#data-destination-form [name=name]").fill("Reports");
+  await page.locator("#data-save-dataset").check();
+  await page.locator("#data-dataset-name").fill("Private draft");
+  await page.locator("#data-destination-form button").click();
+  await expect.poll(() => created?.name).toBe("Reports");
+  expect(created.policy).toEqual({ max_rows: 5000, max_columns: 64, max_cells: 320000, max_bytes: 2097152, max_ttl_seconds: 3600, max_classification: "internal" });
+  expect(created).not.toHaveProperty("actorId");
+  await page.evaluate((id) => (window as any).setActiveWorkspace({ id, name: "Other", lifecycle: "continuous", closedAt: null }), other);
+  await expect(page.locator("#data-dataset-name")).toHaveValue("");
+  await expect(page.locator("#data-destination-form [name=name]")).toHaveValue("");
+  await expect(page.locator("#data-save-dataset")).not.toBeChecked();
+  await page.waitForTimeout(350);
+  await expect(page.locator("#data-destination-status")).toHaveText("");
+  await expect(page.locator("#data-destination")).toHaveValue("");
+});

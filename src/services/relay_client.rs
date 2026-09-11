@@ -75,10 +75,23 @@ pub struct SourceSelection {
     pub connection_id: Uuid,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    rename_all(deserialize = "camelCase", serialize = "snake_case"),
+    deny_unknown_fields
+)]
+pub struct Publication {
+    pub destination_id: Uuid,
+    pub dataset_name: String,
+    pub ttl_seconds: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateRun {
     pub ask: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication: Option<Publication>,
     pub sources: Vec<SourceSelection>,
     pub model: String,
     pub result_mode: String,
@@ -327,6 +340,62 @@ impl RelayClient {
             )
             .await?;
         serde_json::from_value(payload).map_err(|e| RelayError::Unexpected(e.to_string()))
+    }
+
+    pub async fn dataset_bytes(
+        &self,
+        scope: &RelayScope,
+        path: &str,
+    ) -> Result<Vec<u8>, RelayError> {
+        const MAX: usize = 64 * 1024 * 1024;
+        let (claims, signature) = self.sign(
+            "GET",
+            path,
+            scope,
+            &Uuid::new_v4().to_string(),
+            &Uuid::new_v4().to_string(),
+            chrono::Utc::now().timestamp(),
+            &[],
+        );
+        let mut response = self
+            .http
+            .get(format!("{}{}", self.config.base_url, path))
+            .bearer_auth(&self.config.runtime_token)
+            .header("x-relay-scope", claims)
+            .header("x-relay-signature", signature)
+            .send()
+            .await
+            .map_err(|_| RelayError::Unreachable("dataset unavailable".into()))?;
+        if !response.status().is_success() {
+            return Err(RelayError::Refused {
+                code: if response.status().as_u16() == 404 || response.status().as_u16() == 410 {
+                    "not_found"
+                } else {
+                    "forbidden"
+                }
+                .into(),
+                message: "dataset access was refused".into(),
+            });
+        }
+        if response.content_length().is_some_and(|n| n > MAX as u64) {
+            return Err(RelayError::Unexpected(
+                "dataset exceeds download limit".into(),
+            ));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| RelayError::Unreachable("dataset download interrupted".into()))?
+        {
+            if chunk.len() > MAX - body.len() {
+                return Err(RelayError::Unexpected(
+                    "dataset exceeds download limit".into(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     pub async fn create_run(

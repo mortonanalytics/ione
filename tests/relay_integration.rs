@@ -878,6 +878,11 @@ async fn source_onboarding_scopes_grants_and_scrubs_failures() {
         .as_array()
         .unwrap()
         .contains(&json!("data:sources:write")));
+    assert!(admin
+        .permissions
+        .as_array()
+        .unwrap()
+        .contains(&json!("data:datasets:write")));
     let analyst = ione::repos::RoleRepo::new(pool.clone())
         .upsert(ws, "source-analyst", 20)
         .await
@@ -1103,4 +1108,306 @@ async fn source_onboarding_scopes_grants_and_scrubs_failures() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires a migrated database"]
+async fn managed_datasets_preserve_publication_scope_download_and_current_mapping_access() {
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    let (_, pool) = spawn_app().await;
+    let ws = ops_workspace_id(&pool).await;
+    let org = org_id(&pool).await;
+    let user = default_user_id(&pool).await;
+    let mock = MockServer::start().await;
+    let (_, mut state) = ione::app_with_state(pool.clone()).await;
+    let mut config = (*state.config).clone();
+    let deployment = Uuid::new_v4();
+    config.relay = Some(Arc::new(ione::config::RelayConfig {
+        base_url: mock.uri(),
+        deployment_id: deployment,
+        runtime_token: "dataset-runtime".into(),
+        management_token: Some("dataset-management".into()),
+        signing_key_id: "fixture".into(),
+        signing_key: "fixture-key".into(),
+        callback_verification_key: "fixture-callback".into(),
+        default_model: "fixture-model".into(),
+        timeout_ms: 5000,
+    }));
+    state.relay = Some(Arc::new(
+        ione::services::relay_client::RelayClient::new(config.relay.clone().unwrap()).unwrap(),
+    ));
+    state.config = Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, ione::routes::router(state))
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let root = format!("{base}/api/v1/workspaces/{ws}/relay");
+    let destination = Uuid::new_v4();
+    let connection = Uuid::new_v4();
+    let run = Uuid::new_v4();
+    let dataset = Uuid::new_v4();
+    let version = Uuid::new_v4();
+    let policy = json!({"max_rows":5000,"max_columns":64,"max_cells":320000,"max_bytes":2097152,"max_ttl_seconds":3600,"max_classification":"internal"});
+    let create = json!({"name":"Reports","policy":policy});
+    Mock::given(method("POST"))
+        .and(path("/v1/destinations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":destination})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/destinations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"destinations":[{"id":destination,"name":"Reports","can_publish":true}]}),
+        ))
+        .mount(&mock)
+        .await;
+    set_member_permissions(&pool, ws, json!(["admin"])).await;
+    assert_eq!(
+        client
+            .post(format!("{root}/destinations"))
+            .json(&create)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert!(mock.received_requests().await.unwrap().is_empty());
+    set_member_permissions(
+        &pool,
+        ws,
+        json!(["data:query", "workspace:write", "data:datasets:write"]),
+    )
+    .await;
+    assert_eq!(
+        client
+            .post(format!("{root}/destinations"))
+            .json(&create)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let calls = mock.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&calls[0].body).unwrap();
+    assert_eq!(body["grant_creator"], true);
+    assert_eq!(body["policy"]["allow_redistribution"], false);
+    assert_eq!(
+        calls[0].headers["authorization"],
+        "Bearer dataset-management"
+    );
+    let signed: Value =
+        serde_json::from_str(calls[0].headers["x-relay-scope"].to_str().unwrap()).unwrap();
+    assert_eq!(signed["actor_id"], user.to_string());
+    assert_eq!(signed["service_account_id"], format!("ione:{org}"));
+    Mock::given(method("GET"))
+        .and(path("/v1/connections/available"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"connections":[{"connection_id":connection}]})),
+        )
+        .mount(&mock)
+        .await;
+    let mapping: Value = client
+        .post(format!("{root}/mappings"))
+        .json(&json!({"relayConnectionId":connection,"alias":"pg","displayName":"Orders"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/v1/runs"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"run":{"id":run},"outcome":{"kind":"succeeded"}})),
+        )
+        .mount(&mock)
+        .await;
+    let ask = json!({"ask":"Sales report","mappingIds":[mapping["id"]],"publication":{"destinationId":destination,"datasetName":"Quarterly","ttlSeconds":3600}});
+    set_member_permissions(&pool, ws, json!(["data:query", "workspace:write"])).await;
+    assert_eq!(
+        client
+            .post(format!("{root}/ask"))
+            .json(&ask)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    set_member_permissions(
+        &pool,
+        ws,
+        json!(["data:query", "workspace:write", "data:datasets:write"]),
+    )
+    .await;
+    assert_eq!(
+        client
+            .post(format!("{root}/ask"))
+            .json(&ask)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let calls = mock.received_requests().await.unwrap();
+    let sent = calls.iter().find(|r| r.url.path() == "/v1/runs").unwrap();
+    let body: Value = serde_json::from_slice(&sent.body).unwrap();
+    assert_eq!(
+        body["publication"],
+        json!({"destination_id":destination,"dataset_name":"Quarterly","ttl_seconds":3600})
+    );
+    let bytes = b"typed-arrow-body-fixture".to_vec();
+    let manifest = json!({"deployment_id":deployment,"tenant_id":org,"workspace_id":ws,"dataset_id":dataset,"version_id":version,"run_id":run,"dataset_name":"Quarterly","row_count":4000,"column_count":3,"byte_count":bytes.len(),"digest":format!("sha256:{}",hex::encode(Sha256::digest(&bytes))),"requires_source_access":true,"lineage":[{"connection_id":connection}]});
+    let remote = format!("/v1/datasets/{dataset}/versions/{version}");
+    let local = format!("{root}/datasets/{dataset}/versions/{version}");
+    Mock::given(method("GET"))
+        .and(path("/v1/datasets"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"datasets":[manifest]})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/runs/{run}/dataset")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"datasets":[manifest]})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(&remote))
+        .respond_with(ResponseTemplate::new(200).set_body_json(manifest.clone()))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{remote}/arrow")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(bytes.clone())
+                .set_delay(std::time::Duration::from_millis(120)),
+        )
+        .mount(&mock)
+        .await;
+    for url in [
+        format!("{root}/datasets"),
+        format!("{root}/runs/{run}/dataset"),
+    ] {
+        let result: Value = client
+            .get(url)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(result["datasets"][0]["row_count"], 4000);
+    }
+    assert_eq!(
+        client
+            .get(format!("{root}/runs/{}/dataset", Uuid::new_v4()))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = client.get(format!("{local}/arrow")).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
+    let pending = client.get(format!("{local}/arrow")).send();
+    let disable = async {
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        sqlx::query("UPDATE workspace_relay_mappings SET enabled=false WHERE id=$1")
+            .bind(Uuid::parse_str(mapping["id"].as_str().unwrap()).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+    };
+    let (response, _) = tokio::join!(pending, disable);
+    assert_eq!(response.unwrap().status(), StatusCode::NOT_FOUND);
+    let listed: Value = client
+        .get(format!("{root}/datasets"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["datasets"], json!([]));
+    assert_eq!(
+        client.get(&local).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    let mut shared = manifest;
+    shared["requires_source_access"] = json!(false);
+    mock.reset().await;
+    Mock::given(method("GET"))
+        .and(path(&remote))
+        .respond_with(ResponseTemplate::new(200).set_body_json(shared.clone()))
+        .mount(&mock)
+        .await;
+    assert_eq!(
+        client.get(&local).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    mock.reset().await;
+    Mock::given(method("GET"))
+        .and(path(&remote))
+        .respond_with(ResponseTemplate::new(200).set_body_json(shared.clone()))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{remote}/arrow")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"corrupt".to_vec()))
+        .mount(&mock)
+        .await;
+    assert_eq!(
+        client
+            .get(format!("{local}/arrow"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+    mock.reset().await;
+    Mock::given(method("GET"))
+        .and(path(&remote))
+        .respond_with(ResponseTemplate::new(200).set_body_json(shared))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{remote}/arrow")))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-length", "67108865"))
+        .mount(&mock)
+        .await;
+    assert_eq!(
+        client
+            .get(format!("{local}/arrow"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+    set_member_permissions(&pool, ws, json!([])).await;
+    assert_eq!(
+        client.get(&local).send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
 }

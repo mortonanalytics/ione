@@ -195,6 +195,21 @@
                 <p id="data-source-status" role="status"></p>
               </form>
             </details>
+            <details id="data-destination-admin" class="data-limits" hidden>
+              <summary>Create dataset storage</summary>
+              <form id="data-destination-form">
+                <label>Name <input name="name" required maxlength="128"></label>
+                <label>Maximum rows <input name="max_rows" type="number" min="1" max="5000" value="5000" required></label>
+                <label>Maximum columns <input name="max_columns" type="number" min="1" max="64" value="64" required></label>
+                <label>Maximum cells <input name="max_cells" type="number" min="1" max="320000" value="320000" required></label>
+                <label>Maximum bytes <input name="max_bytes" type="number" min="1" max="2097152" value="2097152" required></label>
+                <label>Maximum retention (seconds) <input name="max_ttl_seconds" type="number" min="1" max="3600" value="3600" required></label>
+                <label>Classification <select name="max_classification"><option value="internal">Internal</option><option value="public">Public</option></select></label>
+                <p class="data-hint">Encrypted storage in this workspace. Source permissions remain required when reading saved datasets.</p>
+                <button type="submit">Create storage</button>
+                <p id="data-destination-status" role="status"></p>
+              </form>
+            </details>
             <ul id="data-source-list" role="list" aria-label="Sources"></ul>
             <details class="data-limits">
               <summary>Limits for this question</summary>
@@ -218,12 +233,28 @@
                 Read-only. The question and the table names go to the model; your
                 data does not.
               </p>
+              <fieldset id="data-publication" hidden>
+                <legend>Dataset output</legend>
+                <label><input id="data-save-dataset" type="checkbox"> Save dataset</label>
+                <div id="data-publication-fields" hidden>
+                  <label>Name <input id="data-dataset-name" maxlength="128"></label>
+                  <label>Storage <select id="data-destination"><option value="">Choose storage</option></select></label>
+                  <label>Retention (seconds) <input id="data-dataset-ttl" type="number" min="1" max="3600" value="3600"></label>
+                </div>
+              </fieldset>
               <div class="data-ask-actions">
                 <button id="data-ask-submit" type="submit">Ask</button>
                 <button id="data-cancel" type="button" hidden>Cancel</button>
               </div>
             </form>
 
+            <section aria-label="Saved datasets">
+              <h2 class="data-heading">Saved datasets</h2>
+              <button id="data-datasets-refresh" type="button">Refresh datasets</button>
+              <p id="data-published" role="status"></p>
+              <ul id="data-dataset-list" role="list"></ul>
+              <p id="data-dataset-status" role="status"></p>
+            </section>
             <div id="data-progress" class="data-progress" role="status" aria-live="polite" hidden>
               <span id="data-progress-state">Queued</span>
               <span id="data-progress-detail"></span>

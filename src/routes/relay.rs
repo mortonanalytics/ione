@@ -241,6 +241,8 @@ pub async fn available_sources(
 #[serde(rename_all = "camelCase")]
 pub struct AskInput {
     #[serde(default)]
+    pub publication: Option<crate::services::relay_client::Publication>,
+    #[serde(default)]
     pub request_id: Option<Uuid>,
     pub ask: String,
     /// Mapping ids, not connection ids. The browser names something IONe
@@ -302,7 +304,11 @@ pub async fn ask(
         .as_ref()
         .ok_or_else(|| AppError::NotFound("relay is not configured".into()))?;
 
+    if input.publication.is_some() {
+        authorize_dataset_admin(&state, &ctx, workspace_id).await?;
+    }
     let request = CreateRun {
+        publication: input.publication,
         ask: input.ask.clone(),
         sources,
         model: config.default_model.clone(),
@@ -752,4 +758,299 @@ async fn authorize_source_admin(
         return Err(AppError::Forbidden);
     }
     Ok(())
+}
+
+async fn authorize_dataset_admin(
+    state: &AppState,
+    ctx: &AuthContext,
+    workspace_id: Uuid,
+) -> Result<(), AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
+    if ctx.is_service_account {
+        return Err(AppError::Forbidden);
+    }
+    let (permissions, _) = crate::repos::RoleRepo::new(state.pool.clone())
+        .effective_permissions(ctx.user_id, workspace_id)
+        .await
+        .map_err(AppError::Internal)?;
+    if !permissions.contains("data:datasets:write") {
+        return Err(AppError::Forbidden);
+    }
+    Ok(())
+}
+
+pub async fn dataset_destinations(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(workspace): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(&ctx, &state.pool, workspace, DATA_QUERY).await?;
+    let client = relay(&state)?;
+    let bytes = client
+        .dataset_bytes(&scope_for(&ctx, workspace), "/v1/destinations")
+        .await
+        .map_err(map_error)?;
+    let mut result: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| AppError::RelayUpstream("invalid destination metadata".into()))?;
+    if result
+        .get("destinations")
+        .and_then(|v| v.as_array())
+        .is_none_or(|v| v.len() > 100)
+    {
+        return Err(AppError::RelayUpstream(
+            "invalid destination metadata".into(),
+        ));
+    }
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(&ctx, &state.pool, workspace, DATA_QUERY).await?;
+    result["canManage"] = serde_json::json!(
+        client.source_management_enabled()
+            && authorize_dataset_admin(&state, &ctx, workspace)
+                .await
+                .is_ok()
+    );
+    result["canPublish"] = serde_json::json!(authorize_dataset_admin(&state, &ctx, workspace)
+        .await
+        .is_ok());
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatasetPolicy {
+    max_rows: u64,
+    max_columns: u64,
+    max_cells: u64,
+    max_bytes: u64,
+    max_ttl_seconds: u64,
+    max_classification: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateDatasetDestination {
+    name: String,
+    policy: DatasetPolicy,
+}
+
+pub async fn create_dataset_destination(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(workspace): Path<Uuid>,
+    Json(input): Json<CreateDatasetDestination>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    authorize_dataset_admin(&state, &ctx, workspace).await?;
+    let p = input.policy;
+    if input.name.trim().is_empty()
+        || input.name.len() > 128
+        || input.name.chars().any(char::is_control)
+        || p.max_rows == 0
+        || p.max_rows > 5000
+        || p.max_columns == 0
+        || p.max_columns > 64
+        || p.max_cells == 0
+        || p.max_cells > 320000
+        || p.max_bytes == 0
+        || p.max_bytes > 2097152
+        || p.max_ttl_seconds == 0
+        || p.max_ttl_seconds > 3600
+        || !["public", "internal"].contains(&p.max_classification.as_str())
+    {
+        return Err(AppError::BadRequest(
+            "storage policy exceeds allowed bounds".into(),
+        ));
+    }
+    let result=relay(&state)?.manage_source(reqwest::Method::POST,"/v1/destinations",&scope_for(&ctx,workspace),serde_json::json!({"name":input.name,"kind":"managed","grant_creator":true,"policy":{"max_rows":p.max_rows,"max_columns":p.max_columns,"max_cells":p.max_cells,"max_bytes":p.max_bytes,"max_ttl_seconds":p.max_ttl_seconds,"max_classification":p.max_classification,"allow_redistribution":false}})).await.map_err(map_error)?;
+    authorize_dataset_admin(&state, &ctx, workspace).await?;
+    Ok(Json(result))
+}
+
+async fn authorize_dataset_manifest(
+    state: &AppState,
+    ctx: &AuthContext,
+    workspace: Uuid,
+    manifest: &serde_json::Value,
+) -> Result<(), AppError> {
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(ctx, &state.pool, workspace, DATA_QUERY).await?;
+    let uuid_field = |name: &str| {
+        manifest
+            .get(name)
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    };
+    if uuid_field("tenant_id") != Some(ctx.org_id)
+        || uuid_field("workspace_id") != Some(workspace)
+        || uuid_field("deployment_id") != state.config.relay.as_ref().map(|c| c.deployment_id)
+    {
+        return Err(AppError::NotFound("dataset not found".into()));
+    }
+    if manifest
+        .get("requires_source_access")
+        .and_then(|v| v.as_bool())
+        != Some(false)
+    {
+        let mappings = RelayMappingRepo::new(state.pool.clone())
+            .effective_for_user(ctx.org_id, workspace, ctx.user_id)
+            .await
+            .map_err(AppError::Internal)?;
+        let lineage = manifest
+            .get("lineage")
+            .and_then(|v| v.as_array())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| AppError::NotFound("dataset not found".into()))?;
+        for source in lineage {
+            let connection = source
+                .get("connection_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
+            if !mappings.iter().any(|m| {
+                Some(m.relay_connection_id) == connection && m.enabled && m.applies_to(ctx.user_id)
+            }) {
+                return Err(AppError::NotFound("dataset not found".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn dataset_list(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(workspace): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(&ctx, &state.pool, workspace, DATA_QUERY).await?;
+    let bytes = relay(&state)?
+        .dataset_bytes(&scope_for(&ctx, workspace), "/v1/datasets")
+        .await
+        .map_err(map_error)?;
+    filter_dataset_list(&state, &ctx, workspace, &bytes)
+        .await
+        .map(Json)
+}
+
+async fn filter_dataset_list(
+    state: &AppState,
+    ctx: &AuthContext,
+    workspace: Uuid,
+    bytes: &[u8],
+) -> Result<serde_json::Value, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(ctx, &state.pool, workspace, DATA_QUERY).await?;
+    let body: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| AppError::RelayUpstream("invalid dataset metadata".into()))?;
+    let offered = body
+        .get("datasets")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| AppError::RelayUpstream("invalid dataset list".into()))?;
+    let mut datasets = Vec::new();
+    for version in offered.iter().take(100) {
+        match authorize_dataset_manifest(state, ctx, workspace, version).await {
+            Ok(()) => datasets.push(version.clone()),
+            Err(AppError::NotFound(_)) => (),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(serde_json::json!({"datasets":datasets}))
+}
+
+pub async fn run_datasets(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((workspace, run)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    authorize_run(&state, &ctx, workspace, run).await?;
+    let bytes = relay(&state)?
+        .dataset_bytes(
+            &scope_for(&ctx, workspace),
+            &format!("/v1/runs/{run}/dataset"),
+        )
+        .await
+        .map_err(map_error)?;
+    authorize_run(&state, &ctx, workspace, run).await?;
+    let mut result = filter_dataset_list(&state, &ctx, workspace, &bytes).await?;
+    if let Some(rows) = result["datasets"].as_array_mut() {
+        rows.retain(|r| {
+            r.get("run_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+                == Some(run)
+        });
+    }
+    Ok(Json(result))
+}
+
+pub async fn dataset_version(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((workspace, dataset, version)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(&ctx, &state.pool, workspace, DATA_QUERY).await?;
+    let bytes = relay(&state)?
+        .dataset_bytes(
+            &scope_for(&ctx, workspace),
+            &format!("/v1/datasets/{dataset}/versions/{version}"),
+        )
+        .await
+        .map_err(map_error)?;
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| AppError::RelayUpstream("invalid dataset metadata".into()))?;
+    authorize_dataset_manifest(&state, &ctx, workspace, &manifest).await?;
+    if manifest["dataset_id"] != serde_json::json!(dataset)
+        || manifest["version_id"] != serde_json::json!(version)
+    {
+        return Err(AppError::NotFound("dataset not found".into()));
+    }
+    Ok(Json(manifest))
+}
+
+pub async fn dataset_arrow(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((workspace, dataset, version)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Response, AppError> {
+    let Json(manifest) = dataset_version(
+        State(state.clone()),
+        Extension(ctx.clone()),
+        Path((workspace, dataset, version)),
+    )
+    .await?;
+    let expected_bytes = manifest
+        .get("byte_count")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n <= 64 * 1024 * 1024)
+        .ok_or_else(|| AppError::RelayUpstream("dataset exceeds download limit".into()))?;
+    let bytes = relay(&state)?
+        .dataset_bytes(
+            &scope_for(&ctx, workspace),
+            &format!("/v1/datasets/{dataset}/versions/{version}/arrow"),
+        )
+        .await
+        .map_err(map_error)?;
+    authorize_dataset_manifest(&state, &ctx, workspace, &manifest).await?;
+    use sha2::{Digest, Sha256};
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+    if bytes.len() as u64 != expected_bytes
+        || manifest.get("digest").and_then(|v| v.as_str()) != Some(digest.as_str())
+    {
+        return Err(AppError::RelayUpstream(
+            "dataset integrity check failed".into(),
+        ));
+    }
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/vnd.apache.arrow.stream"),
+            (header::CACHE_CONTROL, "no-store"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=dataset.arrow",
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
