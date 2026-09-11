@@ -1273,7 +1273,7 @@ async fn managed_datasets_preserve_publication_scope_download_and_current_mappin
         json!({"destination_id":destination,"dataset_name":"Quarterly","ttl_seconds":3600})
     );
     let bytes = b"typed-arrow-body-fixture".to_vec();
-    let manifest = json!({"deployment_id":deployment,"tenant_id":org,"workspace_id":ws,"dataset_id":dataset,"version_id":version,"run_id":run,"dataset_name":"Quarterly","row_count":4000,"column_count":3,"byte_count":bytes.len(),"digest":format!("sha256:{}",hex::encode(Sha256::digest(&bytes))),"requires_source_access":true,"lineage":[{"connection_id":connection}]});
+    let manifest = json!({"deployment_id":deployment,"tenant_id":org,"workspace_id":ws,"dataset_id":dataset,"destination_id":destination,"expires_at":chrono::Utc::now()+chrono::Duration::hours(1),"version_id":version,"run_id":run,"dataset_name":"Quarterly","row_count":4000,"column_count":3,"byte_count":bytes.len(),"digest":format!("sha256:{}",hex::encode(Sha256::digest(&bytes))),"requires_source_access":true,"lineage":[{"connection_id":connection}]});
     let remote = format!("/v1/datasets/{dataset}/versions/{version}");
     let local = format!("{root}/datasets/{dataset}/versions/{version}");
     Mock::given(method("GET"))
@@ -1300,7 +1300,55 @@ async fn managed_datasets_preserve_publication_scope_download_and_current_mappin
         )
         .mount(&mock)
         .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/datasets/{dataset}/versions")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"datasets":[manifest]})))
+        .mount(&mock)
+        .await;
+    let mut refresh = ask.clone();
+    refresh["publication"]["targetDatasetId"] = json!(dataset);
+    refresh["publication"]["expectedVersionId"] = json!(version);
+    assert_eq!(
+        client
+            .post(format!("{root}/ask"))
+            .json(&refresh)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let calls = mock.received_requests().await.unwrap();
+    let sent: Value = serde_json::from_slice(
+        &calls
+            .iter()
+            .rev()
+            .find(|request| request.url.path() == "/v1/runs")
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert_eq!(sent["publication"]["target_dataset_id"], json!(dataset));
+    assert_eq!(sent["publication"]["expected_version_id"], json!(version));
+    for (key, value) in [
+        ("targetDatasetId", Value::Null),
+        ("expectedVersionId", json!("not-a-uuid")),
+        ("expectedVersionId", json!(Uuid::nil())),
+        ("datasetName", json!("Different")),
+    ] {
+        let mut bad = refresh.clone();
+        bad["publication"][key] = value;
+        assert!(client
+            .post(format!("{root}/ask"))
+            .json(&bad)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_client_error());
+    }
     for url in [
+        format!("{root}/datasets/{dataset}/versions"),
         format!("{root}/datasets"),
         format!("{root}/runs/{run}/dataset"),
     ] {
@@ -1351,6 +1399,34 @@ async fn managed_datasets_preserve_publication_scope_download_and_current_mappin
     assert_eq!(listed["datasets"], json!([]));
     assert_eq!(
         client.get(&local).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    let history: Value = client
+        .get(format!("{root}/datasets/{dataset}/versions"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(history["datasets"], json!([]));
+    let mut wrong = manifest.clone();
+    wrong["dataset_id"] = json!(Uuid::new_v4());
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/datasets/{dataset}/versions")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"datasets":[wrong]})))
+        .with_priority(1)
+        .mount(&mock)
+        .await;
+    assert_eq!(
+        client
+            .get(format!("{root}/datasets/{dataset}/versions"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
         StatusCode::NOT_FOUND
     );
     let mut shared = manifest;

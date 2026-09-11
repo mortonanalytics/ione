@@ -336,8 +336,46 @@ pub async fn ask(
         .as_ref()
         .ok_or_else(|| AppError::NotFound("relay is not configured".into()))?;
 
-    if input.publication.is_some() {
+    if let Some(publication) = &input.publication {
         authorize_dataset_admin(&state, &ctx, workspace_id).await?;
+        match (
+            publication.target_dataset_id,
+            publication.expected_version_id,
+        ) {
+            (None, None) => {}
+            (Some(dataset), Some(version)) if !dataset.is_nil() && !version.is_nil() => {
+                let Json(manifest) = dataset_version(
+                    State(state.clone()),
+                    Extension(ctx.clone()),
+                    Path((workspace_id, dataset, version)),
+                )
+                .await?;
+                if manifest["destination_id"] != serde_json::json!(publication.destination_id)
+                    || manifest["dataset_name"] != publication.dataset_name
+                {
+                    return Err(AppError::BadRequest(
+                        "refresh must preserve the dataset destination and name".into(),
+                    ));
+                }
+                authorize_dataset_admin(&state, &ctx, workspace_id).await?;
+                let current = repo
+                    .effective_for_user(ctx.org_id, workspace_id, ctx.user_id)
+                    .await
+                    .map_err(AppError::Internal)?;
+                if used.iter().any(|id| {
+                    !current
+                        .iter()
+                        .any(|mapping| mapping.id == *id && mapping.applies_to(ctx.user_id))
+                }) {
+                    return Err(AppError::NotFound("source not found".into()));
+                }
+            }
+            _ => {
+                return Err(AppError::BadRequest(
+                    "refresh requires a target dataset and expected version together".into(),
+                ))
+            }
+        }
     }
     let request = CreateRun {
         publication: input.publication,
@@ -997,9 +1035,29 @@ async fn filter_dataset_list(
             Err(e) => return Err(e),
         }
     }
-    Ok(
-        serde_json::json!({"datasets":datasets,"canDelegate":crate::services::dataset_delegation::owner_identity(state,ctx,workspace).await.is_ok()}),
-    )
+    let can_delegate = crate::services::dataset_delegation::owner_identity(state, ctx, workspace)
+        .await
+        .is_ok();
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(ctx, &state.pool, workspace, DATA_QUERY).await?;
+    let mappings = RelayMappingRepo::new(state.pool.clone())
+        .effective_for_user(ctx.org_id, workspace, ctx.user_id)
+        .await
+        .map_err(AppError::Internal)?;
+    datasets.retain(|version| {
+        version["requires_source_access"] == serde_json::json!(false)
+            || version["lineage"].as_array().is_some_and(|sources| {
+                !sources.is_empty()
+                    && sources.iter().all(|source| {
+                        mappings.iter().any(|mapping| {
+                            source["connection_id"]
+                                == serde_json::json!(mapping.relay_connection_id)
+                                && mapping.applies_to(ctx.user_id)
+                        })
+                    })
+            })
+    });
+    Ok(serde_json::json!({"datasets":datasets,"canDelegate":can_delegate}))
 }
 
 pub async fn run_datasets(
@@ -1026,6 +1084,48 @@ pub async fn run_datasets(
         });
     }
     Ok(Json(result))
+}
+
+pub async fn dataset_history(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((workspace, dataset)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(&ctx, &state.pool, workspace, DATA_QUERY).await?;
+    let bytes = relay(&state)?
+        .dataset_bytes(
+            &scope_for(&ctx, workspace),
+            &format!("/v1/datasets/{dataset}/versions"),
+        )
+        .await
+        .map_err(map_error)?;
+    let body: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| AppError::RelayUpstream("invalid dataset history".into()))?;
+    let versions = body["datasets"]
+        .as_array()
+        .ok_or_else(|| AppError::RelayUpstream("invalid dataset history".into()))?;
+    if versions.len() > 100
+        || versions.iter().any(|version| {
+            version["dataset_id"] != serde_json::json!(dataset)
+                || version["version_id"]
+                    .as_str()
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                    .is_none()
+        })
+    {
+        return Err(AppError::NotFound("dataset history unavailable".into()));
+    }
+    let mut history = filter_dataset_list(&state, &ctx, workspace, &bytes).await?;
+    if let Some(versions) = history["datasets"].as_array_mut() {
+        versions.retain(|version| {
+            version["expires_at"]
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .is_some_and(|expires| expires > chrono::Utc::now())
+        });
+    }
+    Ok(Json(history))
 }
 
 pub async fn dataset_version(

@@ -84,6 +84,10 @@ pub struct Publication {
     pub destination_id: Uuid,
     pub dataset_name: String,
     pub ttl_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_dataset_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,3 +1,7 @@
+let dataRefreshTarget = null;
+let dataDatasetVersions = [];
+let dataHistoryRequest = null;
+let dataRefreshRun = null;
 let fileSourceRequest = null;
 let dataRecipe = null;
 let dataRecipes = [];
@@ -6363,6 +6367,10 @@ async function loadDataSources() {
     );
     if (!activeWorkspace || activeWorkspace.id !== sourceWorkspace) return;
     dataSources = (body && body.sources) || [];
+    if (dataRecipe && Array.from(dataSelected).some((id) => !dataSources.some((source) => source.mappingId === id))) {
+      dataSelected.clear();
+      document.getElementById('data-recipe-new-ask').click();
+    }
   } catch (_) {
     if (!activeWorkspace || activeWorkspace.id !== sourceWorkspace) return;
     dataSources = [];
@@ -6494,6 +6502,16 @@ dataAskForm?.addEventListener('submit', async (event) => {
       return;
     }
     request.publication = { destinationId, datasetName: name, ttlSeconds };
+    if (document.getElementById('data-publication-mode').value === 'refresh') {
+      if (!dataRecipe || !dataRefreshTarget || dataRefreshTarget.destination_id !== destinationId || dataRefreshTarget.dataset_name !== name) {
+        showDataError(new Error('Select an accessible dataset and current version to refresh.'));
+        dataAskSubmit.disabled = false;
+        return;
+      }
+      request.publication.targetDatasetId = dataRefreshTarget.dataset_id;
+      request.publication.expectedVersionId = dataRefreshTarget.version_id;
+      setDataProgress('Refreshing dataset', '');
+    }
   }
   const fingerprint = JSON.stringify({ workspace: requestWorkspace, request });
   if (!dataPendingRequest || dataPendingRequest.fingerprint !== fingerprint) {
@@ -6513,6 +6531,7 @@ dataAskForm?.addEventListener('submit', async (event) => {
     );
     if (!activeWorkspace || activeWorkspace.id !== requestWorkspace) return;
     dataPendingRequest = null;
+    dataRefreshRun = request.publication?.targetDatasetId ? body.run?.id : null;
     handleDataResponse(body);
   } catch (err) {
     if (activeWorkspace && activeWorkspace.id === requestWorkspace) showDataError(err);
@@ -6894,6 +6913,14 @@ dataSourceForm.addEventListener('submit', async (event) => {
 });
 
 function resetDatasetWorkspace() {
+  dataRecipe = null;
+  resetDataRefresh();
+  dataDatasetVersions = [];
+  dataHistoryRequest = null;
+  dataRefreshRun = null;
+  document.getElementById('data-dataset-history').hidden = true;
+  document.getElementById('data-dataset-history-list').replaceChildren();
+  document.getElementById('data-refresh-target').replaceChildren(new Option('Choose dataset', ''));
   fileSourceRequest = null;
   document.getElementById('data-file-form').reset();
   document.getElementById('data-file-admin').hidden = true;
@@ -6934,6 +6961,7 @@ function resetDatasetWorkspace() {
 
 document.getElementById('data-save-dataset').addEventListener('change', (event) => {
   document.getElementById('data-publication-fields').hidden = !event.target.checked;
+  if (!event.target.checked) resetDataRefresh();
 });
 
 async function loadDatasetDestinations() {
@@ -6970,6 +6998,19 @@ async function loadDatasetLibrary(runId = null) {
   try {
     const result = await apiFetch(`/api/v1/workspaces/${workspace}/relay/datasets`, { skipErrorToast: true });
     if (!activeWorkspace || activeWorkspace.id !== workspace) return;
+    dataDatasetVersions = result.datasets || [];
+    const targets = document.getElementById('data-refresh-target');
+    const selectedTarget = targets.value;
+    targets.replaceChildren(new Option('Choose dataset', ''));
+    dataDatasetVersions.forEach((version) => targets.add(new Option(version.dataset_name, version.dataset_id)));
+    targets.value = selectedTarget;
+    if (dataRefreshTarget && !dataDatasetVersions.some((version) => version.dataset_id === dataRefreshTarget.dataset_id && version.version_id === dataRefreshTarget.version_id)) {
+      dataRefreshTarget = null;
+      targets.value = '';
+      document.getElementById('data-dataset-name').value = '';
+      document.getElementById('data-destination').value = '';
+      document.getElementById('data-refresh-status').textContent = 'Dataset changed or access was revoked. Select its current version again.';
+    }
     const list = document.getElementById('data-dataset-list');
     list.replaceChildren();
     (result.datasets || []).forEach((version) => {
@@ -6981,6 +7022,37 @@ async function loadDatasetLibrary(runId = null) {
       link.href = `/api/v1/workspaces/${encodeURIComponent(workspace)}/relay/datasets/${encodeURIComponent(version.dataset_id)}/versions/${encodeURIComponent(version.version_id)}/arrow`;
       link.download = 'dataset.arrow';
       item.append(description, link);
+      const history = document.createElement('button');
+      history.type = 'button';
+      history.dataset.action = 'dataset-history';
+      history.textContent = 'Version history';
+      history.addEventListener('click', async () => {
+        if (activeWorkspace?.id !== workspace) return;
+        const request = { workspace, dataset: version.dataset_id };
+        dataHistoryRequest = request;
+        document.getElementById('data-dataset-history').hidden = false;
+        const historyList = document.getElementById('data-dataset-history-list');
+        const historyStatus = document.getElementById('data-dataset-history-status');
+        historyList.replaceChildren();
+        historyStatus.textContent = 'Loading authorized versions…';
+        try {
+          const result = await apiFetch(`/api/v1/workspaces/${workspace}/relay/datasets/${version.dataset_id}/versions`, { skipErrorToast: true });
+          if (dataHistoryRequest !== request || activeWorkspace?.id !== workspace) return;
+          (result.datasets || []).forEach((entry) => {
+            const row = document.createElement('li');
+            const download = document.createElement('a');
+            download.textContent = `${entry.version_id} — ${entry.row_count} rows — expires ${new Date(entry.expires_at).toLocaleString()} — Download Arrow`;
+            download.href = `/api/v1/workspaces/${encodeURIComponent(workspace)}/relay/datasets/${encodeURIComponent(entry.dataset_id)}/versions/${encodeURIComponent(entry.version_id)}/arrow`;
+            download.download = 'dataset.arrow';
+            row.append(download);
+            historyList.append(row);
+          });
+          historyStatus.textContent = (result.datasets || []).length ? version.dataset_name : 'No accessible unexpired versions.';
+        } catch (_) {
+          if (dataHistoryRequest === request && activeWorkspace?.id === workspace) historyStatus.textContent = 'Version history is unavailable or access was revoked.';
+        }
+      });
+      item.append(history);
       const saveRecipe = document.createElement('button');
       saveRecipe.type = 'button';
       saveRecipe.textContent = 'Save recipe';
@@ -7014,10 +7086,12 @@ async function loadDatasetLibrary(runId = null) {
     if (runId) {
       const published = await apiFetch(`/api/v1/workspaces/${workspace}/relay/runs/${runId}/dataset`, { skipErrorToast: true });
       if (!activeWorkspace || activeWorkspace.id !== workspace || dataCurrentRunId !== runId) return;
-      document.getElementById('data-published').textContent = (published.datasets || []).map((d) => `Saved ${d.dataset_name}: ${d.row_count} complete rows, ${d.column_count} columns. The table below is a preview.`).join(' ');
+      document.getElementById('data-published').textContent = (published.datasets || []).map((d) => `${dataRefreshRun === runId ? "Refreshed" : "Saved"} ${d.dataset_name}: ${d.row_count} complete rows, ${d.column_count} columns. The table below is a preview.`).join(' ');
     }
   } catch (_) {
     if (!activeWorkspace || activeWorkspace.id !== workspace) return;
+    dataDatasetVersions = [];
+    resetDataRefresh();
     document.getElementById('data-dataset-list').replaceChildren();
     status.textContent = 'Saved datasets could not be loaded. Refresh to retry.';
   }
@@ -7287,6 +7361,7 @@ async function loadRecipes() {
 
 document.getElementById('data-recipe-new-ask').addEventListener('click', () => {
   dataRecipe = null;
+  resetDataRefresh();
   dataPendingRequest = null;
   document.getElementById('data-recipe-select').value = '';
   document.getElementById('data-recipe-details').textContent = '';
@@ -7296,6 +7371,8 @@ document.getElementById('data-recipe-new-ask').addEventListener('click', () => {
 });
 
 document.getElementById('data-recipe-select').addEventListener('change', async (event) => {
+  dataRecipe = null;
+  resetDataRefresh();
   const workspace = activeWorkspace?.id;
   const versionId = event.target.value;
   const recipe = dataRecipes.find((entry) => entry.version_id === versionId);
@@ -7311,6 +7388,7 @@ document.getElementById('data-recipe-select').addEventListener('change', async (
     const entry = await apiFetch(`/api/v1/workspaces/${workspace}/relay/recipes/${recipe.recipe_id}/versions/${versionId}`, { skipErrorToast: true });
     if (activeWorkspace?.id !== workspace || event.target.value !== versionId) return;
     dataRecipe = entry;
+    document.querySelector('#data-publication-mode option[value="refresh"]').disabled = false;
     dataSelected.clear();
     entry.mappingIds.forEach((id) => dataSelected.add(id));
     dataAskInput.value = entry.ask;
@@ -7408,4 +7486,47 @@ dataFileForm.addEventListener('submit', async (event) => {
     delete body.secretAccessKey;
     if (fileSourceRequest === request) submit.disabled = false;
   }
+});
+
+
+function resetDataRefresh() {
+  const hadTarget = dataRefreshTarget !== null;
+  dataRefreshTarget = null;
+  document.getElementById('data-publication-mode').value = 'new';
+  document.querySelector('#data-publication-mode option[value="refresh"]').disabled = dataRecipe === null;
+  document.getElementById('data-refresh-target').value = '';
+  document.getElementById('data-refresh-choice').hidden = true;
+  document.getElementById('data-refresh-status').textContent = '';
+  document.getElementById('data-dataset-name').readOnly = false;
+  document.getElementById('data-destination').disabled = false;
+  document.getElementById('data-ask-submit').textContent = 'Ask';
+  if (hadTarget) {
+    document.getElementById('data-dataset-name').value = '';
+    document.getElementById('data-destination').value = '';
+  }
+}
+
+document.getElementById('data-publication-mode').addEventListener('change', (event) => {
+  const refresh = event.target.value === 'refresh' && dataRecipe !== null;
+  dataRefreshTarget = null;
+  document.getElementById('data-refresh-target').value = '';
+  document.getElementById('data-refresh-choice').hidden = !refresh;
+  document.getElementById('data-dataset-name').readOnly = refresh;
+  document.getElementById('data-dataset-name').value = '';
+  document.getElementById('data-destination').disabled = refresh;
+  document.getElementById('data-destination').value = '';
+  document.getElementById('data-refresh-status').textContent = '';
+  dataAskSubmit.textContent = refresh ? 'Refresh dataset' : 'Ask';
+});
+document.getElementById('data-refresh-target').addEventListener('change', (event) => {
+  dataRefreshTarget = dataDatasetVersions.find((version) => version.dataset_id === event.target.value) || null;
+  document.getElementById('data-dataset-name').value = dataRefreshTarget?.dataset_name || '';
+  document.getElementById('data-destination').value = dataRefreshTarget?.destination_id || '';
+  document.getElementById('data-destination').dispatchEvent(new Event('change'));
+  document.getElementById('data-refresh-status').textContent = dataRefreshTarget ? `Refresh expects current version ${dataRefreshTarget.version_id}. Earlier versions remain immutable.` : '';
+});
+document.getElementById('data-dataset-history-close').addEventListener('click', () => {
+  dataHistoryRequest = null;
+  document.getElementById('data-dataset-history').hidden = true;
+  document.getElementById('data-dataset-history-list').replaceChildren();
 });

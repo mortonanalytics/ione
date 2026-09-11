@@ -220,6 +220,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces/:id/relay/runs/:run_id/dataset",
             get(relay::run_datasets),
         )
+        .route("/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions",get(relay::dataset_history))
         .route(
             "/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id",
             get(relay::dataset_version),

@@ -295,6 +295,9 @@
                 <legend>Dataset output</legend>
                 <label><input id="data-save-dataset" type="checkbox"> Save dataset</label>
                 <div id="data-publication-fields" hidden>
+                  <label>Output <select id="data-publication-mode"><option value="new">New dataset</option><option value="refresh" disabled>Refresh dataset</option></select></label>
+                  <label id="data-refresh-choice" hidden>Dataset to refresh <select id="data-refresh-target"><option value="">Choose dataset</option></select></label>
+                  <p id="data-refresh-status" role="status"></p>
                   <label>Name <input id="data-dataset-name" maxlength="128"></label>
                   <label>Storage <select id="data-destination"><option value="">Choose storage</option></select></label>
                   <label>Retention (seconds) <input id="data-dataset-ttl" type="number" min="1" max="3600" value="3600"></label>
@@ -312,6 +315,12 @@
               <p id="data-published" role="status"></p>
               <ul id="data-dataset-list" role="list"></ul>
               <p id="data-dataset-status" role="status"></p>
+              <section id="data-dataset-history" hidden aria-label="Dataset version history">
+                <h3>Version history</h3>
+                <p id="data-dataset-history-status" role="status"></p>
+                <ul id="data-dataset-history-list"></ul>
+                <button id="data-dataset-history-close" type="button">Close history</button>
+              </section>
               <form id="data-recipe-save-form" hidden>
                 <h3>Save recipe</h3>
                 <label>Name <input id="data-recipe-name" maxlength="128" required></label>
