@@ -1,3 +1,4 @@
+let datasetDelegationSelection = null;
 /* ── Auth UI ── */
 const DEMO_WORKSPACE_ID_CONST = '00000000-0000-0000-0000-000000000d30';
 const DEMO_WORKSPACE_ID = DEMO_WORKSPACE_ID_CONST;
@@ -6868,6 +6869,7 @@ dataSourceForm.addEventListener('submit', async (event) => {
 });
 
 function resetDatasetWorkspace() {
+  closeDatasetDelegation();
   document.getElementById('data-destination-form').reset();
   document.getElementById('data-destination-admin').hidden = true;
   document.getElementById('data-destination-status').textContent = '';
@@ -6931,6 +6933,13 @@ async function loadDatasetLibrary(runId = null) {
       link.href = `/api/v1/workspaces/${encodeURIComponent(workspace)}/relay/datasets/${encodeURIComponent(version.dataset_id)}/versions/${encodeURIComponent(version.version_id)}/arrow`;
       link.download = 'dataset.arrow';
       item.append(description, link);
+      if (result.canDelegate === true && version.requires_source_access === false && Array.isArray(version.lineage) && version.lineage.length && version.lineage.every((source) => source.remote == null)) {
+        const share = document.createElement('button');
+        share.type = 'button';
+        share.textContent = 'Share';
+        share.addEventListener('click', () => openDatasetDelegation(workspace, version));
+        item.append(share);
+      }
       list.append(item);
     });
     status.textContent = (result.datasets || []).length ? '' : 'No saved datasets are available.';
@@ -6959,12 +6968,14 @@ document.getElementById('data-destination-form').addEventListener('submit', asyn
   const fields = Object.fromEntries(new FormData(form));
   const name = fields.name;
   delete fields.name;
+  const allowRedistribution = fields.allowRedistribution === 'on';
+  delete fields.allowRedistribution;
   const policy = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, key === 'max_classification' ? value : Number(value)]));
   const status = document.getElementById('data-destination-status');
   const button = form.querySelector('button[type=submit]');
   button.disabled = true;
   try {
-    const created = await apiFetch(`/api/v1/workspaces/${workspace}/relay/destinations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, policy }), skipErrorToast: true });
+    const created = await apiFetch(`/api/v1/workspaces/${workspace}/relay/destinations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, policy, allowRedistribution }), skipErrorToast: true });
     if (!activeWorkspace || activeWorkspace.id !== workspace) return;
     await loadDatasetDestinations();
     if (!activeWorkspace || activeWorkspace.id !== workspace) return;
@@ -6985,4 +6996,98 @@ document.getElementById('data-destination').addEventListener('change', (event) =
   const ttl = document.getElementById('data-dataset-ttl');
   ttl.max = event.target.selectedOptions[0]?.dataset.ttl || '3600';
   ttl.value = String(Math.min(Number(ttl.value) || 3600, Number(ttl.max)));
+});
+
+
+function closeDatasetDelegation() {
+  datasetDelegationSelection = null;
+  document.getElementById('data-delegation').hidden = true;
+  document.getElementById('data-delegation-token').value = '';
+  document.getElementById('data-delegation-secret').hidden = true;
+  document.getElementById('data-delegation-form').reset();
+  document.querySelector('#data-delegation-form button[type=submit]').disabled = false;
+  document.getElementById('data-delegation-status').textContent = '';
+  document.getElementById('data-delegation-list').replaceChildren();
+}
+
+async function openDatasetDelegation(workspace, version) {
+  closeDatasetDelegation();
+  if (activeWorkspace?.id !== workspace) return;
+  const selection = { workspace, version, path: `/api/v1/workspaces/${encodeURIComponent(workspace)}/relay/datasets/${encodeURIComponent(version.dataset_id)}/versions/${encodeURIComponent(version.version_id)}/delegations` };
+  datasetDelegationSelection = selection;
+  document.getElementById('data-delegation').hidden = false;
+  document.getElementById('data-delegation-title').textContent = `Share ${version.dataset_name} — immutable version ${version.version_id}`;
+  await loadDatasetDelegations(selection);
+}
+
+async function loadDatasetDelegations(selection) {
+  try {
+    const result = await apiFetch(selection.path, { skipErrorToast: true });
+    if (datasetDelegationSelection !== selection || activeWorkspace?.id !== selection.workspace) return;
+    const list = document.getElementById('data-delegation-list');
+    list.replaceChildren();
+    (result.grants || []).forEach((grant) => {
+      const item = document.createElement('li');
+      item.textContent = `${grant.grant_id}: ${grant.origin.actor_id} / ${grant.origin.service_account_id}, expires ${new Date(grant.expires_at).toLocaleString()}${grant.revoked_at ? ' (revoked)' : ''} `;
+      if (!grant.revoked_at) {
+        const revoke = document.createElement('button');
+        revoke.type = 'button';
+        revoke.textContent = 'Revoke';
+        revoke.addEventListener('click', async () => {
+          if (datasetDelegationSelection !== selection || activeWorkspace?.id !== selection.workspace) return;
+          document.getElementById('data-delegation-token').value = '';
+          document.getElementById('data-delegation-secret').hidden = true;
+          revoke.disabled = true;
+          try {
+            await apiFetch(`${selection.path}/${encodeURIComponent(grant.grant_id)}`, { method: 'DELETE', skipErrorToast: true });
+            await loadDatasetDelegations(selection);
+          } catch (_) {
+            if (datasetDelegationSelection === selection && activeWorkspace?.id === selection.workspace) document.getElementById('data-delegation-status').textContent = 'Revocation was not confirmed. Refresh sharing to check the grant.';
+          } finally { revoke.disabled = false; }
+        });
+        item.append(revoke);
+      }
+      list.append(item);
+    });
+  } catch (_) {
+    if (datasetDelegationSelection === selection && activeWorkspace?.id === selection.workspace) document.getElementById('data-delegation-status').textContent = 'Sharing is unavailable or permission was revoked.';
+  }
+}
+
+document.getElementById('data-delegation-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const selection = datasetDelegationSelection;
+  if (!selection || activeWorkspace?.id !== selection.workspace) return;
+  const fields = Object.fromEntries(new FormData(event.target));
+  const ttlSeconds = Number(fields.ttlSeconds);
+  delete fields.ttlSeconds;
+  const button = event.target.querySelector('button[type=submit]');
+  button.disabled = true;
+  document.getElementById('data-delegation-token').value = '';
+  document.getElementById('data-delegation-secret').hidden = true;
+  try {
+    const result = await apiFetch(selection.path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ origin: fields, ttlSeconds }), skipErrorToast: true });
+    if (datasetDelegationSelection !== selection || activeWorkspace?.id !== selection.workspace) return;
+    document.getElementById('data-delegation-token').value = result.token;
+    document.getElementById('data-delegation-secret').hidden = false;
+    document.getElementById('data-delegation-status').textContent = 'Copy the credential now. It cannot be retrieved again.';
+    await loadDatasetDelegations(selection);
+  } catch (_) {
+    if (datasetDelegationSelection !== selection || activeWorkspace?.id !== selection.workspace) return;
+    await loadDatasetDelegations(selection);
+    if (datasetDelegationSelection !== selection || activeWorkspace?.id !== selection.workspace) return;
+    document.getElementById('data-delegation-status').textContent = 'Grant creation was not confirmed. Check the grant list and revoke any unused grant before retrying.';
+  } finally { if (datasetDelegationSelection === selection) button.disabled = false; }
+});
+document.getElementById('data-delegation-close').addEventListener('click', closeDatasetDelegation);
+document.getElementById('data-delegation-copy').addEventListener('click', async () => {
+  const selection = datasetDelegationSelection;
+  const token = document.getElementById('data-delegation-token');
+  if (!selection || activeWorkspace?.id !== selection.workspace || !token.value) return;
+  try {
+    await navigator.clipboard.writeText(token.value);
+    if (datasetDelegationSelection === selection) document.getElementById('data-delegation-status').textContent = 'Credential copied.';
+  } catch (_) {
+    if (datasetDelegationSelection === selection) document.getElementById('data-delegation-status').textContent = 'Select and copy the credential manually.';
+  }
 });

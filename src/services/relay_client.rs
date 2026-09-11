@@ -106,6 +106,13 @@ pub struct AvailableConnections {
     pub connections: Vec<serde_json::Value>,
 }
 
+pub struct DatasetReadResponse {
+    pub bytes: Vec<u8>,
+    pub source_digest: String,
+    pub content_digest: String,
+    pub row_count: u64,
+}
+
 pub struct RelayClient {
     http: reqwest::Client,
     config: Arc<RelayConfig>,
@@ -396,6 +403,87 @@ impl RelayClient {
             body.extend_from_slice(&chunk);
         }
         Ok(body)
+    }
+
+    pub async fn dataset_read(
+        &self,
+        scope: &RelayScope,
+        path: &str,
+        input: &crate::models::dataset_delegation::DatasetRead,
+    ) -> Result<DatasetReadResponse, RelayError> {
+        let invalid = || RelayError::Unexpected("invalid dataset read response".into());
+        if input.max_bytes == 0 || input.max_bytes > 64 * 1024 * 1024 {
+            return Err(invalid());
+        }
+        let body = serde_json::to_vec(input).map_err(|_| invalid())?;
+        let (claims, signature) = self.sign(
+            "POST",
+            path,
+            scope,
+            &Uuid::new_v4().to_string(),
+            &Uuid::new_v4().to_string(),
+            chrono::Utc::now().timestamp(),
+            &body,
+        );
+        let mut response = self
+            .http
+            .post(format!("{}{}", self.config.base_url, path))
+            .bearer_auth(&self.config.runtime_token)
+            .header("x-relay-scope", claims)
+            .header("x-relay-signature", signature)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| invalid())?;
+        if !response.status().is_success() {
+            return Err(RelayError::Refused {
+                code: "forbidden".into(),
+                message: "dataset read refused".into(),
+            });
+        }
+        let headers = response.headers();
+        let source_digest = headers
+            .get("x-relay-source-digest")
+            .and_then(|h| h.to_str().ok())
+            .ok_or_else(invalid)?
+            .to_owned();
+        let content_digest = headers
+            .get("x-relay-content-digest")
+            .and_then(|h| h.to_str().ok())
+            .ok_or_else(invalid)?
+            .to_owned();
+        let row_count: u64 = headers
+            .get("x-relay-row-count")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(invalid)?;
+        if row_count > input.max_rows
+            || response
+                .content_length()
+                .is_some_and(|n| n > input.max_bytes)
+        {
+            return Err(invalid());
+        }
+        let declared = response.content_length();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| invalid())? {
+            if chunk.len() as u64 > input.max_bytes - bytes.len() as u64 {
+                return Err(invalid());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if declared.is_some_and(|n| n != bytes.len() as u64)
+            || content_digest != format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))
+        {
+            return Err(invalid());
+        }
+        Ok(DatasetReadResponse {
+            bytes,
+            source_digest,
+            content_digest,
+            row_count,
+        })
     }
 
     pub async fn create_run(

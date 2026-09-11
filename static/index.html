@@ -205,7 +205,8 @@
                 <label>Maximum bytes <input name="max_bytes" type="number" min="1" max="2097152" value="2097152" required></label>
                 <label>Maximum retention (seconds) <input name="max_ttl_seconds" type="number" min="1" max="3600" value="3600" required></label>
                 <label>Classification <select name="max_classification"><option value="internal">Internal</option><option value="public">Public</option></select></label>
-                <p class="data-hint">Encrypted storage in this workspace. Source permissions remain required when reading saved datasets.</p>
+                <label><input type="checkbox" name="allowRedistribution"> Allow redistribution of datasets saved in this new storage</label>
+                <p class="data-hint">Redistribution permits explicit read grants without the recipient having source permissions. This policy cannot be changed later.</p>
                 <button type="submit">Create storage</button>
                 <p id="data-destination-status" role="status"></p>
               </form>
@@ -254,6 +255,26 @@
               <p id="data-published" role="status"></p>
               <ul id="data-dataset-list" role="list"></ul>
               <p id="data-dataset-status" role="status"></p>
+              <section id="data-delegation" aria-label="Share dataset version" hidden>
+                <h3 id="data-delegation-title">Share dataset version</h3>
+                <p>Grant read access to this immutable version for one origin identity. The credential appears once and expires with the grant.</p>
+                <form id="data-delegation-form">
+                  <label>Origin deployment ID <input name="deployment_id" required></label>
+                  <label>Origin tenant ID <input name="tenant_id" required></label>
+                  <label>Origin workspace ID <input name="workspace_id" required></label>
+                  <label>Origin actor ID <input name="actor_id" maxlength="256" required></label>
+                  <label>Origin service account ID <input name="service_account_id" maxlength="256" required></label>
+                  <label>Grant lifetime (seconds) <input name="ttlSeconds" type="number" min="1" max="3600" value="3600" required></label>
+                  <button type="submit">Create read grant</button>
+                </form>
+                <div id="data-delegation-secret" hidden>
+                  <label>Copy-once credential <textarea id="data-delegation-token" readonly autocomplete="off"></textarea></label>
+                  <button id="data-delegation-copy" type="button">Copy credential</button>
+                </div>
+                <p id="data-delegation-status" role="status"></p>
+                <ul id="data-delegation-list"></ul>
+                <button id="data-delegation-close" type="button">Close sharing</button>
+              </section>
             </section>
             <div id="data-progress" class="data-progress" role="status" aria-live="polite" hidden>
               <span id="data-progress-state">Queued</span>

@@ -53,7 +53,7 @@ fn relay(state: &AppState) -> Result<&RelayClient, AppError> {
 /// former while checking the latter. Collapsing them would make every run look
 /// like it came from the service account -- true about mechanism, false about
 /// who asked.
-fn scope_for(ctx: &AuthContext, workspace_id: Uuid) -> RelayScope {
+pub(crate) fn scope_for(ctx: &AuthContext, workspace_id: Uuid) -> RelayScope {
     RelayScope {
         tenant_id: ctx.org_id,
         workspace_id,
@@ -69,7 +69,7 @@ fn scope_for(ctx: &AuthContext, workspace_id: Uuid) -> RelayScope {
 /// through lets the UI say what happened instead of "something went wrong".
 /// The unreachable and unexpected variants deliberately drop their detail:
 /// that detail is a driver or transport string, which is where a DSN hides.
-fn map_error(error: RelayError) -> AppError {
+pub(crate) fn map_error(error: RelayError) -> AppError {
     match error {
         RelayError::NotConfigured => {
             AppError::NotFound("relay is not configured for this deployment".into())
@@ -832,6 +832,8 @@ pub struct DatasetPolicy {
 pub struct CreateDatasetDestination {
     name: String,
     policy: DatasetPolicy,
+    #[serde(default, rename = "allowRedistribution")]
+    allow_redistribution: bool,
 }
 
 pub async fn create_dataset_destination(
@@ -861,7 +863,7 @@ pub async fn create_dataset_destination(
             "storage policy exceeds allowed bounds".into(),
         ));
     }
-    let result=relay(&state)?.manage_source(reqwest::Method::POST,"/v1/destinations",&scope_for(&ctx,workspace),serde_json::json!({"name":input.name,"kind":"managed","grant_creator":true,"policy":{"max_rows":p.max_rows,"max_columns":p.max_columns,"max_cells":p.max_cells,"max_bytes":p.max_bytes,"max_ttl_seconds":p.max_ttl_seconds,"max_classification":p.max_classification,"allow_redistribution":false}})).await.map_err(map_error)?;
+    let result=relay(&state)?.manage_source(reqwest::Method::POST,"/v1/destinations",&scope_for(&ctx,workspace),serde_json::json!({"name":input.name,"kind":"managed","grant_creator":true,"policy":{"max_rows":p.max_rows,"max_columns":p.max_columns,"max_cells":p.max_cells,"max_bytes":p.max_bytes,"max_ttl_seconds":p.max_ttl_seconds,"max_classification":p.max_classification,"allow_redistribution":input.allow_redistribution}})).await.map_err(map_error)?;
     authorize_dataset_admin(&state, &ctx, workspace).await?;
     Ok(Json(result))
 }
@@ -953,7 +955,9 @@ async fn filter_dataset_list(
             Err(e) => return Err(e),
         }
     }
-    Ok(serde_json::json!({"datasets":datasets}))
+    Ok(
+        serde_json::json!({"datasets":datasets,"canDelegate":crate::services::dataset_delegation::owner_identity(state,ctx,workspace).await.is_ok()}),
+    )
 }
 
 pub async fn run_datasets(

@@ -7,6 +7,7 @@ pub mod broker_credential;
 pub mod catalog_entry;
 pub mod connector;
 pub mod conversation;
+pub mod dataset_delegation;
 pub mod funnel_event;
 pub mod interaction_event;
 pub mod membership;
@@ -49,9 +50,7 @@ pub use oauth::*;
 pub use organization::Organization;
 pub use peer::{Peer, PeerStatus};
 pub use pipeline_event::{PipelineEvent, PipelineEventInput, PipelineEventStage};
-pub use relay_mapping::{
-    alias_is_valid, NewRelayMapping, RelayRunLink, WorkspaceRelayMapping,
-};
+pub use relay_mapping::{alias_is_valid, NewRelayMapping, RelayRunLink, WorkspaceRelayMapping};
 pub use role::Role;
 pub use routing_decision::{RoutingDecision, RoutingTarget};
 pub use rule_diagnostic::*;

@@ -9,6 +9,7 @@ pub mod broker_credential_repo;
 pub mod catalog_repo;
 pub mod connector_repo;
 pub mod conversation_repo;
+pub mod dataset_delegation_repo;
 pub mod funnel_event_repo;
 pub mod interaction_event_repo;
 pub mod membership_repo;

@@ -1,3 +1,4 @@
+pub mod dataset_delegation;
 use axum::{
     body::Body,
     extract::DefaultBodyLimit,
@@ -69,6 +70,14 @@ pub fn router(state: AppState) -> Router {
 
     // Routes that are always public (no auth middleware).
     let public = Router::new()
+        .route(
+            "/api/v1/dataset-delegations/:grant_id/descriptor",
+            get(dataset_delegation::descriptor),
+        )
+        .route(
+            "/api/v1/dataset-delegations/:grant_id/read",
+            post(dataset_delegation::read),
+        )
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth::discovery),
@@ -180,6 +189,8 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces/:id/relay/destinations",
             get(relay::dataset_destinations).post(relay::create_dataset_destination),
         )
+        .route("/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id/delegations", get(dataset_delegation::list).post(dataset_delegation::create))
+        .route("/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id/delegations/:grant_id", delete(dataset_delegation::revoke))
         .route(
             "/api/v1/workspaces/:id/relay/datasets",
             get(relay::dataset_list),
