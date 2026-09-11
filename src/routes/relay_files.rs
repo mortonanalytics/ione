@@ -145,7 +145,17 @@ impl RegisterFile {
         {
             return Err(invalid());
         }
-        for path in [&self.prefix, &self.path] {
+        for (label, path) in [
+            ("approved prefix", &self.prefix),
+            (
+                if matches!(self.format, Format::Csv | Format::Parquet) {
+                    "directory path"
+                } else {
+                    "object path"
+                },
+                &self.path,
+            ),
+        ] {
             if path.is_empty()
                 || path.len() > 1024
                 || path.contains(['%', '?', '#', '\\'])
@@ -154,7 +164,7 @@ impl RegisterFile {
                     .split('/')
                     .any(|part| part.is_empty() || part == "." || part == "..")
             {
-                return Err(invalid());
+                return Err(AppError::BadRequest(format!("{label} must be a nonempty relative path without trailing slash, empty segments or traversal")));
             }
         }
         let endpoint = url::Url::parse(&self.endpoint).map_err(|_| invalid())?;

@@ -6900,6 +6900,9 @@ function resetDatasetWorkspace() {
   document.getElementById('data-file-status').textContent = '';
   document.getElementById('data-file-columns').hidden = false;
   document.getElementById('data-file-csv').hidden = true;
+  document.getElementById('data-file-path-label').textContent = 'Object path relative to prefix';
+  document.getElementById('data-file-path-help').textContent = 'Exact object key beneath the approved prefix, for example sales.json. Do not repeat the approved prefix.';
+  document.querySelector('#data-file-form [name=path]').placeholder = 'sales.json';
   document.querySelector('#data-file-form button[type=submit]').disabled = false;
   dataRecipe = null;
   dataRecipes = [];
@@ -7351,6 +7354,13 @@ document.getElementById('data-recipe-save-form').addEventListener('submit', asyn
 
 const dataFileForm = document.getElementById('data-file-form');
 dataFileForm.elements.format.addEventListener('change', () => {
+  const format = dataFileForm.elements.format.value;
+  const directory = format === 'csv' || format === 'parquet';
+  document.getElementById('data-file-path-label').textContent = directory ? 'Directory path relative to prefix' : 'Object path relative to prefix';
+  dataFileForm.elements.path.placeholder = directory ? format : (format === 'json' ? 'sales.json' : format === 'ndjson' ? 'sales.ndjson' : format === 'ipc_file' ? 'sales.arrow' : 'sales.arrows');
+  document.getElementById('data-file-path-help').textContent = directory
+    ? `Enter a directory containing one ${format === 'csv' ? '.csv (or .tsv with a tab delimiter)' : '.parquet'} object, without a trailing slash. For ${format}/orders.${format}, enter ${format}. Do not repeat the approved prefix.`
+    : 'Exact object key beneath the approved prefix. Do not repeat the approved prefix.';
   document.getElementById('data-file-columns').hidden = dataFileForm.elements.format.value === 'parquet';
   document.getElementById('data-file-csv').hidden = dataFileForm.elements.format.value !== 'csv';
 });

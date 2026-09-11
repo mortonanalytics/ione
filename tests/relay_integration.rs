@@ -1877,7 +1877,11 @@ async fn file_sources_build_typed_configs_retry_and_recheck_permissions() {
         let mut body = input.clone();
         body["alias"] = json!(format!("file_{format}"));
         body["format"] = json!(format);
-        body["path"] = json!(format!("data.{format}"));
+        body["path"] = json!(if matches!(format, "csv" | "parquet") {
+            format.to_string()
+        } else {
+            format!("data.{format}")
+        });
         if format == "csv" {
             body["csv"] = json!({"delimiter":",","quote":"\"","escape":null,"header":true,"nullValue":"NULL"});
         }
@@ -1942,6 +1946,14 @@ async fn file_sources_build_typed_configs_retry_and_recheck_permissions() {
             json!({"access_key_id":"file-access-canary","secret_access_key":"file-secret-canary"})
         );
         if format == "parquet" {
+            assert_eq!(created["public_config"]["tables"]["records"], "parquet");
+        } else {
+            assert_eq!(
+                created["public_config"]["tables"]["records"]["path"],
+                body["path"]
+            );
+        }
+        if format == "parquet" {
             assert_eq!(created["public_config"]["classification"], "internal");
         }
         if format != "parquet" {
@@ -1977,6 +1989,20 @@ async fn file_sources_build_typed_configs_retry_and_recheck_permissions() {
         assert_eq!(grant["entity_allowlist"], json!(["records"]));
         assert_eq!(grant["principal_id"], user.to_string());
         assert_eq!(grant["workspace_id"], json!(ws));
+    }
+    for format in ["csv", "parquet"] {
+        let mut invalid = input.clone();
+        invalid["alias"] = json!("bad_directory");
+        invalid["format"] = json!(format);
+        invalid["path"] = json!(format!("{format}/"));
+        let response = client
+            .post(format!("{root}/file-sources"))
+            .json(&invalid)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.text().await.unwrap().contains("directory path"));
     }
     let mut changed_keys = input.clone();
     changed_keys["secretAccessKey"] = json!("changed-secret-canary");

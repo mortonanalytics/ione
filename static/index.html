@@ -205,7 +205,8 @@
                 <label>Bucket <input name="bucket" required></label>
                 <label>Approved prefix <input name="prefix" placeholder="reports" required></label>
                 <label>Table name <input name="table" value="records" required></label>
-                <label>Object path relative to prefix <input name="path" placeholder="sales.json" required></label>
+                <label><span id="data-file-path-label">Object path relative to prefix</span> <input name="path" placeholder="sales.json" aria-describedby="data-file-path-help" required></label>
+                <p id="data-file-path-help" class="data-hint">Exact object key beneath the approved prefix, for example sales.json. Do not repeat the approved prefix.</p>
                 <label>Source classification floor <select name="classification"><option value="restricted">Restricted</option><option value="confidential">Confidential</option><option value="internal">Internal</option><option value="public">Public</option></select></label>
                 <label>Format <select name="format"><option value="json">JSON array</option><option value="ndjson">NDJSON</option><option value="ipc_file">Arrow IPC file</option><option value="ipc_stream">Arrow IPC stream</option><option value="csv">CSV</option><option value="parquet">Parquet</option></select></label>
                 <div id="data-file-columns">

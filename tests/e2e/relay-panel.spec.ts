@@ -264,8 +264,11 @@ test("file onboarding submits typed formats with JSON headers and clears both ke
     await form.locator("[name=endpoint]").fill("http://127.0.0.1:59000");
     await form.locator("[name=bucket]").fill("reports");
     await form.locator("[name=prefix]").fill("approved");
-    await form.locator("[name=path]").fill(`sales.${format}`);
     await form.locator("[name=format]").selectOption(format);
+    const directory = format === "csv" || format === "parquet";
+    await expect(page.locator("#data-file-path-label")).toHaveText(directory ? "Directory path relative to prefix" : "Object path relative to prefix");
+    if (directory) await expect(page.locator("#data-file-path-help")).toContainText(`enter ${format}`);
+    await form.locator("[name=path]").fill(directory ? format : `sales.${format}`);
     if (format !== "parquet") await form.locator("[name=columns]").fill(JSON.stringify(columns));
     else await expect(page.locator("#data-file-columns")).toBeHidden();
     await form.locator("[name=policyReceipt]").fill(JSON.stringify(receipt));
@@ -277,6 +280,7 @@ test("file onboarding submits typed formats with JSON headers and clears both ke
     await expect(page.locator("#data-file-status")).toContainText("operator-attested");
     const sent = requests[requests.length - 1];
     expect(sent.format).toBe(format);
+    expect(sent.path).toBe(directory ? format : `sales.${format}`);
     expect(sent.classification).toBe("restricted");
     expect(sent.columns).toEqual(format === "parquet" ? [] : columns);
     expect(sent.policyReceipt).toEqual(receipt);
@@ -304,7 +308,7 @@ test("file onboarding discards workspace drafts and late responses", async ({ pa
   await page.locator("#tab-data").click();
   await page.locator("#data-file-admin summary").click();
   const form = page.locator("#data-file-form");
-  for (const [name, value] of Object.entries({ name: "Draft", alias: "draft", endpoint: "http://127.0.0.1:59000", bucket: "reports", prefix: "approved", path: "data.parquet", policyReceipt: "{}", accessKeyId: "access-canary", secretAccessKey: "secret-canary" })) await form.locator(`[name=${name}]`).fill(value);
+  for (const [name, value] of Object.entries({ name: "Draft", alias: "draft", endpoint: "http://127.0.0.1:59000", bucket: "reports", prefix: "approved", path: "parquet", policyReceipt: "{}", accessKeyId: "access-canary", secretAccessKey: "secret-canary" })) await form.locator(`[name=${name}]`).fill(value);
   await form.locator("[name=format]").selectOption("parquet");
   await form.locator("button[type=submit]").click();
   await expect.poll(() => submitted).toBe(true);
