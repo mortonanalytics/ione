@@ -106,6 +106,10 @@ async fn peer_import_pins_identity_retries_and_revokes_current_mapping_access() 
         })
         .mount(&owner)
         .await;
+    let registered_config = Arc::new(Mutex::new(Value::Null));
+    let received_config = registered_config.clone();
+    let connection_config = registered_config.clone();
+    Mock::given(method("GET")).and(path(format!("/v1/connections/{connection}"))).respond_with(move|_:&wiremock::Request|ResponseTemplate::new(200).set_body_json(json!({"id":connection,"kind":"ione_dataset","public_config":connection_config.lock().unwrap().clone()}))).mount(&relay).await;
     let nonce = Arc::new(Mutex::new(None::<String>));
     let seen = nonce.clone();
     let creates = Arc::new(AtomicUsize::new(0));
@@ -115,6 +119,7 @@ async fn peer_import_pins_identity_retries_and_revokes_current_mapping_access() 
         .respond_with(move |r: &wiremock::Request| {
             let b: Value = serde_json::from_slice(&r.body).unwrap();
             assert_eq!(b["kind"], "ione_dataset");
+            *received_config.lock().unwrap() = b["public_config"].clone();
             let id = b["request_id"].as_str().unwrap().to_owned();
             let mut old = seen.lock().unwrap();
             if let Some(ref previous) = *old {
@@ -369,6 +374,204 @@ async fn peer_import_pins_identity_retries_and_revokes_current_mapping_access() 
     .await
     .unwrap();
     assert!(repo.has_run(org, ws, actor, run).await.unwrap());
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/runs/{run}/result")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"rows":[[200]],"row_count":1})),
+        )
+        .mount(&relay)
+        .await;
+    let result_url = format!("{root}/runs/{run}/result");
+    assert_eq!(client.get(&result_url).send().await.unwrap().status(), 200);
+    for (table, column, key, changed, original) in [
+        (
+            "workspace_peer_bindings",
+            "foreign_workspace_id",
+            binding,
+            Uuid::new_v4().to_string(),
+            owner_ws.to_string(),
+        ),
+        (
+            "workspace_peer_bindings",
+            "foreign_tenant_id",
+            binding,
+            Uuid::new_v4().to_string(),
+            owner_org.to_string(),
+        ),
+        (
+            "peers",
+            "mcp_url",
+            peer,
+            format!("{}/", owner.uri()),
+            format!("{}/mcp", owner.uri()),
+        ),
+    ] {
+        sqlx::query(&format!("UPDATE {table} SET {column}=$2 WHERE id=$1"))
+            .bind(key)
+            .bind(&changed)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            repo.effective_for_user(org, ws, actor)
+                .await
+                .unwrap()
+                .is_empty(),
+            "{column}"
+        );
+        assert!(
+            repo.set_enabled(org, ws, mapping.id, true)
+                .await
+                .unwrap()
+                .is_none(),
+            "{column}"
+        );
+        assert!(
+            !repo.has_run(org, ws, actor, run).await.unwrap(),
+            "{column}"
+        );
+        assert_eq!(
+            client.get(&result_url).send().await.unwrap().status(),
+            404,
+            "{column}"
+        );
+        assert_eq!(
+            client
+                .post(format!("{root}/peer-datasets/import"))
+                .json(&import)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403,
+            "{column}"
+        );
+        sqlx::query(&format!("UPDATE {table} SET {column}=$2 WHERE id=$1"))
+            .bind(key)
+            .bind(&original)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.effective_for_user(org, ws, actor).await.unwrap().len(),
+            1
+        );
+        assert!(repo
+            .set_enabled(org, ws, mapping.id, true)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(client.get(&result_url).send().await.unwrap().status(), 200);
+    }
+    for claim in [
+        json!({"deployment_id":Uuid::new_v4()}),
+        json!({"deployment_id":null}),
+    ] {
+        sqlx::query("UPDATE peers SET sharing_policy=$2 WHERE id=$1")
+            .bind(peer)
+            .bind(claim)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(repo
+            .effective_for_user(org, ws, actor)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .set_enabled(org, ws, mapping.id, true)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(client.get(&result_url).send().await.unwrap().status(), 404);
+    }
+    sqlx::query("UPDATE peers SET sharing_policy=$2 WHERE id=$1")
+        .bind(peer)
+        .bind(json!({"deployment_id":owner_deployment}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(client.get(&result_url).send().await.unwrap().status(), 200);
+    assert!(sqlx::query(
+        "UPDATE relay_peer_dataset_mappings SET owner_workspace_id=$2 WHERE mapping_id=$1"
+    )
+    .bind(mapping.id)
+    .bind(Uuid::new_v4())
+    .execute(&pool)
+    .await
+    .is_err());
+    let rebound_workspace = Uuid::new_v4();
+    sqlx::query("UPDATE workspace_peer_bindings SET foreign_workspace_id=$2 WHERE id=$1")
+        .bind(binding)
+        .bind(rebound_workspace.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    descriptor.lock().unwrap()["owner"]["workspace_id"] = json!(rebound_workspace);
+    assert_eq!(
+        client
+            .post(format!("{root}/peer-datasets/import"))
+            .json(&import)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    descriptor.lock().unwrap()["owner"]["workspace_id"] = json!(owner_ws);
+    sqlx::query("UPDATE workspace_peer_bindings SET foreign_workspace_id=$2 WHERE id=$1")
+        .bind(binding)
+        .bind(owner_ws.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM relay_peer_dataset_mappings WHERE mapping_id=$1")
+        .bind(mapping.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO relay_peer_dataset_mappings(mapping_id,org_id,workspace_id,peer_id,binding_id,grant_id) VALUES($1,$2,$3,$4,$5,$6)").bind(mapping.id).bind(org).bind(ws).bind(peer).bind(binding).bind(grant).execute(&pool).await.unwrap();
+    assert!(repo
+        .effective_for_user(org, ws, actor)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .set_enabled(org, ws, mapping.id, true)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(client.get(&result_url).send().await.unwrap().status(), 404);
+    let valid_config = registered_config.lock().unwrap().clone();
+    registered_config.lock().unwrap()["remote"]["owner"]["workspace_id"] = json!(Uuid::new_v4());
+    assert_eq!(
+        client
+            .post(format!("{root}/peer-datasets/import"))
+            .json(&import)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert!(repo
+        .effective_for_user(org, ws, actor)
+        .await
+        .unwrap()
+        .is_empty());
+    *registered_config.lock().unwrap() = valid_config;
+    assert_eq!(
+        client
+            .post(format!("{root}/peer-datasets/import"))
+            .json(&import)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(creates.load(Ordering::SeqCst), 2);
+    assert_eq!(client.get(&result_url).send().await.unwrap().status(), 200);
     sqlx::query("UPDATE workspace_peer_bindings SET status='inactive' WHERE id=$1")
         .bind(binding)
         .execute(&pool)
@@ -453,8 +656,9 @@ async fn peer_import_pins_identity_retries_and_revokes_current_mapping_access() 
     })
     .await
     .unwrap();
-    sqlx::query("UPDATE workspace_peer_bindings SET status='inactive' WHERE id=$1")
+    sqlx::query("UPDATE workspace_peer_bindings SET foreign_workspace_id=$2 WHERE id=$1")
         .bind(binding)
+        .bind(Uuid::new_v4().to_string())
         .execute(&pool)
         .await
         .unwrap();

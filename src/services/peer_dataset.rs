@@ -322,6 +322,19 @@ fn allowed_ip(ip: IpAddr, private: bool) -> bool {
     }
 }
 
+fn matches_import(peer: &BoundPeer, original: &BoundPeer, descriptor: &Descriptor) -> bool {
+    peer.id == original.id
+        && peer.binding_id == original.binding_id
+        && peer.mcp_url == original.mcp_url
+        && peer.foreign_tenant_id == descriptor.owner.tenant_id.to_string()
+        && peer.foreign_workspace_id.as_deref()
+            == Some(descriptor.owner.workspace_id.to_string().as_str())
+        && peer
+            .sharing_policy
+            .get("deployment_id")
+            .is_none_or(|p| p.as_str() == Some(descriptor.owner.deployment_id.to_string().as_str()))
+}
+
 pub async fn import(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -339,9 +352,11 @@ pub async fn import(
     let identity = origin(&state, &ctx, ws).await?;
     let (base, d) = fetch(&state, &peer, &identity, input.grant_id, &input.token).await?;
     let fresh = bound(&state, &ctx, ws, input.peer_id).await?;
-    if fresh.binding_id != peer.binding_id || fresh.mcp_url != peer.mcp_url {
+    if !matches_import(&fresh, &peer, &d) {
         return Err(AppError::Forbidden);
     }
+    let remote = serde_json::json!({"grant_id":d.grant_id,"owner":d.owner,"origin":d.origin,"dataset_id":d.dataset_id,"version_id":d.version_id,"arrow_schema_hash":d.arrow_schema_hash,"content_digest":d.content_digest,"expires_at":d.expires_at});
+    let config = serde_json::json!({"base_url":base,"remote":remote,"schema_ipc_base64":d.schema_ipc_base64,"row_count":d.row_count,"columns":d.columns,"classification":d.classification});
     let client = state
         .relay
         .as_deref()
@@ -375,40 +390,71 @@ pub async fn import(
         if !same || mapping.principal_id != Some(ctx.user_id) || !mapping.enabled {
             return Err(AppError::BadRequest("source alias already exists".into()));
         }
+        let unpinned:bool=sqlx::query_scalar("SELECT owner_tenant_id IS NULL FROM relay_peer_dataset_mappings WHERE mapping_id=$1 AND org_id=$2 AND workspace_id=$3").bind(mapping.id).bind(ctx.org_id).bind(ws).fetch_one(&mut *tx).await.map_err(anyhow::Error::from)?;
+        if unpinned {
+            let registered = client
+                .manage_source(
+                    reqwest::Method::GET,
+                    &format!("/v1/connections/{}", mapping.relay_connection_id),
+                    &crate::routes::relay::scope_for(&ctx, ws),
+                    serde_json::json!({}),
+                )
+                .await
+                .map_err(|_| AppError::Forbidden)?;
+            if registered["id"] != serde_json::json!(mapping.relay_connection_id)
+                || registered["kind"] != "ione_dataset"
+                || registered["public_config"] != config
+            {
+                return Err(AppError::Forbidden);
+            }
+            let checked = bound(&state, &ctx, ws, peer.id).await?;
+            if !matches_import(&checked, &peer, &d) {
+                return Err(AppError::Forbidden);
+            }
+        }
+        let pinned=sqlx::query("UPDATE relay_peer_dataset_mappings d SET owner_tenant_id=$7,owner_workspace_id=$8,owner_deployment_id=$9,peer_url=$10 WHERE d.mapping_id=$1 AND d.org_id=$2 AND d.workspace_id=$3 AND d.peer_id=$4 AND d.binding_id=$5 AND d.grant_id=$6 AND (d.owner_tenant_id IS NULL OR (d.owner_tenant_id=$7 AND d.owner_workspace_id=$8 AND d.owner_deployment_id=$9 AND d.peer_url=$10)) AND EXISTS (SELECT 1 FROM workspace_peer_bindings b JOIN peers p ON p.id=b.peer_id AND p.org_id=b.org_id WHERE b.id=d.binding_id AND b.org_id=d.org_id AND b.workspace_id=d.workspace_id AND b.peer_id=d.peer_id AND b.status='active' AND p.status='active' AND b.foreign_tenant_id=$7::uuid::text AND b.foreign_workspace_id=$8::uuid::text AND p.mcp_url=$10 AND (NOT (p.sharing_policy ? 'deployment_id') OR p.sharing_policy->>'deployment_id'=$9::uuid::text) FOR SHARE OF b,p)")
+            .bind(mapping.id).bind(ctx.org_id).bind(ws).bind(peer.id).bind(peer.binding_id).bind(d.grant_id).bind(d.owner.tenant_id).bind(d.owner.workspace_id).bind(d.owner.deployment_id).bind(&peer.mcp_url).execute(&mut *tx).await.map_err(anyhow::Error::from)?.rows_affected();
+        if pinned != 1 {
+            return Err(AppError::Forbidden);
+        }
+        tx.commit().await.map_err(anyhow::Error::from)?;
         return Ok(Json(mapping));
     }
     let request_id:Uuid=sqlx::query_scalar("SELECT request_id FROM relay_source_registrations WHERE org_id=$1 AND workspace_id=$2 AND actor_id=$3 AND alias=$4").bind(ctx.org_id).bind(ws).bind(ctx.user_id).bind(&input.alias).fetch_one(&mut *tx).await.map_err(anyhow::Error::from)?;
-    let remote = serde_json::json!({"grant_id":d.grant_id,"owner":d.owner,"origin":d.origin,"dataset_id":d.dataset_id,"version_id":d.version_id,"arrow_schema_hash":d.arrow_schema_hash,"content_digest":d.content_digest,"expires_at":d.expires_at});
-    let config = serde_json::json!({"base_url":base,"remote":remote,"schema_ipc_base64":d.schema_ipc_base64,"row_count":d.row_count,"columns":d.columns,"classification":d.classification});
     let scope = crate::routes::relay::scope_for(&ctx, ws);
     let unavailable = |_| {
         AppError::RelayUpstream(
             "peer source registration was not confirmed; retry the same alias".into(),
         )
     };
-    bound(&state, &ctx, ws, peer.id).await?;
+    let checked = bound(&state, &ctx, ws, peer.id).await?;
+    if !matches_import(&checked, &peer, &d) {
+        return Err(AppError::Forbidden);
+    }
     let created=client.manage_source(reqwest::Method::POST,"/v1/connections",&scope,serde_json::json!({"request_id":request_id,"workspace_id":ws,"kind":"ione_dataset","name":input.name,"public_config":config,"credential":input.token})).await.map_err(unavailable)?;
     let id = created["id"]
         .as_str()
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| AppError::RelayUpstream("peer source identity unavailable".into()))?;
     let result=async {
-        let current=bound(&state,&ctx,ws,peer.id).await?;
+        let current=bound(&state,&ctx,ws,peer.id).await?; if !matches_import(&current,&peer,&d){return Err(AppError::Forbidden)}
         if current.binding_id!=peer.binding_id||current.mcp_url!=peer.mcp_url{return Err(AppError::Forbidden)}
         let validation=client.manage_source(reqwest::Method::POST,&format!("/v1/connections/{id}/validate"),&scope,serde_json::json!({"claimed_assurance":"provider_verified"})).await.map_err(unavailable)?;
         if validation["state"]!="active"{return Err(AppError::BadRequest("peer dataset validation failed".into()))}
-        bound(&state,&ctx,ws,peer.id).await?;
+        let checked=bound(&state,&ctx,ws,peer.id).await?; if !matches_import(&checked,&peer,&d){return Err(AppError::Forbidden)}
         let catalog=client.manage_source(reqwest::Method::POST,&format!("/v1/connections/{id}/catalog"),&scope,serde_json::json!({})).await.map_err(unavailable)?;
         if catalog["entities"]!=1{return Err(AppError::BadRequest("peer dataset catalog invalid".into()))}
-        bound(&state,&ctx,ws,peer.id).await?;
+        let checked=bound(&state,&ctx,ws,peer.id).await?; if !matches_import(&checked,&peer,&d){return Err(AppError::Forbidden)}
         client.manage_source(reqwest::Method::POST,&format!("/v1/connections/{id}/grants"),&scope,serde_json::json!({"workspace_id":ws,"principal_kind":"principal","principal_id":ctx.user_id.to_string(),"entity_allowlist":["dataset"]})).await.map_err(unavailable)?;
-        let current=bound(&state,&ctx,ws,peer.id).await?;
+        let current=bound(&state,&ctx,ws,peer.id).await?; if !matches_import(&current,&peer,&d){return Err(AppError::Forbidden)}
         if current.binding_id!=peer.binding_id||current.mcp_url!=peer.mcp_url{return Err(AppError::Forbidden)}
         let (_,confirmed)=fetch(&state,&current,&identity,d.grant_id,&input.token).await?;
         if serde_json::to_value(&confirmed).map_err(anyhow::Error::from)?!=serde_json::to_value(&d).map_err(anyhow::Error::from)?{return Err(AppError::Forbidden)}
-        bound(&state,&ctx,ws,peer.id).await?;
+        let checked=bound(&state,&ctx,ws,peer.id).await?; if !matches_import(&checked,&peer,&d){return Err(AppError::Forbidden)}
+        let binding_matches:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workspace_peer_bindings b JOIN peers p ON p.id=b.peer_id AND p.org_id=b.org_id WHERE b.id=$1 AND b.org_id=$2 AND b.workspace_id=$3 AND b.peer_id=$4 AND b.status='active' AND p.status='active' AND b.foreign_tenant_id=$5::uuid::text AND b.foreign_workspace_id=$6::uuid::text AND p.mcp_url=$7 AND (NOT (p.sharing_policy ? 'deployment_id') OR p.sharing_policy->>'deployment_id'=$8::uuid::text) FOR SHARE OF b,p)").bind(peer.binding_id).bind(ctx.org_id).bind(ws).bind(peer.id).bind(d.owner.tenant_id).bind(d.owner.workspace_id).bind(&peer.mcp_url).bind(d.owner.deployment_id).fetch_one(&mut *tx).await.map_err(anyhow::Error::from)?;
+        if !binding_matches {return Err(AppError::Forbidden)}
         let mapping:crate::models::WorkspaceRelayMapping=sqlx::query_as("INSERT INTO workspace_relay_mappings(org_id,workspace_id,relay_connection_id,display_name,alias,principal_id,created_by,peer_dataset_import) VALUES($1,$2,$3,$4,$5,$6,$6,true) RETURNING id,org_id,workspace_id,relay_connection_id,display_name,alias,principal_id,enabled,created_by,created_at,updated_at").bind(ctx.org_id).bind(ws).bind(id).bind(&input.name).bind(&input.alias).bind(ctx.user_id).fetch_one(&mut *tx).await.map_err(anyhow::Error::from)?;
-        sqlx::query("INSERT INTO relay_peer_dataset_mappings(mapping_id,org_id,workspace_id,peer_id,binding_id,grant_id) VALUES($1,$2,$3,$4,$5,$6)").bind(mapping.id).bind(ctx.org_id).bind(ws).bind(peer.id).bind(peer.binding_id).bind(d.grant_id).execute(&mut *tx).await.map_err(anyhow::Error::from)?;
+        sqlx::query("INSERT INTO relay_peer_dataset_mappings(mapping_id,org_id,workspace_id,peer_id,binding_id,grant_id,owner_tenant_id,owner_workspace_id,owner_deployment_id,peer_url) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)").bind(mapping.id).bind(ctx.org_id).bind(ws).bind(peer.id).bind(peer.binding_id).bind(d.grant_id).bind(d.owner.tenant_id).bind(d.owner.workspace_id).bind(d.owner.deployment_id).bind(&peer.mcp_url).execute(&mut *tx).await.map_err(anyhow::Error::from)?;
         Ok(mapping)
     }.await;
     if matches!(
