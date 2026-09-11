@@ -191,6 +191,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id/delegations", get(dataset_delegation::list).post(dataset_delegation::create))
         .route("/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id/delegations/:grant_id", delete(dataset_delegation::revoke))
+        .route("/api/v1/workspaces/:id/relay/dataset-origin", get(crate::services::peer_dataset::identity))
+        .route("/api/v1/workspaces/:id/relay/peer-datasets", get(crate::services::peer_dataset::choices))
+        .route("/api/v1/workspaces/:id/relay/peer-datasets/descriptor", post(crate::services::peer_dataset::discover))
+        .route("/api/v1/workspaces/:id/relay/peer-datasets/import", post(crate::services::peer_dataset::import))
         .route(
             "/api/v1/workspaces/:id/relay/datasets",
             get(relay::dataset_list),

@@ -42,6 +42,7 @@ impl RelayMappingRepo {
             "SELECT {MAPPING_COLUMNS} FROM workspace_relay_mappings \
              WHERE workspace_id = $1 AND enabled \
                AND (principal_id IS NULL OR principal_id = $2) \
+               AND (NOT peer_dataset_import OR EXISTS (SELECT 1 FROM relay_peer_dataset_mappings d JOIN workspace_peer_bindings b ON b.id=d.binding_id AND b.org_id=d.org_id AND b.workspace_id=d.workspace_id AND b.peer_id=d.peer_id JOIN peers p ON p.id=d.peer_id AND p.org_id=d.org_id WHERE d.mapping_id=workspace_relay_mappings.id AND d.org_id=workspace_relay_mappings.org_id AND d.workspace_id=workspace_relay_mappings.workspace_id AND b.status='active' AND p.status='active')) \
              ORDER BY display_name"
         ))
         .bind(workspace_id)
@@ -129,7 +130,7 @@ impl RelayMappingRepo {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         let row = sqlx::query_as::<_, WorkspaceRelayMapping>(&format!(
             "UPDATE workspace_relay_mappings SET enabled = $3, updated_at = now() \
-             WHERE id = $1 AND workspace_id = $2 RETURNING {MAPPING_COLUMNS}"
+             WHERE id = $1 AND workspace_id = $2 AND (NOT $3 OR NOT peer_dataset_import OR EXISTS (SELECT 1 FROM relay_peer_dataset_mappings d JOIN workspace_peer_bindings b ON b.id=d.binding_id AND b.org_id=d.org_id AND b.workspace_id=d.workspace_id AND b.peer_id=d.peer_id JOIN peers p ON p.id=d.peer_id AND p.org_id=d.org_id WHERE d.mapping_id=workspace_relay_mappings.id AND d.org_id=workspace_relay_mappings.org_id AND d.workspace_id=workspace_relay_mappings.workspace_id AND b.status='active' AND p.status='active')) RETURNING {MAPPING_COLUMNS}"
         ))
         .bind(id)
         .bind(workspace_id)
@@ -201,7 +202,8 @@ impl RelayMappingRepo {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM relay_run_links
-             WHERE org_id = $1 AND workspace_id = $2 AND user_id = $3 AND relay_run_id = $4)",
+             WHERE org_id = $1 AND workspace_id = $2 AND user_id = $3 AND relay_run_id = $4
+               AND NOT EXISTS (SELECT 1 FROM unnest(mapping_ids) AS mid LEFT JOIN workspace_relay_mappings m ON m.id=mid WHERE m.id IS NULL OR m.peer_dataset_import AND (NOT m.enabled OR m.principal_id IS DISTINCT FROM $3 OR NOT EXISTS (SELECT 1 FROM relay_peer_dataset_mappings d JOIN workspace_peer_bindings b ON b.id=d.binding_id AND b.org_id=d.org_id AND b.workspace_id=d.workspace_id AND b.peer_id=d.peer_id JOIN peers p ON p.id=d.peer_id AND p.org_id=d.org_id WHERE d.mapping_id=m.id AND d.org_id=$1 AND d.workspace_id=$2 AND b.status='active' AND p.status='active'))))",
         )
         .bind(org_id)
         .bind(workspace_id)

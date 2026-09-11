@@ -126,6 +126,14 @@ pub async fn create_mapping(
         .available_connections(&scope_for(&ctx, workspace_id))
         .await
         .map_err(map_error)?;
+    if available.connections.iter().any(|c| {
+        c["connection_id"] == serde_json::json!(input.relay_connection_id)
+            && c["kind"] == "ione_dataset"
+    }) {
+        return Err(AppError::BadRequest(
+            "use the peer dataset import flow for this connection".into(),
+        ));
+    }
     let offered = available.connections.iter().any(|c| {
         c.get("connection_id")
             .and_then(|id| id.as_str())
@@ -202,15 +210,17 @@ pub async fn available_sources(
     require_permission(&ctx, &state.pool, workspace_id, DATA_QUERY).await?;
 
     let client = relay(&state)?;
-    let mappings = RelayMappingRepo::new(state.pool.clone())
-        .effective_for_user(ctx.org_id, workspace_id, ctx.user_id)
-        .await
-        .map_err(AppError::Internal)?;
 
     let available = client
         .available_connections(&scope_for(&ctx, workspace_id))
         .await
         .map_err(map_error)?;
+
+    require_permission(&ctx, &state.pool, workspace_id, DATA_QUERY).await?;
+    let mappings = RelayMappingRepo::new(state.pool.clone())
+        .effective_for_user(ctx.org_id, workspace_id, ctx.user_id)
+        .await
+        .map_err(AppError::Internal)?;
 
     let sources: Vec<serde_json::Value> = mappings
         .iter()
@@ -376,6 +386,7 @@ pub async fn ask(
         )
         .await
         .map_err(AppError::Internal)?;
+        authorize_run(&state, &ctx, workspace_id, run_id).await?;
     } else {
         return Err(AppError::RelayUpstream(
             "the data service returned no run identity".into(),
@@ -466,11 +477,12 @@ pub async fn run_result(
     Path((workspace_id, run_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     authorize_run(&state, &ctx, workspace_id, run_id).await?;
-    relay(&state)?
+    let result = relay(&state)?
         .result(&scope_for(&ctx, workspace_id), run_id)
         .await
-        .map(Json)
-        .map_err(map_error)
+        .map_err(map_error)?;
+    authorize_run(&state, &ctx, workspace_id, run_id).await?;
+    Ok(Json(result))
 }
 
 pub async fn run_receipts(
@@ -479,11 +491,12 @@ pub async fn run_receipts(
     Path((workspace_id, run_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     authorize_run(&state, &ctx, workspace_id, run_id).await?;
-    relay(&state)?
+    let result = relay(&state)?
         .receipts(&scope_for(&ctx, workspace_id), run_id)
         .await
-        .map(Json)
-        .map_err(map_error)
+        .map_err(map_error)?;
+    authorize_run(&state, &ctx, workspace_id, run_id).await?;
+    Ok(Json(result))
 }
 
 #[derive(Debug, Deserialize)]
@@ -742,7 +755,7 @@ pub async fn register_source(
     result.map(Json)
 }
 
-async fn authorize_source_admin(
+pub(crate) async fn authorize_source_admin(
     state: &AppState,
     ctx: &AuthContext,
     workspace_id: Uuid,

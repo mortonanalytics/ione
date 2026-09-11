@@ -195,6 +195,23 @@
                 <p id="data-source-status" role="status"></p>
               </form>
             </details>
+            <details id="data-peer-dataset-admin" class="data-limits" hidden>
+              <summary>Add peer dataset source</summary>
+              <p>Send this origin identity to the dataset owner to request a read grant.</p>
+              <label>Your origin identity <textarea id="data-origin-identity" readonly></textarea></label>
+              <button id="data-origin-copy" type="button">Copy origin identity</button>
+              <form id="data-peer-dataset-form" autocomplete="off">
+                <label>Active bound peer <select name="peerId" required><option value="">Choose peer</option></select></label>
+                <label>Owner grant ID <input name="grantId" required></label>
+                <label>Read grant credential <input name="token" type="password" autocomplete="new-password" required></label>
+                <label>Name <input name="name" maxlength="128" required></label>
+                <label>Query alias <input name="alias" required pattern="[a-z_][a-z0-9_]{0,62}"></label>
+                <button type="submit">Inspect granted dataset</button>
+                <button id="data-peer-dataset-import" type="button" disabled>Add dataset source</button>
+                <button id="data-peer-dataset-cancel" type="button">Clear import</button>
+              </form>
+              <p id="data-peer-dataset-status" role="status"></p>
+            </details>
             <details id="data-destination-admin" class="data-limits" hidden>
               <summary>Create dataset storage</summary>
               <form id="data-destination-form">

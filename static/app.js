@@ -1,3 +1,5 @@
+let pendingPeerDataset = null;
+let peerDatasetRequest = null;
 let datasetDelegationSelection = null;
 /* ── Auth UI ── */
 const DEMO_WORKSPACE_ID_CONST = '00000000-0000-0000-0000-000000000d30';
@@ -6332,6 +6334,7 @@ async function loadDataSources() {
   if (!activeWorkspace) return;
   loadDatasetDestinations();
   loadDatasetLibrary();
+  loadPeerDatasets();
   const sourceWorkspace = activeWorkspace.id;
   const sourceAdmin = document.getElementById('data-source-admin');
   sourceAdmin.hidden = true;
@@ -6869,6 +6872,10 @@ dataSourceForm.addEventListener('submit', async (event) => {
 });
 
 function resetDatasetWorkspace() {
+  clearPeerDatasetImport();
+  document.getElementById('data-peer-dataset-admin').hidden = true;
+  document.getElementById('data-origin-identity').value = '';
+  document.querySelector('#data-peer-dataset-form [name=peerId]').replaceChildren(new Option('Choose peer', ''));
   closeDatasetDelegation();
   document.getElementById('data-destination-form').reset();
   document.getElementById('data-destination-admin').hidden = true;
@@ -7089,5 +7096,104 @@ document.getElementById('data-delegation-copy').addEventListener('click', async 
     if (datasetDelegationSelection === selection) document.getElementById('data-delegation-status').textContent = 'Credential copied.';
   } catch (_) {
     if (datasetDelegationSelection === selection) document.getElementById('data-delegation-status').textContent = 'Select and copy the credential manually.';
+  }
+});
+
+
+function clearPeerDatasetImport() {
+  if (peerDatasetRequest) peerDatasetRequest.abort();
+  peerDatasetRequest = null;
+  if (pendingPeerDataset) pendingPeerDataset.token = '';
+  pendingPeerDataset = null;
+  document.getElementById('data-peer-dataset-form').reset();
+  document.getElementById('data-peer-dataset-import').disabled = true;
+  document.querySelector('#data-peer-dataset-form button[type=submit]').disabled = false;
+  document.getElementById('data-peer-dataset-status').textContent = '';
+}
+
+async function loadPeerDatasets() {
+  if (!activeWorkspace) return;
+  const workspace = activeWorkspace.id;
+  try {
+    const [identity, choices] = await Promise.all([
+      apiFetch(`/api/v1/workspaces/${workspace}/relay/dataset-origin`, { skipErrorToast: true }),
+      apiFetch(`/api/v1/workspaces/${workspace}/relay/peer-datasets`, { skipErrorToast: true }),
+    ]);
+    if (activeWorkspace?.id !== workspace) return;
+    if (identity.workspace_id !== workspace || !Array.isArray(choices.peers)) throw new Error('Invalid origin identity');
+    document.getElementById('data-origin-identity').value = JSON.stringify(identity, null, 2);
+    const select = document.querySelector('#data-peer-dataset-form [name=peerId]');
+    const selected = select.value;
+    select.replaceChildren(new Option('Choose peer', ''));
+    (choices.peers || []).forEach(peer => select.add(new Option(peer.name, peer.id)));
+    select.value = selected;
+    document.getElementById('data-peer-dataset-admin').hidden = false;
+  } catch (_) {
+    if (activeWorkspace?.id !== workspace) return;
+    clearPeerDatasetImport();
+    document.getElementById('data-peer-dataset-admin').hidden = true;
+    document.getElementById('data-origin-identity').value = '';
+  }
+}
+
+document.getElementById('data-origin-copy').addEventListener('click', async () => {
+  const workspace = activeWorkspace?.id;
+  const identity = document.getElementById('data-origin-identity').value;
+  if (!workspace || !identity) return;
+  try { await navigator.clipboard.writeText(identity); } catch (_) {
+    if (activeWorkspace?.id === workspace) document.getElementById('data-peer-dataset-status').textContent = 'Select and copy the origin identity manually.';
+  }
+});
+document.getElementById('data-peer-dataset-cancel').addEventListener('click', clearPeerDatasetImport);
+document.getElementById('data-peer-dataset-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!activeWorkspace) return;
+  const workspace = activeWorkspace.id;
+  const form = event.target;
+  const fields = Object.fromEntries(new FormData(form));
+  if (peerDatasetRequest) peerDatasetRequest.abort();
+  const request = new AbortController();
+  peerDatasetRequest = request;
+  if (pendingPeerDataset) pendingPeerDataset.token = '';
+  pendingPeerDataset = null;
+  document.getElementById('data-peer-dataset-import').disabled = true;
+  form.elements.token.value = '';
+  form.querySelector('button[type=submit]').disabled = true;
+  try {
+    const descriptor = await apiFetch(`/api/v1/workspaces/${workspace}/relay/peer-datasets/descriptor`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ peerId: fields.peerId, grantId: fields.grantId, token: fields.token }), signal: request.signal, skipErrorToast: true });
+    if (activeWorkspace?.id !== workspace || peerDatasetRequest !== request) return;
+    pendingPeerDataset = { workspace, peerId: fields.peerId, grantId: fields.grantId, token: fields.token };
+    document.getElementById('data-peer-dataset-status').textContent = `${descriptor.row_count} rows, ${descriptor.columns.length} columns. Immutable version ${descriptor.version_id}. Expires ${new Date(descriptor.expires_at).toLocaleString()}.`;
+    document.getElementById('data-peer-dataset-import').disabled = false;
+  } catch (_) {
+    if (activeWorkspace?.id === workspace && peerDatasetRequest === request) document.getElementById('data-peer-dataset-status').textContent = 'The grant could not be verified. Check the peer, origin identity, credential, and expiry.';
+  } finally {
+    fields.token = '';
+    if (peerDatasetRequest === request) form.querySelector('button[type=submit]').disabled = false;
+  }
+});
+document.getElementById('data-peer-dataset-import').addEventListener('click', async () => {
+  const pending = pendingPeerDataset;
+  if (!pending || activeWorkspace?.id !== pending.workspace) return;
+  const form = document.getElementById('data-peer-dataset-form');
+  if (form.elements.peerId.value !== pending.peerId || form.elements.grantId.value !== pending.grantId) { clearPeerDatasetImport(); return; }
+  const request = new AbortController();
+  peerDatasetRequest = request;
+  document.getElementById('data-peer-dataset-import').disabled = true;
+  try {
+    const mapping = await apiFetch(`/api/v1/workspaces/${pending.workspace}/relay/peer-datasets/import`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ peerId: pending.peerId, grantId: pending.grantId, token: pending.token, name: form.elements.name.value, alias: form.elements.alias.value }), signal: request.signal, skipErrorToast: true });
+    if (activeWorkspace?.id !== pending.workspace || peerDatasetRequest !== request) return;
+    clearPeerDatasetImport();
+    dataSelected.add(mapping.id);
+    await loadDataSources();
+    if (activeWorkspace?.id !== pending.workspace) return;
+    document.getElementById('data-peer-dataset-status').textContent = 'Dataset source ready. Ask a question using the selected source.';
+    dataAskInput.focus();
+  } catch (_) {
+    if (activeWorkspace?.id === pending.workspace && peerDatasetRequest === request) document.getElementById('data-peer-dataset-status').textContent = 'Import was not confirmed. Refresh sources, then retry the same alias and grant if needed.';
+  } finally {
+    pending.token = '';
+    if (pendingPeerDataset === pending) pendingPeerDataset = null;
+    if (peerDatasetRequest === request) form.elements.token.value = '';
   }
 });
