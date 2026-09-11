@@ -1411,3 +1411,285 @@ async fn managed_datasets_preserve_publication_scope_download_and_current_mappin
         StatusCode::FORBIDDEN
     );
 }
+
+#[tokio::test]
+#[ignore = "requires migrated PostgreSQL"]
+async fn private_recipes_resolve_current_mappings_and_replay_without_model() {
+    use std::sync::Arc;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    let (_, pool) = spawn_app().await;
+    let ws = ops_workspace_id(&pool).await;
+    let org = org_id(&pool).await;
+    let user = default_user_id(&pool).await;
+    let mock = MockServer::start().await;
+    let (_, mut state) = ione::app_with_state(pool.clone()).await;
+    let mut config = (*state.config).clone();
+    let deployment = Uuid::new_v4();
+    config.relay = Some(Arc::new(ione::config::RelayConfig {
+        base_url: mock.uri(),
+        deployment_id: deployment,
+        runtime_token: "recipe-runtime".into(),
+        management_token: None,
+        signing_key_id: "fixture".into(),
+        signing_key: "fixture-key".into(),
+        callback_verification_key: "fixture-callback".into(),
+        default_model: "fixture-model".into(),
+        timeout_ms: 5000,
+    }));
+    state.relay = Some(Arc::new(
+        ione::services::relay_client::RelayClient::new(config.relay.clone().unwrap()).unwrap(),
+    ));
+    state.config = Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!(
+        "http://{}/api/v1/workspaces/{ws}/relay",
+        listener.local_addr().unwrap()
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, ione::routes::router(state))
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let connection = Uuid::new_v4();
+    let dataset = Uuid::new_v4();
+    let version = Uuid::new_v4();
+    let run = Uuid::new_v4();
+    let recipe = Uuid::new_v4();
+    let recipe_version = Uuid::new_v4();
+    let repo = ione::repos::RelayMappingRepo::new(pool.clone());
+    let mapping = repo
+        .create(
+            org,
+            ws,
+            user,
+            ione::models::NewRelayMapping {
+                relay_connection_id: connection,
+                display_name: "Sales".into(),
+                alias: "pg".into(),
+                principal_id: Some(user),
+            },
+        )
+        .await
+        .unwrap();
+    repo.record_run(
+        org,
+        ws,
+        user,
+        run,
+        "succeeded",
+        &[mapping.id],
+        Some(4000),
+        true,
+        None,
+        None,
+        None,
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let entry = json!({"recipe_id":recipe,"version_id":recipe_version,"version":1,"name":"Sales","ask":"Count sales\n","sources":[{"alias":"pg","connection_id":connection}],"output_schema":[{"name":"count","ty":"int64"}],"definition_hash":format!("sha256:{}","a".repeat(64)),"dataset_id":dataset,"dataset_version_id":version,"run_id":run,"created_at":"2026-09-10T00:00:00Z"});
+    for (endpoint, body) in [
+        ("/v1/recipes".to_string(), json!({"recipes":[entry]})),
+        (
+            format!("/v1/recipes/{recipe}/versions/{recipe_version}"),
+            entry.clone(),
+        ),
+        (
+            format!("/v1/datasets/{dataset}/versions/{version}"),
+            json!({"deployment_id":deployment,"tenant_id":org,"workspace_id":ws,"dataset_id":dataset,"version_id":version,"run_id":run,"requires_source_access":false,"lineage":[{"alias":"pg","connection_id":connection}]}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&mock)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/v1/recipes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(entry.clone()))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/runs"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"run":{"id":Uuid::new_v4()},"outcome":{"kind":"succeeded"}})),
+        )
+        .mount(&mock)
+        .await;
+    let save = json!({"name":"Sales","datasetId":dataset,"versionId":version});
+    let ask = json!({"ask":"Count sales\n","mappingIds":[mapping.id],"recipeId":recipe,"recipeVersionId":recipe_version});
+    set_member_permissions(&pool, ws, json!([])).await;
+    for suffix in [
+        "recipes".to_string(),
+        format!("recipes/{recipe}/versions/{recipe_version}"),
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{root}/{suffix}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        client
+            .post(format!("{root}/recipes"))
+            .json(&save)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    set_member_permissions(&pool, ws, json!(["data:query"])).await;
+    let listed: Value = client
+        .get(format!("{root}/recipes"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["recipes"][0]["mappingIds"], json!([mapping.id]));
+    assert_eq!(
+        client
+            .post(format!("{root}/recipes"))
+            .json(&save)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .post(format!("{root}/ask"))
+            .json(&ask)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let requests = mock.received_requests().await.unwrap();
+    let sent: Value = serde_json::from_slice(
+        &requests
+            .iter()
+            .find(|r| r.url.path() == "/v1/runs")
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert_eq!(sent["ask"], "Count sales\n");
+    assert_eq!(sent["recipe_version_id"], json!(recipe_version));
+    assert!(sent.get("model").is_none());
+    assert_eq!(sent["sources"], entry["sources"]);
+    for (key, value) in [
+        ("ask", json!("Changed ask")),
+        ("mappingIds", json!([Uuid::new_v4()])),
+        ("recipeId", Value::Null),
+        ("sources", entry["sources"].clone()),
+        ("model", json!("override")),
+        (
+            "publication",
+            json!({"destinationId":Uuid::new_v4(),"datasetName":"Published","ttlSeconds":60}),
+        ),
+    ] {
+        let mut changed = ask.clone();
+        changed[key] = value;
+        assert!(
+            client
+                .post(format!("{root}/ask"))
+                .json(&changed)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_client_error(),
+            "accepted {key}"
+        );
+    }
+    sqlx::query("UPDATE workspace_relay_mappings SET enabled=false WHERE id=$1")
+        .bind(mapping.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let listed: Value = client
+        .get(format!("{root}/recipes"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["recipes"], json!([]));
+    assert_eq!(
+        client
+            .get(format!("{root}/recipes/{recipe}/versions/{recipe_version}"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(client
+        .post(format!("{root}/recipes"))
+        .json(&save)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_client_error());
+    assert!(client
+        .post(format!("{root}/ask"))
+        .json(&ask)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_client_error());
+    sqlx::query("UPDATE workspace_relay_mappings SET enabled=true WHERE id=$1")
+        .bind(mapping.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let delayed = Mock::given(method("GET"))
+        .and(path("/v1/recipes"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"recipes":[entry]}))
+                .set_delay(std::time::Duration::from_millis(200)),
+        )
+        .with_priority(1)
+        .mount_as_scoped(&mock)
+        .await;
+    let before = mock.received_requests().await.unwrap().len();
+    let pending = tokio::spawn({
+        let client = client.clone();
+        let root = root.clone();
+        async move { client.get(format!("{root}/recipes")).send().await.unwrap() }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while mock.received_requests().await.unwrap().len() == before {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    set_member_permissions(&pool, ws, json!([])).await;
+    assert_eq!(pending.await.unwrap().status(), StatusCode::FORBIDDEN);
+    drop(delayed);
+    pool.close().await;
+}

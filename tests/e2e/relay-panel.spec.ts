@@ -181,3 +181,61 @@ test("storage creation uses bounded defaults and workspace changes discard draft
   await expect(page.locator("#data-destination-status")).toHaveText("");
   await expect(page.locator("#data-destination")).toHaveValue("");
 });
+
+test("private recipes save, reload, replay and append with workspace resets", async ({ page }) => {
+  const dataset = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+  const version = "11111111-1111-1111-1111-111111111111";
+  const recipe = "22222222-2222-2222-2222-222222222222";
+  const recipeVersion = "33333333-3333-3333-3333-333333333333";
+  const entries: any[] = [];
+  const saves: any[] = [];
+  const asks: any[] = [];
+  await page.route("**/relay/datasets", (route) => route.fulfill({ json: { datasets: [{ dataset_id: dataset, version_id: version, dataset_name: "Sales", row_count: 4000, column_count: 1, expires_at: "2026-10-01T00:00:00Z" }] } }));
+  await page.route("**/relay/recipes", (route) => {
+    if (route.request().method() === "POST") {
+      saves.push(route.request().postDataJSON());
+      const entry = { recipe_id: recipe, version_id: entries.length ? "44444444-4444-4444-4444-444444444444" : recipeVersion, version: entries.length + 1, name: "Sales recipe", ask: "Count sales\n", sources: [{ alias: "pg", connection_id: "connection" }], mappingIds: [mapping], output_schema: [{ name: "count", ty: "int64" }], definition_hash: "sha256:fixture", clarifications: [{ question: "Which region?", answer: "<b>West</b>" }] };
+      entries.push(entry);
+      return route.fulfill({ json: entry });
+    }
+    return route.fulfill({ json: { recipes: entries } });
+  });
+  await page.route("**/relay/recipes/*/versions/*", (route) => route.fulfill({ json: entries.find((entry) => route.request().url().endsWith(entry.version_id)) }));
+  await page.route("**/relay/ask", (route) => { asks.push(route.request().postDataJSON()); return route.fulfill({ json: { run: { id: run }, outcome: { kind: "succeeded" } } }); });
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await page.locator('[data-action="save-recipe"]').click();
+  await page.locator("#data-recipe-name").fill("Sales recipe");
+  await page.locator("#data-recipe-save-submit").click();
+  await expect(page.locator("#data-recipe-status")).toContainText("version 1");
+  expect(saves[0]).toEqual({ name: "Sales recipe", datasetId: dataset, versionId: version });
+  await page.reload();
+  await page.locator("#tab-data").click();
+  await page.locator("#data-recipe-select").selectOption(recipeVersion);
+  await expect(page.locator("#data-ask-input")).toHaveValue("Count sales\n");
+  await expect(page.locator("#data-ask-input")).toHaveAttribute("readonly", "");
+  await expect(page.locator("#data-source-list input")).toBeDisabled();
+  await expect(page.locator("#data-recipe-details")).toContainText("<b>West</b>");
+  await expect(page.locator("#data-recipe-details b")).toHaveCount(0);
+  await page.locator("#data-ask-submit").click();
+  await expect.poll(() => asks.length).toBe(1);
+  expect(asks[0]).toMatchObject({ ask: "Count sales\n", recipeId: recipe, recipeVersionId: recipeVersion, mappingIds: [mapping] });
+  await page.locator('[data-action="save-recipe"]').click();
+  await page.locator("#data-recipe-append").selectOption(recipe);
+  await page.locator("#data-recipe-save-submit").click();
+  await expect(page.locator("#data-recipe-status")).toContainText("version 2");
+  expect(saves[1].recipeId).toBe(recipe);
+  await page.locator("#data-recipe-new-ask").click();
+  await expect(page.locator("#data-ask-input")).not.toHaveAttribute("readonly", "");
+  await page.locator("#data-ask-input").fill("Different question");
+  await page.locator("#data-ask-submit").click();
+  await expect.poll(() => asks.length).toBe(2);
+  expect(asks[1]).not.toHaveProperty("recipeVersionId");
+  expect(asks[1].requestId).not.toBe(asks[0].requestId);
+  await page.locator('[data-action="save-recipe"]').click();
+  await page.evaluate(() => (window as any).setActiveWorkspace({ id: "dddddddd-dddd-dddd-dddd-dddddddddddd", name: "Other", lifecycle: "continuous", closedAt: null }));
+  await expect(page.locator("#data-recipe-save-form")).toBeHidden();
+  await expect(page.locator("#data-recipe-name")).toHaveValue("");
+  await expect(page.locator("#data-recipe-select")).toHaveValue("");
+  await expect(page.locator("#data-recipe-details")).toHaveText("");
+});

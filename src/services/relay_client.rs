@@ -68,8 +68,8 @@ pub struct RelayScope {
     pub roles: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct SourceSelection {
     pub alias: String,
     pub connection_id: Uuid,
@@ -93,12 +93,41 @@ pub struct CreateRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publication: Option<Publication>,
     pub sources: Vec<SourceSelection>,
-    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipe_version_id: Option<Uuid>,
     pub result_mode: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub delivery: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limits: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecipeVersion {
+    pub recipe_id: Uuid,
+    pub version_id: Uuid,
+    pub version: u64,
+    pub name: String,
+    pub ask: String,
+    #[serde(default)]
+    pub clarifications: Vec<RecipeClarification>,
+    pub sources: Vec<SourceSelection>,
+    pub output_schema: serde_json::Value,
+    pub definition_hash: String,
+    pub dataset_id: Uuid,
+    pub dataset_version_id: Uuid,
+    pub run_id: Uuid,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecipeClarification {
+    pub question: String,
+    pub answer: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -484,6 +513,65 @@ impl RelayClient {
             content_digest,
             row_count,
         })
+    }
+
+    pub async fn save_recipe(
+        &self,
+        scope: &RelayScope,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, RelayError> {
+        const MAX: usize = 64 * 1024 * 1024;
+        let body = serde_json::to_vec(&input)
+            .map_err(|_| RelayError::Unexpected("invalid recipe input".into()))?;
+        let (claims, signature) = self.sign(
+            "POST",
+            "/v1/recipes",
+            scope,
+            &Uuid::new_v4().to_string(),
+            &Uuid::new_v4().to_string(),
+            chrono::Utc::now().timestamp(),
+            &body,
+        );
+        let mut response = self
+            .http
+            .post(format!("{}/v1/recipes", self.config.base_url))
+            .bearer_auth(&self.config.runtime_token)
+            .header("x-relay-scope", claims)
+            .header("x-relay-signature", signature)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| RelayError::Unreachable("recipe save unavailable".into()))?;
+        if !response.status().is_success() {
+            return Err(RelayError::Refused {
+                code: "forbidden".into(),
+                message: "recipe save refused".into(),
+            });
+        }
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX as u64)
+        {
+            return Err(RelayError::Unexpected(
+                "recipe metadata exceeds limit".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| RelayError::Unexpected("invalid recipe response".into()))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX {
+                return Err(RelayError::Unexpected(
+                    "recipe metadata exceeds limit".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|_| RelayError::Unexpected("invalid recipe response".into()))
     }
 
     pub async fn create_run(

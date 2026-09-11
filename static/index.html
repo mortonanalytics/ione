@@ -242,6 +242,10 @@
           </aside>
 
           <section class="data-main" aria-label="Ask a question">
+            <label for="data-recipe-select">Saved recipe version</label>
+            <select id="data-recipe-select"><option value="">New question</option></select>
+            <button id="data-recipe-new-ask" type="button">New question</button>
+            <pre id="data-recipe-details" aria-live="polite"></pre>
             <form id="data-ask-form" class="data-ask">
               <label for="data-ask-input" class="sr-only">Your question</label>
               <textarea id="data-ask-input" rows="3"
@@ -272,6 +276,14 @@
               <p id="data-published" role="status"></p>
               <ul id="data-dataset-list" role="list"></ul>
               <p id="data-dataset-status" role="status"></p>
+              <form id="data-recipe-save-form" hidden>
+                <h3>Save recipe</h3>
+                <label>Name <input id="data-recipe-name" maxlength="128" required></label>
+                <label>Version of <select id="data-recipe-append"><option value="">New recipe</option></select></label>
+                <button id="data-recipe-save-submit" type="submit">Save recipe</button>
+                <button id="data-recipe-save-cancel" type="button">Cancel</button>
+              </form>
+              <p id="data-recipe-status" role="status"></p>
               <section id="data-delegation" aria-label="Share dataset version" hidden>
                 <h3 id="data-delegation-title">Share dataset version</h3>
                 <p>Grant read access to this immutable version for one origin identity. The credential appears once and expires with the grant.</p>

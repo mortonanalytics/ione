@@ -1,3 +1,6 @@
+let dataRecipe = null;
+let dataRecipes = [];
+let dataRecipeSave = null;
 let pendingPeerDataset = null;
 let peerDatasetRequest = null;
 let datasetDelegationSelection = null;
@@ -6334,6 +6337,7 @@ async function loadDataSources() {
   if (!activeWorkspace) return;
   loadDatasetDestinations();
   loadDatasetLibrary();
+  loadRecipes();
   loadPeerDatasets();
   const sourceWorkspace = activeWorkspace.id;
   const sourceAdmin = document.getElementById('data-source-admin');
@@ -6369,6 +6373,7 @@ function renderDataSources() {
     checkbox.type = 'checkbox';
     checkbox.value = source.mappingId;
     checkbox.checked = dataSelected.has(source.mappingId);
+    checkbox.disabled = dataRecipe !== null;
     checkbox.addEventListener('change', () => {
       if (checkbox.checked) dataSelected.add(source.mappingId);
       else dataSelected.delete(source.mappingId);
@@ -6443,7 +6448,7 @@ dataAskForm?.addEventListener('submit', async (event) => {
 
   const requestWorkspace = activeWorkspace.id;
   document.getElementById('data-published').textContent = '';
-  const ask = dataAskInput.value.trim();
+  const ask = dataRecipe ? dataAskInput.value : dataAskInput.value.trim();
   if (!ask || dataSelected.size === 0) return;
 
   resetDataPanels();
@@ -6462,6 +6467,10 @@ dataAskForm?.addEventListener('submit', async (event) => {
     mappingIds: Array.from(dataSelected),
     limits: Object.keys(limits).length ? limits : undefined,
   };
+  if (dataRecipe) {
+    request.recipeId = dataRecipe.recipe_id;
+    request.recipeVersionId = dataRecipe.version_id;
+  }
   if (document.getElementById('data-save-dataset').checked) {
     const name = document.getElementById('data-dataset-name').value.trim();
     const destinationId = document.getElementById('data-destination').value;
@@ -6872,6 +6881,15 @@ dataSourceForm.addEventListener('submit', async (event) => {
 });
 
 function resetDatasetWorkspace() {
+  dataRecipe = null;
+  dataRecipes = [];
+  dataRecipeSave = null;
+  document.getElementById('data-recipe-select').replaceChildren(new Option('New question', ''));
+  document.getElementById('data-recipe-details').textContent = '';
+  document.getElementById('data-recipe-status').textContent = '';
+  document.getElementById('data-recipe-save-form').hidden = true;
+  document.getElementById('data-recipe-save-form').reset();
+  document.getElementById('data-ask-input').readOnly = false;
   clearPeerDatasetImport();
   document.getElementById('data-peer-dataset-admin').hidden = true;
   document.getElementById('data-origin-identity').value = '';
@@ -6940,6 +6958,26 @@ async function loadDatasetLibrary(runId = null) {
       link.href = `/api/v1/workspaces/${encodeURIComponent(workspace)}/relay/datasets/${encodeURIComponent(version.dataset_id)}/versions/${encodeURIComponent(version.version_id)}/arrow`;
       link.download = 'dataset.arrow';
       item.append(description, link);
+      const saveRecipe = document.createElement('button');
+      saveRecipe.type = 'button';
+      saveRecipe.textContent = 'Save recipe';
+      saveRecipe.dataset.action = 'save-recipe';
+      saveRecipe.addEventListener('click', () => {
+        if (activeWorkspace?.id !== workspace) return;
+        dataRecipeSave = { workspace, version };
+        document.getElementById('data-recipe-name').value = version.dataset_name;
+        const append = document.getElementById('data-recipe-append');
+        append.replaceChildren(new Option('New recipe', ''));
+        const seen = new Set();
+        dataRecipes.forEach((recipe) => {
+          if (seen.has(recipe.recipe_id)) return;
+          seen.add(recipe.recipe_id);
+          append.add(new Option(recipe.name, recipe.recipe_id));
+        });
+        document.getElementById('data-recipe-save-form').hidden = false;
+        document.getElementById('data-recipe-status').textContent = '';
+      });
+      item.append(saveRecipe);
       if (result.canDelegate === true && version.requires_source_access === false && Array.isArray(version.lineage) && version.lineage.length && version.lineage.every((source) => source.remote == null)) {
         const share = document.createElement('button');
         share.type = 'button';
@@ -6963,6 +7001,7 @@ async function loadDatasetLibrary(runId = null) {
 }
 
 document.getElementById('data-datasets-refresh').addEventListener('click', () => {
+  loadRecipes();
   loadDatasetDestinations();
   loadDatasetLibrary();
 });
@@ -7196,4 +7235,95 @@ document.getElementById('data-peer-dataset-import').addEventListener('click', as
     if (pendingPeerDataset === pending) pendingPeerDataset = null;
     if (peerDatasetRequest === request) form.elements.token.value = '';
   }
+});
+
+
+async function loadRecipes() {
+  const workspace = activeWorkspace?.id;
+  if (!workspace) return;
+  try {
+    const result = await apiFetch(`/api/v1/workspaces/${workspace}/relay/recipes`, { skipErrorToast: true });
+    if (activeWorkspace?.id !== workspace) return;
+    dataRecipes = result.recipes || [];
+    const select = document.getElementById('data-recipe-select');
+    const selected = select.value;
+    select.replaceChildren(new Option('New question', ''));
+    dataRecipes.forEach((recipe) => select.add(new Option(`${recipe.name} — version ${recipe.version}`, recipe.version_id)));
+    select.value = selected;
+    if (dataRecipe && !dataRecipes.some((recipe) => recipe.version_id === dataRecipe.version_id)) {
+      document.getElementById('data-recipe-new-ask').click();
+    }
+  } catch (_) {
+    if (activeWorkspace?.id !== workspace) return;
+    if (dataRecipe || document.getElementById('data-recipe-select').value) document.getElementById('data-recipe-new-ask').click();
+    dataRecipes = [];
+    document.getElementById('data-recipe-select').replaceChildren(new Option('New question', ''));
+    document.getElementById('data-recipe-details').textContent = 'Saved recipes could not be loaded. Refresh datasets to retry.';
+  }
+}
+
+document.getElementById('data-recipe-new-ask').addEventListener('click', () => {
+  dataRecipe = null;
+  dataPendingRequest = null;
+  document.getElementById('data-recipe-select').value = '';
+  document.getElementById('data-recipe-details').textContent = '';
+  dataAskInput.readOnly = false;
+  dataAskInput.value = '';
+  renderDataSources();
+});
+
+document.getElementById('data-recipe-select').addEventListener('change', async (event) => {
+  const workspace = activeWorkspace?.id;
+  const versionId = event.target.value;
+  const recipe = dataRecipes.find((entry) => entry.version_id === versionId);
+  dataRecipe = null;
+  dataPendingRequest = null;
+  dataAskInput.readOnly = false;
+  if (!recipe || !workspace) {
+    document.getElementById('data-recipe-new-ask').click();
+    return;
+  }
+  dataAskSubmit.disabled = true;
+  try {
+    const entry = await apiFetch(`/api/v1/workspaces/${workspace}/relay/recipes/${recipe.recipe_id}/versions/${versionId}`, { skipErrorToast: true });
+    if (activeWorkspace?.id !== workspace || event.target.value !== versionId) return;
+    dataRecipe = entry;
+    dataSelected.clear();
+    entry.mappingIds.forEach((id) => dataSelected.add(id));
+    dataAskInput.value = entry.ask;
+    dataAskInput.readOnly = true;
+    document.getElementById('data-recipe-details').textContent = `${entry.name} — version ${entry.version}\nSources: ${entry.sources.map((source) => source.alias).join(', ')}\n${(entry.clarifications || []).map((pair) => `${pair.question}\n${pair.answer}`).join("\n")}\nOutput: ${JSON.stringify(entry.output_schema)}\n${entry.definition_hash}\nReplays the saved query against current source data without model inference.`;
+    renderDataSources();
+  } catch (_) {
+    if (activeWorkspace?.id !== workspace || event.target.value !== versionId) return;
+    document.getElementById('data-recipe-new-ask').click();
+    document.getElementById('data-recipe-details').textContent = 'This recipe is no longer accessible.';
+  }
+});
+
+document.getElementById('data-recipe-save-cancel').addEventListener('click', () => {
+  dataRecipeSave = null;
+  document.getElementById('data-recipe-save-form').hidden = true;
+  document.getElementById('data-recipe-save-form').reset();
+});
+
+document.getElementById('data-recipe-save-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const selection = dataRecipeSave;
+  if (!selection || activeWorkspace?.id !== selection.workspace) return;
+  const button = document.getElementById('data-recipe-save-submit');
+  button.disabled = true;
+  try {
+    const recipeId = document.getElementById('data-recipe-append').value;
+    const entry = await apiFetch(`/api/v1/workspaces/${selection.workspace}/relay/recipes`, {
+      method: 'POST', skipErrorToast: true,
+      body: JSON.stringify({ name: document.getElementById('data-recipe-name').value.trim(), datasetId: selection.version.dataset_id, versionId: selection.version.version_id, ...(recipeId ? { recipeId } : {}) }),
+    });
+    if (dataRecipeSave !== selection || activeWorkspace?.id !== selection.workspace) return;
+    document.getElementById('data-recipe-status').textContent = `Recipe saved as version ${entry.version}.`;
+    document.getElementById('data-recipe-save-cancel').click();
+    await loadRecipes();
+  } catch (_) {
+    if (dataRecipeSave === selection && activeWorkspace?.id === selection.workspace) document.getElementById('data-recipe-status').textContent = 'Recipe save was not confirmed. Refresh recipes before retrying.';
+  } finally { button.disabled = false; }
 });

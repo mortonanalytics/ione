@@ -208,6 +208,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/workspaces/:id/relay/peer-datasets", get(crate::services::peer_dataset::choices))
         .route("/api/v1/workspaces/:id/relay/peer-datasets/descriptor", post(crate::services::peer_dataset::discover))
         .route("/api/v1/workspaces/:id/relay/peer-datasets/import", post(crate::services::peer_dataset::import))
+        .route("/api/v1/workspaces/:id/relay/recipes", get(relay::recipe_list).post(relay::save_recipe))
+        .route("/api/v1/workspaces/:id/relay/recipes/:recipe_id/versions/:version_id", get(relay::recipe_version))
         .route(
             "/api/v1/workspaces/:id/relay/datasets",
             get(relay::dataset_list),

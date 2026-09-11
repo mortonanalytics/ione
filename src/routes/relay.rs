@@ -248,8 +248,12 @@ pub async fn available_sources(
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AskInput {
+    #[serde(default)]
+    pub recipe_id: Option<Uuid>,
+    #[serde(default)]
+    pub recipe_version_id: Option<Uuid>,
     #[serde(default)]
     pub publication: Option<crate::services::relay_client::Publication>,
     #[serde(default)]
@@ -277,6 +281,17 @@ pub async fn ask(
     ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     require_permission(&ctx, &state.pool, workspace_id, DATA_QUERY).await?;
 
+    let recipe = match (input.recipe_id, input.recipe_version_id) {
+        (Some(recipe), Some(version)) => {
+            Some(load_recipe(&state, &ctx, workspace_id, recipe, version).await?)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(AppError::BadRequest(
+                "select an exact recipe version".into(),
+            ))
+        }
+    };
     if input.ask.trim().is_empty() {
         return Err(AppError::BadRequest("a question is required".into()));
     }
@@ -307,6 +322,13 @@ pub async fn ask(
         used.push(mapping.id);
     }
 
+    if let Some(saved) = &recipe {
+        if input.ask != saved.ask || sources != saved.sources {
+            return Err(AppError::BadRequest(
+                "recipe instructions and sources cannot be overridden".into(),
+            ));
+        }
+    }
     let client = relay(&state)?;
     let config = state
         .config
@@ -321,7 +343,12 @@ pub async fn ask(
         publication: input.publication,
         ask: input.ask.clone(),
         sources,
-        model: config.default_model.clone(),
+        model: if recipe.is_some() {
+            None
+        } else {
+            Some(config.default_model.clone())
+        },
+        recipe_version_id: input.recipe_version_id,
         // A retrievable result, because the UI polls and reconnects. A one-shot
         // stream could not serve a browser that reloads.
         result_mode: input.result_mode.unwrap_or_else(|| "preview".into()),
@@ -1070,4 +1097,203 @@ pub async fn dataset_arrow(
         bytes,
     )
         .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SaveRecipe {
+    name: String,
+    dataset_id: Uuid,
+    version_id: Uuid,
+    recipe_id: Option<Uuid>,
+}
+
+async fn recipe_mappings(
+    state: &AppState,
+    ctx: &AuthContext,
+    workspace: Uuid,
+    entry: &crate::services::relay_client::RecipeVersion,
+) -> Result<Vec<Uuid>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(ctx, &state.pool, workspace, DATA_QUERY).await?;
+    if entry.sources.is_empty()
+        || entry.sources.len() > 100
+        || entry.ask.is_empty()
+        || entry.version == 0
+    {
+        return Err(AppError::RelayUpstream("invalid recipe metadata".into()));
+    }
+    let effective = RelayMappingRepo::new(state.pool.clone())
+        .effective_for_user(ctx.org_id, workspace, ctx.user_id)
+        .await
+        .map_err(AppError::Internal)?;
+    entry
+        .sources
+        .iter()
+        .map(|source| {
+            effective
+                .iter()
+                .find(|m| {
+                    m.alias == source.alias
+                        && m.relay_connection_id == source.connection_id
+                        && m.applies_to(ctx.user_id)
+                })
+                .map(|m| m.id)
+                .ok_or_else(|| AppError::NotFound("recipe source unavailable".into()))
+        })
+        .collect()
+}
+
+async fn load_recipe(
+    state: &AppState,
+    ctx: &AuthContext,
+    workspace: Uuid,
+    recipe: Uuid,
+    version: Uuid,
+) -> Result<crate::services::relay_client::RecipeVersion, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(ctx, &state.pool, workspace, DATA_QUERY).await?;
+    let bytes = relay(state)?
+        .dataset_bytes(
+            &scope_for(ctx, workspace),
+            &format!("/v1/recipes/{recipe}/versions/{version}"),
+        )
+        .await
+        .map_err(map_error)?;
+    let entry: crate::services::relay_client::RecipeVersion = serde_json::from_slice(&bytes)
+        .map_err(|_| AppError::RelayUpstream("invalid recipe metadata".into()))?;
+    if entry.recipe_id != recipe || entry.version_id != version {
+        return Err(AppError::NotFound("recipe not found".into()));
+    }
+    recipe_mappings(state, ctx, workspace, &entry).await?;
+    Ok(entry)
+}
+
+pub async fn recipe_list(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(workspace): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(&ctx, &state.pool, workspace, DATA_QUERY).await?;
+    let bytes = relay(&state)?
+        .dataset_bytes(&scope_for(&ctx, workspace), "/v1/recipes")
+        .await
+        .map_err(map_error)?;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Recipes {
+        recipes: Vec<crate::services::relay_client::RecipeVersion>,
+    }
+    let entries: Recipes = serde_json::from_slice(&bytes)
+        .map_err(|_| AppError::RelayUpstream("invalid recipe list".into()))?;
+    if entries.recipes.len() > 100 {
+        return Err(AppError::RelayUpstream("recipe list exceeds limit".into()));
+    }
+    ensure_workspace_in_org(&state.pool, workspace, ctx.org_id).await?;
+    require_permission(&ctx, &state.pool, workspace, DATA_QUERY).await?;
+    let effective = RelayMappingRepo::new(state.pool.clone())
+        .effective_for_user(ctx.org_id, workspace, ctx.user_id)
+        .await
+        .map_err(AppError::Internal)?;
+    let mut recipes = Vec::new();
+    for entry in entries.recipes {
+        if entry.sources.is_empty()
+            || entry.sources.len() > 100
+            || entry.ask.is_empty()
+            || entry.version == 0
+        {
+            return Err(AppError::RelayUpstream("invalid recipe metadata".into()));
+        }
+        let mappings: Option<Vec<Uuid>> = entry
+            .sources
+            .iter()
+            .map(|source| {
+                effective
+                    .iter()
+                    .find(|m| {
+                        m.alias == source.alias
+                            && m.relay_connection_id == source.connection_id
+                            && m.applies_to(ctx.user_id)
+                    })
+                    .map(|m| m.id)
+            })
+            .collect();
+        if let Some(mappings) = mappings {
+            let mut value = serde_json::to_value(entry).map_err(anyhow::Error::from)?;
+            value["mappingIds"] = serde_json::json!(mappings);
+            recipes.push(value);
+        }
+    }
+    Ok(Json(serde_json::json!({"recipes":recipes})))
+}
+
+pub async fn recipe_version(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((workspace, recipe, version)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let entry = load_recipe(&state, &ctx, workspace, recipe, version).await?;
+    let mappings = recipe_mappings(&state, &ctx, workspace, &entry).await?;
+    let mut value = serde_json::to_value(entry).map_err(anyhow::Error::from)?;
+    value["mappingIds"] = serde_json::json!(mappings);
+    Ok(Json(value))
+}
+
+pub async fn save_recipe(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(workspace): Path<Uuid>,
+    Json(input): Json<SaveRecipe>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if input.name.trim().is_empty()
+        || input.name.len() > 128
+        || input.name.chars().any(char::is_control)
+    {
+        return Err(AppError::BadRequest("invalid recipe name".into()));
+    }
+    let Json(manifest) = dataset_version(
+        State(state.clone()),
+        Extension(ctx.clone()),
+        Path((workspace, input.dataset_id, input.version_id)),
+    )
+    .await?;
+    let run = manifest["run_id"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| AppError::NotFound("recipe origin unavailable".into()))?;
+    authorize_run(&state, &ctx, workspace, run).await?;
+    let effective = RelayMappingRepo::new(state.pool.clone())
+        .effective_for_user(ctx.org_id, workspace, ctx.user_id)
+        .await
+        .map_err(AppError::Internal)?;
+    let lineage = manifest["lineage"]
+        .as_array()
+        .filter(|rows| !rows.is_empty())
+        .ok_or_else(|| AppError::NotFound("recipe sources unavailable".into()))?;
+    if lineage.iter().any(|source| {
+        !effective.iter().any(|m| {
+            source["connection_id"] == serde_json::json!(m.relay_connection_id)
+                && source["alias"] == m.alias
+        })
+    }) {
+        return Err(AppError::NotFound("recipe sources unavailable".into()));
+    }
+    let value=relay(&state)?.save_recipe(&scope_for(&ctx,workspace),serde_json::json!({"name":input.name,"dataset_id":input.dataset_id,"version_id":input.version_id,"recipe_id":input.recipe_id})).await.map_err(map_error)?;
+    let entry: crate::services::relay_client::RecipeVersion = serde_json::from_value(value)
+        .map_err(|_| AppError::RelayUpstream("invalid saved recipe metadata".into()))?;
+    if entry.dataset_id != input.dataset_id
+        || entry.dataset_version_id != input.version_id
+        || entry.run_id != run
+        || input.recipe_id.is_some_and(|id| id != entry.recipe_id)
+    {
+        return Err(AppError::RelayUpstream(
+            "saved recipe origin mismatch".into(),
+        ));
+    }
+    authorize_run(&state, &ctx, workspace, run).await?;
+    let mappings = recipe_mappings(&state, &ctx, workspace, &entry).await?;
+    let mut value = serde_json::to_value(entry).map_err(anyhow::Error::from)?;
+    value["mappingIds"] = serde_json::json!(mappings);
+    Ok(Json(value))
 }
