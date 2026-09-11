@@ -548,3 +548,168 @@ pub async fn recent_runs(
         .map_err(AppError::Internal)?;
     Ok(Json(serde_json::json!({ "runs": runs })))
 }
+
+pub async fn source_admin_status(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
+    authorize_source_admin(&state, &ctx, workspace_id).await?;
+    let client = relay(&state)?;
+    if !client.source_management_enabled() {
+        return Err(AppError::NotFound(
+            "source administration is not configured".into(),
+        ));
+    }
+    Ok(Json(serde_json::json!({"postgres": true})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegisterSource {
+    pub name: String,
+    pub alias: String,
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub schema: String,
+    pub tables: Vec<String>,
+    pub username: String,
+    pub password: String,
+    pub tls: String,
+    pub isolation: String,
+}
+
+pub async fn register_source(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(workspace_id): Path<Uuid>,
+    Json(input): Json<RegisterSource>,
+) -> Result<Json<WorkspaceRelayMapping>, AppError> {
+    ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
+    authorize_source_admin(&state, &ctx, workspace_id).await?;
+    let client = relay(&state)?;
+    if !client.source_management_enabled() {
+        return Err(AppError::NotFound(
+            "source administration is not configured".into(),
+        ));
+    }
+    if !alias_is_valid(&input.alias)
+        || input.name.trim().is_empty()
+        || input.name.len() > 128
+        || input.tables.is_empty()
+        || input.tables.len() > 100
+        || input
+            .tables
+            .iter()
+            .chain([&input.schema])
+            .any(|v| !alias_is_valid(v))
+        || input.username.is_empty()
+        || input.password.is_empty()
+        || input.database.is_empty()
+        || input.port == 0
+        || !matches!(input.tls.as_str(), "verify-full" | "disable")
+        || !matches!(
+            input.isolation.as_str(),
+            "forced_rls" | "dedicated_role" | "single_tenant"
+        )
+    {
+        return Err(AppError::BadRequest(
+            "invalid source fields; name approved schema/tables and a read-only role".into(),
+        ));
+    }
+    if input.tls == "disable" && !matches!(input.host.as_str(), "localhost" | "127.0.0.1" | "::1") {
+        return Err(AppError::BadRequest(
+            "TLS verification is required for remote sources".into(),
+        ));
+    }
+    let repo = RelayMappingRepo::new(state.pool.clone());
+    if repo
+        .by_alias(ctx.org_id, workspace_id, &input.alias)
+        .await
+        .map_err(AppError::Internal)?
+        .is_some()
+    {
+        return Err(AppError::BadRequest(
+            "that source alias already exists".into(),
+        ));
+    }
+    let mut dsn = url::Url::parse("postgres://localhost").expect("static URL");
+    dsn.set_host(Some(&input.host))
+        .map_err(|_| AppError::BadRequest("invalid source host".into()))?;
+    dsn.set_port(Some(input.port))
+        .map_err(|_| AppError::BadRequest("invalid source port".into()))?;
+    dsn.set_username(&input.username)
+        .map_err(|_| AppError::BadRequest("invalid source user".into()))?;
+    dsn.set_password(Some(&input.password))
+        .map_err(|_| AppError::BadRequest("invalid source credential".into()))?;
+    dsn.set_path(&format!("/{}", input.database));
+    dsn.query_pairs_mut().append_pair("sslmode", &input.tls);
+    let scope = scope_for(&ctx, workspace_id);
+    let created = client.manage_source(reqwest::Method::POST, "/v1/connections", &scope,
+        serde_json::json!({"workspace_id": workspace_id, "kind": "postgres", "name": input.name,
+            "public_config": {"schema": input.schema, "relations": input.tables, "isolation": input.isolation},
+            "credential": dsn.as_str()})).await.map_err(map_error)?;
+    let id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .ok_or_else(|| {
+            AppError::RelayUpstream("source registration returned no identity".into())
+        })?;
+    let result = async {
+        let validation = client.manage_source(reqwest::Method::POST, &format!("/v1/connections/{id}/validate"), &scope,
+            serde_json::json!({"claimed_assurance":"provider_verified"})).await.map_err(map_error)?;
+        if validation.get("state").and_then(|v| v.as_str()) != Some("active") {
+            return Err(AppError::BadRequest("source validation failed; use a read-only role with the selected isolation".into()));
+        }
+        let catalog = client.manage_source(reqwest::Method::POST, &format!("/v1/connections/{id}/catalog"), &scope,
+            serde_json::json!({})).await.map_err(map_error)?;
+        if catalog.get("entities").and_then(|v| v.as_u64()).unwrap_or(0) != input.tables.len() as u64 {
+            return Err(AppError::BadRequest("the requested tables were not all discovered".into()));
+        }
+        client.manage_source(reqwest::Method::POST, &format!("/v1/connections/{id}/grants"), &scope,
+            serde_json::json!({"workspace_id": workspace_id, "principal_kind":"principal", "principal_id":ctx.user_id.to_string(),
+                "entity_allowlist": input.tables})).await.map_err(map_error)?;
+        ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
+        authorize_source_admin(&state, &ctx, workspace_id).await?;
+        repo.create(ctx.org_id, workspace_id, ctx.user_id, NewRelayMapping {
+            relay_connection_id: id, display_name: input.name, alias: input.alias, principal_id: Some(ctx.user_id),
+        }).await.map_err(|_| AppError::BadRequest("source mapping could not be saved; retry with an unused alias".into()))
+    }.await;
+    if result.is_err() {
+        let cleanup = client
+            .manage_source(
+                reqwest::Method::DELETE,
+                &format!("/v1/connections/{id}"),
+                &scope,
+                serde_json::json!({}),
+            )
+            .await;
+        if cleanup.is_err() {
+            return Err(AppError::RelayUpstream(format!(
+                "source registration failed; administrator must revoke incomplete connection {id}"
+            )));
+        }
+    }
+    result.map(Json)
+}
+
+async fn authorize_source_admin(
+    state: &AppState,
+    ctx: &AuthContext,
+    workspace_id: Uuid,
+) -> Result<(), AppError> {
+    if ctx.is_service_account {
+        return Err(AppError::Forbidden);
+    }
+    let (permissions, _) = crate::repos::RoleRepo::new(state.pool.clone())
+        .effective_permissions(ctx.user_id, workspace_id)
+        .await
+        .map_err(AppError::Internal)?;
+    if !permissions.contains("data:sources:write") {
+        return Err(AppError::Forbidden);
+    }
+    Ok(())
+}

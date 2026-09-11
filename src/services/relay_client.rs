@@ -37,7 +37,10 @@ pub enum RelayError {
     Unreachable(String),
     /// Relay refused, with its stable code. Passed through so the UI can say
     /// what happened rather than "something went wrong".
-    Refused { code: String, message: String },
+    Refused {
+        code: String,
+        message: String,
+    },
     Unexpected(String),
 }
 
@@ -260,6 +263,53 @@ impl RelayClient {
         Err(RelayError::Refused { code, message })
     }
 
+    pub fn source_management_enabled(&self) -> bool {
+        self.config.management_token.is_some()
+    }
+
+    pub async fn manage_source(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        scope: &RelayScope,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, RelayError> {
+        let token = self
+            .config
+            .management_token
+            .as_ref()
+            .ok_or(RelayError::NotConfigured)?;
+        let serialized = serde_json::to_vec(&body)
+            .map_err(|_| RelayError::Unexpected("invalid source request".into()))?;
+        let (scope_header, signature) = self.sign(
+            method.as_str(),
+            path,
+            scope,
+            &Uuid::new_v4().to_string(),
+            &Uuid::new_v4().to_string(),
+            chrono::Utc::now().timestamp(),
+            &serialized,
+        );
+        let response = self
+            .http
+            .request(method, format!("{}{}", self.config.base_url, path))
+            .bearer_auth(token)
+            .header("x-relay-scope", scope_header)
+            .header("x-relay-signature", signature)
+            .header("content-type", "application/json")
+            .body(serialized)
+            .send()
+            .await
+            .map_err(|_| RelayError::Unreachable("source management unavailable".into()))?;
+        if !response.status().is_success() {
+            return Err(RelayError::Unexpected("source management refused".into()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| RelayError::Unexpected("invalid source response".into()))
+    }
+
     /// The connections relay will honour for this caller. IONe intersects this
     /// with its own mappings; a mapping pointing at a connection relay has
     /// revoked is a name for nothing.
@@ -430,6 +480,7 @@ mod tests {
             base_url: "http://relay.internal:8080".into(),
             deployment_id: Uuid::nil(),
             runtime_token: "runtime-token".into(),
+            management_token: None,
             signing_key_id: "k1".into(),
             signing_key: "0123456789abcdef0123456789abcdef".into(),
             callback_verification_key: "cb-key".into(),
@@ -448,6 +499,23 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn runtime_credentials_never_enable_source_management() {
+        let client = RelayClient::new(config()).unwrap();
+        assert!(!client.source_management_enabled());
+        assert!(matches!(
+            client
+                .manage_source(
+                    reqwest::Method::POST,
+                    "/v1/connections",
+                    &scope(),
+                    serde_json::json!({})
+                )
+                .await,
+            Err(RelayError::NotConfigured)
+        ));
+    }
+
     #[test]
     fn the_signature_covers_every_identity_field() {
         let client = RelayClient::new(config()).unwrap();
@@ -460,7 +528,9 @@ mod tests {
         };
         assert_ne!(
             base.1,
-            client.sign("GET", "/v1/runs", &other_actor, "r", "n", 1, b"").1
+            client
+                .sign("GET", "/v1/runs", &other_actor, "r", "n", 1, b"")
+                .1
         );
 
         let other_workspace = RelayScope {
@@ -481,15 +551,40 @@ mod tests {
         };
         assert_ne!(
             base.1,
-            client.sign("GET", "/v1/runs", &escalated, "r", "n", 1, b"").1
+            client
+                .sign("GET", "/v1/runs", &escalated, "r", "n", 1, b"")
+                .1
         );
 
         // And the method, path, nonce, timestamp, and body.
-        assert_ne!(base.1, client.sign("POST", "/v1/runs", &scope(), "r", "n", 1, b"").1);
-        assert_ne!(base.1, client.sign("GET", "/v1/models", &scope(), "r", "n", 1, b"").1);
-        assert_ne!(base.1, client.sign("GET", "/v1/runs", &scope(), "r", "n2", 1, b"").1);
-        assert_ne!(base.1, client.sign("GET", "/v1/runs", &scope(), "r", "n", 2, b"").1);
-        assert_ne!(base.1, client.sign("GET", "/v1/runs", &scope(), "r", "n", 1, b"{}").1);
+        assert_ne!(
+            base.1,
+            client
+                .sign("POST", "/v1/runs", &scope(), "r", "n", 1, b"")
+                .1
+        );
+        assert_ne!(
+            base.1,
+            client
+                .sign("GET", "/v1/models", &scope(), "r", "n", 1, b"")
+                .1
+        );
+        assert_ne!(
+            base.1,
+            client
+                .sign("GET", "/v1/runs", &scope(), "r", "n2", 1, b"")
+                .1
+        );
+        assert_ne!(
+            base.1,
+            client.sign("GET", "/v1/runs", &scope(), "r", "n", 2, b"").1
+        );
+        assert_ne!(
+            base.1,
+            client
+                .sign("GET", "/v1/runs", &scope(), "r", "n", 1, b"{}")
+                .1
+        );
     }
 
     #[test]

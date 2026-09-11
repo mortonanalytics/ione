@@ -28,6 +28,7 @@ const WORKSPACE_VOCABULARY: &[&str] = &[
     "peers:manage",
     "approvals:decide",
     "workspace:write",
+    "data:sources:write",
 ];
 
 pub(crate) fn is_valid_workspace_permission(s: &str) -> bool {

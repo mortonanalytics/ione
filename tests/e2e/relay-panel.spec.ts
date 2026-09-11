@@ -61,3 +61,63 @@ test("clarification continues the same run and SSE success retrieves its typed r
   await expect(page.locator("#data-table tbody td")).toHaveClass("data-cell-numeric");
   expect(answered).toBe(true);
 });
+
+test("source onboarding clears credentials and selects the source for a business question", async ({ page }) => {
+  await page.route("**/relay/source-admin", (route) => route.fulfill({ json: { postgres: true } }));
+  let added = false;
+  await page.route("**/relay/sources", async (route) => {
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON();
+      expect(body.tables).toEqual(["orders", "customers"]);
+      expect(body.password).toBe("browser-secret-canary");
+      expect(body).not.toHaveProperty("principalId");
+      expect(body).not.toHaveProperty("workspaceId");
+      added = true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return route.fulfill({ json: { id: mapping } });
+    }
+    return route.fulfill({ json: { sources: added ? [{ mappingId: mapping, displayName: "Sales", alias: "sales", entities: [] }] : [] } });
+  });
+  let ask: any;
+  await page.route("**/relay/ask", (route) => {
+    ask = route.request().postDataJSON();
+    return route.fulfill({ json: { run: { id: run }, outcome: { kind: "succeeded" } } });
+  });
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await page.locator("#data-source-admin summary").click();
+  const form = page.locator("#data-source-form");
+  for (const [name, value] of Object.entries({ name: "Sales", alias: "sales", host: "localhost", database: "sales", tables: "orders, customers", username: "reader", password: "browser-secret-canary" })) {
+    await form.locator(`[name=${name}]`).fill(value);
+  }
+  await form.locator("button[type=submit]").click();
+  await expect(form.locator("[name=password]")).toHaveValue("");
+  await expect(page.locator("#data-source-status")).toContainText("Source ready");
+  await expect(page.locator("#data-source-list input")).toBeChecked();
+  expect(await page.evaluate(() => JSON.stringify({ local: localStorage, session: sessionStorage }))).not.toContain("browser-secret-canary");
+  await page.locator("#data-ask-input").fill("Total sales by customer for the last quarter");
+  await page.locator("#data-ask-submit").click();
+  await expect.poll(() => ask?.mappingIds).toEqual([mapping]);
+  expect(JSON.stringify(ask)).not.toContain("browser-secret-canary");
+});
+
+test("source administration stays hidden without its capability", async ({ page }) => {
+  await page.route("**/relay/source-admin", (route) => route.fulfill({ status: 403, json: {} }));
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await expect(page.locator("#data-source-admin")).toBeHidden();
+});
+
+
+test("switching workspace clears the source registration draft", async ({ page }) => {
+  await page.route("**/relay/source-admin", (route) => route.fulfill({ json: { postgres: true } }));
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await page.locator("#data-source-admin summary").click();
+  const form = page.locator("#data-source-form");
+  await form.locator("[name=host]").fill("finance.internal");
+  await form.locator("[name=password]").fill("workspace-secret-canary");
+  await page.evaluate(() => (window as any).setActiveWorkspace({ id: "dddddddd-dddd-dddd-dddd-dddddddddddd", name: "Other", lifecycle: "continuous", closedAt: null }));
+  await expect(form.locator("[name=password]")).toHaveValue("");
+  await expect(form.locator("[name=host]")).toHaveValue("");
+});

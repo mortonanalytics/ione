@@ -176,6 +176,25 @@
               admin can map one, and it will appear here once the data service
               also grants it.
             </p>
+            <details id="data-source-admin" class="data-limits" hidden>
+              <summary>Add PostgreSQL source</summary>
+              <form id="data-source-form" autocomplete="off">
+                <label>Name <input name="name" required maxlength="128"></label>
+                <label>Query alias <input name="alias" required pattern="[a-z_][a-z0-9_]{0,62}" placeholder="sales"></label>
+                <label>Host <input name="host" required></label>
+                <label>Port <input name="port" type="number" value="5432" min="1" max="65535" required></label>
+                <label>Database <input name="database" required></label>
+                <label>Schema <input name="schema" value="public" required></label>
+                <label>Approved tables (comma separated) <input name="tables" required></label>
+                <label>Read-only username <input name="username" autocomplete="off" required></label>
+                <label>Password <input name="password" type="password" autocomplete="new-password" required></label>
+                <label>TLS <select name="tls"><option value="verify-full">Verify server certificate</option><option value="disable">Local loopback without TLS</option></select></label>
+                <label>Tenant isolation <select name="isolation"><option value="forced_rls">Forced row-level security</option><option value="dedicated_role">Dedicated tenant role</option><option value="single_tenant">Entire source belongs to this tenant</option></select></label>
+                <p class="data-hint">Choose only tables this workspace may read. Credentials go directly to encrypted source storage. This source is initially available only to you.</p>
+                <button type="submit">Validate and add source</button>
+                <p id="data-source-status" role="status"></p>
+              </form>
+            </details>
             <ul id="data-source-list" role="list" aria-label="Sources"></ul>
             <details class="data-limits">
               <summary>Limits for this question</summary>

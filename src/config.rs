@@ -28,6 +28,7 @@ pub struct RelayConfig {
     /// one host app, and relay refuses an envelope addressed to another.
     pub deployment_id: uuid::Uuid,
     pub runtime_token: String,
+    pub management_token: Option<String>,
     pub signing_key_id: String,
     pub signing_key: String,
     /// Verifies inbound signed callbacks from relay.
@@ -92,6 +93,7 @@ impl RelayConfig {
             base_url: base_url.trim_end_matches('/').to_string(),
             deployment_id,
             runtime_token,
+            management_token: present("IONE_RELAY_MANAGEMENT_TOKEN"),
             signing_key_id,
             signing_key,
             callback_verification_key,

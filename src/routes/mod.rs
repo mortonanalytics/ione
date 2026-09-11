@@ -170,7 +170,11 @@ pub fn router(state: AppState) -> Router {
         // from a deployment with no relay configured.
         .route(
             "/api/v1/workspaces/:id/relay/sources",
-            get(relay::available_sources),
+            get(relay::available_sources).post(relay::register_source),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/source-admin",
+            get(relay::source_admin_status),
         )
         .route("/api/v1/workspaces/:id/relay/ask", post(relay::ask))
         .route(

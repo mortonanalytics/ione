@@ -661,6 +661,7 @@ async fn configured_relay_lifecycle_preserves_request_identity_and_run_access() 
         base_url: mock.uri(),
         deployment_id: Uuid::new_v4(),
         runtime_token: "test-runtime".into(),
+        management_token: None,
         signing_key_id: "test-key".into(),
         signing_key: "test-signing-key".into(),
         callback_verification_key: "test-callback".into(),
@@ -856,4 +857,214 @@ async fn configured_relay_lifecycle_preserves_request_identity_and_run_access() 
         .await
         .unwrap();
     assert!(status.is_server_error());
+}
+
+#[tokio::test]
+#[ignore = "requires a migrated database"]
+async fn source_onboarding_scopes_grants_and_scrubs_failures() {
+    use std::sync::Arc;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    let (_, pool) = spawn_app().await;
+    let ws = ops_workspace_id(&pool).await;
+    let admin = ione::repos::RoleRepo::new(pool.clone())
+        .upsert(ws, "source-admin", 80)
+        .await
+        .unwrap();
+    assert!(admin
+        .permissions
+        .as_array()
+        .unwrap()
+        .contains(&json!("data:sources:write")));
+    let analyst = ione::repos::RoleRepo::new(pool.clone())
+        .upsert(ws, "source-analyst", 20)
+        .await
+        .unwrap();
+    assert!(!analyst
+        .permissions
+        .to_string()
+        .contains("data:sources:write"));
+    let org = org_id(&pool).await;
+    let user = default_user_id(&pool).await;
+    let mock = MockServer::start().await;
+    let (_, mut state) = ione::app_with_state(pool.clone()).await;
+    let mut config = (*state.config).clone();
+    config.relay = Some(Arc::new(ione::config::RelayConfig {
+        base_url: mock.uri(),
+        deployment_id: Uuid::new_v4(),
+        runtime_token: "runtime-only".into(),
+        management_token: Some("management-only".into()),
+        signing_key_id: "k1".into(),
+        signing_key: "fixture-signing-key".into(),
+        callback_verification_key: "callback".into(),
+        default_model: "fixture-model".into(),
+        timeout_ms: 5000,
+    }));
+    assert!(!format!("{:?}", config.relay).contains("management-only"));
+    state.relay = Some(Arc::new(
+        ione::services::relay_client::RelayClient::new(config.relay.clone().unwrap()).unwrap(),
+    ));
+    state.config = Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, ione::routes::router(state))
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let source = json!({"name":"Sales", "alias":"sales", "host":"localhost", "port":5432,
+        "database":"warehouse", "schema":"public", "tables":["orders"], "username":"reader",
+        "password":"secret-canary-531", "tls":"disable", "isolation":"single_tenant"});
+    set_member_permissions(&pool, ws, json!(["data:query", "workspace:write"])).await;
+    assert_eq!(
+        client
+            .post(sources_url(&base, ws))
+            .json(&source)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert!(mock.received_requests().await.unwrap().is_empty());
+    set_member_permissions(&pool, ws, json!(["data:query", "data:sources:write"])).await;
+    assert_eq!(
+        client
+            .get(format!("{base}/api/v1/workspaces/{ws}/relay/source-admin"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let connection = Uuid::new_v4();
+    Mock::given(method("POST"))
+        .and(path("/v1/connections"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":connection})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/connections/{connection}/validate")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"active"})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/connections/{connection}/catalog")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"entities":1})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/connections/{connection}/grants")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"grant_id":Uuid::new_v4()})))
+        .mount(&mock)
+        .await;
+    let response = client
+        .post(sources_url(&base, ws))
+        .json(&source)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let output = response.text().await.unwrap();
+    assert!(!output.contains("secret-canary"));
+    assert!(!output.contains("warehouse"));
+    let mappings = ione::repos::RelayMappingRepo::new(pool.clone())
+        .effective_for_user(org, ws, user)
+        .await
+        .unwrap();
+    assert_eq!(mappings.len(), 1);
+    assert_eq!(mappings[0].principal_id, Some(user));
+    let requests = mock.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 4);
+    for request in &requests {
+        assert_eq!(
+            request.headers.get("authorization").unwrap(),
+            "Bearer management-only"
+        );
+        let scope: Value = serde_json::from_str(
+            request
+                .headers
+                .get("x-relay-scope")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scope["actor_id"], user.to_string());
+        assert_eq!(scope["tenant_id"], org.to_string());
+        assert_eq!(scope["workspace_id"], ws.to_string());
+    }
+    let create: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert!(create["credential"]
+        .as_str()
+        .unwrap()
+        .contains("secret-canary-531"));
+    assert!(!create["public_config"]
+        .to_string()
+        .contains("secret-canary"));
+    let grant: Value = serde_json::from_slice(&requests[3].body).unwrap();
+    assert_eq!(grant["principal_kind"], "principal");
+    assert_eq!(grant["principal_id"], user.to_string());
+    assert_eq!(grant["entity_allowlist"], json!(["orders"]));
+    assert_eq!(
+        client
+            .post(sources_url(&base, ws))
+            .json(&source)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(mock.received_requests().await.unwrap().len(), 4);
+    let mut forged = source.clone();
+    forged["workspaceId"] = json!(Uuid::new_v4());
+    assert_eq!(
+        client
+            .post(sources_url(&base, ws))
+            .json(&forged)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    mock.reset().await;
+    let failed_id = Uuid::new_v4();
+    Mock::given(method("POST"))
+        .and(path("/v1/connections"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":failed_id})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/connections/{failed_id}/validate")))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({"message":"secret-canary-531"})),
+        )
+        .mount(&mock)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/v1/connections/{failed_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"revoked":true})))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let mut failed = source.clone();
+    failed["alias"] = json!("failed");
+    let response = client
+        .post(sources_url(&base, ws))
+        .json(&failed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(!response.text().await.unwrap().contains("secret-canary"));
+    assert!(ione::repos::RelayMappingRepo::new(pool)
+        .by_alias(org, ws, "failed")
+        .await
+        .unwrap()
+        .is_none());
 }

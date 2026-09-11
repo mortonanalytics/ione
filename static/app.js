@@ -556,6 +556,10 @@ function workspaceLabel(ws) {
 }
 
 function setActiveWorkspace(ws) {
+  if (!activeWorkspace || activeWorkspace.id !== ws.id) {
+    document.getElementById('data-source-form').reset();
+    document.getElementById('data-source-status').textContent = '';
+  }
   if (workspaceEventSource) {
     workspaceEventSource.close();
     workspaceEventSource = null;
@@ -4984,6 +4988,7 @@ const ROLES_VOCABULARY = [
   'peers:manage',
   'approvals:decide',
   'workspace:write',
+  'data:sources:write',
   'tool_invoke:*:*',
 ];
 
@@ -5459,6 +5464,7 @@ const TOKEN_VOCABULARY = [
   'provisioning:apply',
   'service_accounts:manage',
   'workspace:write',
+  'data:sources:write',
   'roles:manage',
   'peers:manage',
   'approvals:decide',
@@ -6316,6 +6322,14 @@ function applyDataTabVisibility(wsId) {
 
 async function loadDataSources() {
   if (!activeWorkspace) return;
+  const sourceWorkspace = activeWorkspace.id;
+  const sourceAdmin = document.getElementById('data-source-admin');
+  sourceAdmin.hidden = true;
+  try {
+    const capability = await apiFetch(`/api/v1/workspaces/${sourceWorkspace}/relay/source-admin`, { skipErrorToast: true });
+    if (activeWorkspace && activeWorkspace.id === sourceWorkspace) sourceAdmin.hidden = capability.postgres !== true;
+  } catch (_) { /* Source administration is optional. */ }
+
   try {
     const body = await apiFetch(
       `/api/v1/workspaces/${activeWorkspace.id}/relay/sources`
@@ -6772,3 +6786,40 @@ function renderDataReceipts(receipts) {
       `/api/v1/workspaces/${activeWorkspace.id}/relay/runs`;
   }
 }
+
+const dataSourceForm = document.getElementById('data-source-form');
+dataSourceForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!activeWorkspace) return;
+  const workspaceId = activeWorkspace.id;
+  const fields = new FormData(dataSourceForm);
+  const body = Object.fromEntries(fields.entries());
+  body.port = Number(body.port);
+  body.tables = body.tables.split(',').map((name) => name.trim()).filter(Boolean);
+  const submit = dataSourceForm.querySelector('button[type=submit]');
+  const status = document.getElementById('data-source-status');
+  submit.disabled = true;
+  status.textContent = 'Validating permissions and discovering tables…';
+  dataSourceForm.elements.password.value = '';
+  try {
+    const mapping = await apiFetch(`/api/v1/workspaces/${workspaceId}/relay/sources`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), skipErrorToast: true,
+    });
+    if (!activeWorkspace || activeWorkspace.id !== workspaceId) return;
+    dataSourceForm.reset();
+    status.textContent = 'Source ready. Describe the dataset you need below.';
+    dataSelected.add(mapping.id);
+    await loadDataSources();
+    dataAskSubmit.disabled = dataSelected.size === 0;
+    dataAskInput.focus();
+  } catch (err) {
+    if (activeWorkspace && activeWorkspace.id === workspaceId) {
+      status.textContent = err.message || 'Source could not be added. Check the alias, read-only permissions, approved tables, and connection details.';
+    }
+  } finally {
+    delete body.password;
+    fields.delete('password');
+    dataSourceForm.elements.password.value = '';
+    submit.disabled = false;
+  }
+});
