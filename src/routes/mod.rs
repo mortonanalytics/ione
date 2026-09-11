@@ -53,6 +53,7 @@ pub mod pipeline_events;
 pub mod provision;
 pub mod public_issuers;
 pub mod relay;
+pub mod relay_files;
 pub mod roles;
 pub mod rule_diagnostics;
 pub mod service_account_tokens;
@@ -190,6 +191,7 @@ pub fn router(state: AppState) -> Router {
         // the conversation surface: the Ollama client, the generator, the
         // critic, and the router are untouched, and these routes are absent
         // from a deployment with no relay configured.
+        .route("/api/v1/workspaces/:id/relay/file-sources",post(relay_files::register_file))
         .route(
             "/api/v1/workspaces/:id/relay/sources",
             get(relay::available_sources).post(relay::register_source),

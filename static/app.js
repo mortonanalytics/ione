@@ -1,3 +1,4 @@
+let fileSourceRequest = null;
 let dataRecipe = null;
 let dataRecipes = [];
 let dataRecipeSave = null;
@@ -6340,11 +6341,20 @@ async function loadDataSources() {
   loadRecipes();
   loadPeerDatasets();
   const sourceWorkspace = activeWorkspace.id;
+  document.getElementById('data-file-admin').hidden = true;
   const sourceAdmin = document.getElementById('data-source-admin');
   sourceAdmin.hidden = true;
   try {
     const capability = await apiFetch(`/api/v1/workspaces/${sourceWorkspace}/relay/source-admin`, { skipErrorToast: true });
-    if (activeWorkspace && activeWorkspace.id === sourceWorkspace) sourceAdmin.hidden = capability.postgres !== true;
+    if (activeWorkspace && activeWorkspace.id === sourceWorkspace) {
+      sourceAdmin.hidden = capability.postgres !== true;
+      const formats = Array.isArray(capability.fileFormats) ? capability.fileFormats : [];
+      document.getElementById('data-file-admin').hidden = formats.length === 0;
+      const selector = document.getElementById('data-file-form').elements.format;
+      Array.from(selector.options).forEach((option) => { option.disabled = !formats.includes(option.value); });
+      if (!formats.includes(selector.value) && formats.length) selector.value = formats[0];
+      selector.dispatchEvent(new Event('change'));
+    }
   } catch (_) { /* Source administration is optional. */ }
 
   try {
@@ -6884,6 +6894,13 @@ dataSourceForm.addEventListener('submit', async (event) => {
 });
 
 function resetDatasetWorkspace() {
+  fileSourceRequest = null;
+  document.getElementById('data-file-form').reset();
+  document.getElementById('data-file-admin').hidden = true;
+  document.getElementById('data-file-status').textContent = '';
+  document.getElementById('data-file-columns').hidden = false;
+  document.getElementById('data-file-csv').hidden = true;
+  document.querySelector('#data-file-form button[type=submit]').disabled = false;
   dataRecipe = null;
   dataRecipes = [];
   dataRecipeSave = null;
@@ -7329,4 +7346,56 @@ document.getElementById('data-recipe-save-form').addEventListener('submit', asyn
   } catch (_) {
     if (dataRecipeSave === selection && activeWorkspace?.id === selection.workspace) document.getElementById('data-recipe-status').textContent = 'Recipe save was not confirmed. Refresh recipes before retrying.';
   } finally { button.disabled = false; }
+});
+
+
+const dataFileForm = document.getElementById('data-file-form');
+dataFileForm.elements.format.addEventListener('change', () => {
+  document.getElementById('data-file-columns').hidden = dataFileForm.elements.format.value === 'parquet';
+  document.getElementById('data-file-csv').hidden = dataFileForm.elements.format.value !== 'csv';
+});
+document.getElementById('data-file-clear').addEventListener('click', () => {
+  fileSourceRequest = null;
+  dataFileForm.reset();
+  dataFileForm.elements.format.dispatchEvent(new Event('change'));
+  document.getElementById('data-file-status').textContent = '';
+  dataFileForm.querySelector('button[type=submit]').disabled = false;
+});
+dataFileForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!activeWorkspace) return;
+  const request = { workspace: activeWorkspace.id };
+  fileSourceRequest = request;
+  const fields = new FormData(dataFileForm);
+  const body = Object.fromEntries(fields.entries());
+  dataFileForm.elements.accessKeyId.value = '';
+  dataFileForm.elements.secretAccessKey.value = '';
+  fields.delete('accessKeyId');
+  fields.delete('secretAccessKey');
+  const status = document.getElementById('data-file-status');
+  const submit = dataFileForm.querySelector('button[type=submit]');
+  submit.disabled = true;
+  status.textContent = 'Validating operator attestation and discovering the table…';
+  try {
+    body.columns = body.format === 'parquet' ? [] : JSON.parse(body.columns);
+    body.policyReceipt = JSON.parse(body.policyReceipt);
+    if (body.format === 'csv') body.csv = { delimiter: body.delimiter, quote: body.quote, escape: body.escape || null, header: dataFileForm.elements.header.checked, nullValue: body.nullValue };
+    ['delimiter', 'quote', 'escape', 'header', 'nullValue'].forEach((key) => delete body[key]);
+    const mapping = await apiFetch(`/api/v1/workspaces/${request.workspace}/relay/file-sources`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), skipErrorToast: true,
+    });
+    if (fileSourceRequest !== request || activeWorkspace?.id !== request.workspace) return;
+    dataFileForm.reset();
+    dataFileForm.elements.format.dispatchEvent(new Event('change'));
+    status.textContent = 'File source ready — operator-attested. Describe the dataset you need below.';
+    dataSelected.add(mapping.id);
+    await loadDataSources();
+    if (fileSourceRequest === request && activeWorkspace?.id === request.workspace) dataAskInput.focus();
+  } catch (_) {
+    if (fileSourceRequest === request && activeWorkspace?.id === request.workspace) status.textContent = 'Source was not confirmed. Check the typed columns, CSV dialect, current policy receipt and connection details, then re-enter the keys to retry. Refresh sources first if the response was lost.';
+  } finally {
+    delete body.accessKeyId;
+    delete body.secretAccessKey;
+    if (fileSourceRequest === request) submit.disabled = false;
+  }
 });

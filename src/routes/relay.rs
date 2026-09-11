@@ -608,7 +608,9 @@ pub async fn source_admin_status(
             "source administration is not configured".into(),
         ));
     }
-    Ok(Json(serde_json::json!({"postgres": true})))
+    Ok(Json(
+        serde_json::json!({"postgres": true,"fileFormats":["json","ndjson","ipc_file","ipc_stream","csv","parquet"]}),
+    ))
 }
 
 #[derive(Deserialize)]

@@ -195,6 +195,41 @@
                 <p id="data-source-status" role="status"></p>
               </form>
             </details>
+            <details id="data-file-admin" class="data-limits" hidden>
+              <summary>Add object-store file source</summary>
+              <form id="data-file-form" autocomplete="off">
+                <label>Name <input name="name" maxlength="128" required></label>
+                <label>Query alias <input name="alias" pattern="[a-z_][a-z0-9_]{0,62}" required></label>
+                <label>Object-store endpoint <input name="endpoint" type="url" placeholder="https://s3.example.com" required></label>
+                <label>Region <input name="region" value="us-east-1" required></label>
+                <label>Bucket <input name="bucket" required></label>
+                <label>Approved prefix <input name="prefix" placeholder="reports" required></label>
+                <label>Table name <input name="table" value="records" required></label>
+                <label>Object path relative to prefix <input name="path" placeholder="sales.json" required></label>
+                <label>Source classification floor <select name="classification"><option value="restricted">Restricted</option><option value="confidential">Confidential</option><option value="internal">Internal</option><option value="public">Public</option></select></label>
+                <label>Format <select name="format"><option value="json">JSON array</option><option value="ndjson">NDJSON</option><option value="ipc_file">Arrow IPC file</option><option value="ipc_stream">Arrow IPC stream</option><option value="csv">CSV</option><option value="parquet">Parquet</option></select></label>
+                <div id="data-file-columns">
+                  <label>Ordered columns (JSON) <textarea name="columns" rows="4" maxlength="16384" placeholder='[{"name":"id","ty":{"type":"int64"},"nullable":false,"classification":"restricted"}]'></textarea></label>
+                  <p class="data-hint">Types: boolean, int8, int16, int32, int64, uint64, float32, float64, utf8, date32, decimal (precision/scale). IPC also supports timestamp with UTC or null timezone. Each column accepts classification: public/internal/confidential/restricted (omitted inherits the source floor). The strongest of source and column classification applies. Parquet discovers its schema under the source classification floor.</p>
+                </div>
+                <fieldset id="data-file-csv" hidden>
+                  <legend>CSV dialect</legend>
+                  <label>Delimiter <input name="delimiter" value="," maxlength="1"></label>
+                  <label>Quote <input name="quote" value='"' maxlength="1"></label>
+                  <label>Escape (blank for none) <input name="escape" maxlength="1"></label>
+                  <label><input name="header" type="checkbox" checked> Header row</label>
+                  <label>Null marker <input name="nullValue" value="NULL" maxlength="64"></label>
+                </fieldset>
+                <label>Operator policy receipt (JSON) <textarea name="policyReceipt" rows="6" maxlength="16384" required></textarea></label>
+                <p class="data-hint">Supply your existing receipt: attested_by, attested_at, actions, bucket, prefix, signature, expires_at. Bucket/prefix must match exactly. Only s3:GetObject, s3:GetObjectVersion and s3:ListBucket are allowed; GetObject and ListBucket are required. This is operator-attested access; the signature is retained, not cryptographically verified.</p>
+                <label>Access key ID <input name="accessKeyId" type="password" autocomplete="new-password" required></label>
+                <label>Secret access key <input name="secretAccessKey" type="password" autocomplete="new-password" required></label>
+                <p class="data-hint">One table, read-only, initially available only to you. Credentials go to encrypted Relay storage. Objects are limited to 8 MiB. Use HTTPS except for loopback development endpoints.</p>
+                <button type="submit">Validate and add file source</button>
+                <button id="data-file-clear" type="button">Clear file source</button>
+                <p id="data-file-status" role="status"></p>
+              </form>
+            </details>
             <details id="data-peer-dataset-admin" class="data-limits" hidden>
               <summary>Add peer dataset source</summary>
               <p>Send this origin identity to the dataset owner to request a read grant.</p>

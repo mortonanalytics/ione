@@ -242,3 +242,78 @@ test("private recipes save, reload, replay and append with workspace resets", as
   await expect(page.locator("#data-recipe-select")).toHaveValue("");
   await expect(page.locator("#data-recipe-details")).toHaveText("");
 });
+
+test("file onboarding submits typed formats with JSON headers and clears both keys", async ({ page }) => {
+  await page.route("**/relay/source-admin", (route) => route.fulfill({ json: { postgres: true, fileFormats: ["json", "ndjson", "ipc_file", "ipc_stream", "csv", "parquet"] } }));
+  const requests: any[] = [];
+  await page.route("**/relay/file-sources", async (route) => {
+    expect(route.request().headers()["content-type"]).toBe("application/json");
+    requests.push(route.request().postDataJSON());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return route.fulfill({ json: { id: mapping } });
+  });
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await page.locator("#data-file-admin summary").click();
+  const form = page.locator("#data-file-form");
+  const columns = [{ name: "amount", ty: { type: "decimal", precision: 25, scale: 4 }, nullable: true }];
+  const receipt = { attested_by: "fixture operator", attested_at: "2026-09-10T00:00:00Z", expires_at: "2026-10-01T00:00:00Z", actions: ["s3:GetObject", "s3:ListBucket"], bucket: "reports", prefix: "approved", signature: "fixture operator receipt" };
+  for (const format of ["json", "ndjson", "ipc_file", "ipc_stream", "csv", "parquet"]) {
+    await form.locator("[name=name]").fill("File source");
+    await form.locator("[name=alias]").fill(`files_${format}`);
+    await form.locator("[name=endpoint]").fill("http://127.0.0.1:59000");
+    await form.locator("[name=bucket]").fill("reports");
+    await form.locator("[name=prefix]").fill("approved");
+    await form.locator("[name=path]").fill(`sales.${format}`);
+    await form.locator("[name=format]").selectOption(format);
+    if (format !== "parquet") await form.locator("[name=columns]").fill(JSON.stringify(columns));
+    else await expect(page.locator("#data-file-columns")).toBeHidden();
+    await form.locator("[name=policyReceipt]").fill(JSON.stringify(receipt));
+    await form.locator("[name=accessKeyId]").fill("file-access-canary");
+    await form.locator("[name=secretAccessKey]").fill("file-secret-canary");
+    await form.locator("button[type=submit]").click();
+    await expect(form.locator("[name=accessKeyId]")).toHaveValue("");
+    await expect(form.locator("[name=secretAccessKey]")).toHaveValue("");
+    await expect(page.locator("#data-file-status")).toContainText("operator-attested");
+    const sent = requests[requests.length - 1];
+    expect(sent.format).toBe(format);
+    expect(sent.classification).toBe("restricted");
+    expect(sent.columns).toEqual(format === "parquet" ? [] : columns);
+    expect(sent.policyReceipt).toEqual(receipt);
+    expect(sent.accessKeyId).toBe("file-access-canary");
+    expect(sent.secretAccessKey).toBe("file-secret-canary");
+    if (format === "csv") expect(sent.csv).toEqual({ delimiter: ",", quote: '"', escape: null, header: true, nullValue: "NULL" });
+    else expect(sent).not.toHaveProperty("csv");
+    expect(sent).not.toHaveProperty("public_config");
+    expect(sent).not.toHaveProperty("workspaceId");
+  }
+  await expect(page.locator("#data-source-list input")).toBeChecked();
+  await expect(page.locator("body")).not.toContainText("file-secret-canary");
+});
+
+test("file onboarding discards workspace drafts and late responses", async ({ page }) => {
+  await page.route("**/relay/source-admin", (route) => route.fulfill({ json: { fileFormats: ["json", "parquet"] } }));
+  let submitted = false;
+  await page.route("**/relay/file-sources", async (route) => {
+    expect(route.request().headers()["content-type"]).toBe("application/json");
+    submitted = true;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return route.fulfill({ json: { id: mapping } });
+  });
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await page.locator("#data-file-admin summary").click();
+  const form = page.locator("#data-file-form");
+  for (const [name, value] of Object.entries({ name: "Draft", alias: "draft", endpoint: "http://127.0.0.1:59000", bucket: "reports", prefix: "approved", path: "data.parquet", policyReceipt: "{}", accessKeyId: "access-canary", secretAccessKey: "secret-canary" })) await form.locator(`[name=${name}]`).fill(value);
+  await form.locator("[name=format]").selectOption("parquet");
+  await form.locator("button[type=submit]").click();
+  await expect.poll(() => submitted).toBe(true);
+  await page.evaluate(() => (window as any).setActiveWorkspace({ id: "dddddddd-dddd-dddd-dddd-dddddddddddd", name: "Other", lifecycle: "continuous", closedAt: null }));
+  await expect(form.locator("[name=accessKeyId]")).toHaveValue("");
+  await expect(form.locator("[name=secretAccessKey]")).toHaveValue("");
+  await expect(form.locator("[name=policyReceipt]")).toHaveValue("");
+  await expect(form.locator("[name=endpoint]")).toHaveValue("");
+  await page.waitForTimeout(350);
+  await expect(page.locator("#data-file-status")).toHaveText("");
+  await expect(page.locator("#data-source-list input")).not.toBeChecked();
+});

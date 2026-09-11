@@ -1724,3 +1724,450 @@ async fn private_recipes_resolve_current_mappings_and_replay_without_model() {
     drop(delayed);
     pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires migrated PostgreSQL"]
+async fn file_sources_build_typed_configs_retry_and_recheck_permissions() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
+    use wiremock::{
+        matchers::{method, path, path_regex},
+        Mock, MockServer, ResponseTemplate,
+    };
+    let (_, pool) = spawn_app().await;
+    let ws = ops_workspace_id(&pool).await;
+    let user = default_user_id(&pool).await;
+    let org = org_id(&pool).await;
+    let mock = MockServer::start().await;
+    let (_, mut state) = ione::app_with_state(pool.clone()).await;
+    let mut config = (*state.config).clone();
+    config.relay = Some(Arc::new(ione::config::RelayConfig {
+        base_url: mock.uri(),
+        deployment_id: Uuid::new_v4(),
+        runtime_token: "file-runtime".into(),
+        management_token: Some("file-management".into()),
+        signing_key_id: "fixture".into(),
+        signing_key: "fixture-key".into(),
+        callback_verification_key: "fixture-callback".into(),
+        default_model: "fixture-model".into(),
+        timeout_ms: 5000,
+    }));
+    state.relay = Some(Arc::new(
+        ione::services::relay_client::RelayClient::new(config.relay.clone().unwrap()).unwrap(),
+    ));
+    state.config = Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!(
+        "http://{}/api/v1/workspaces/{ws}/relay",
+        listener.local_addr().unwrap()
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, ione::routes::router(state))
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let connections = Arc::new(Mutex::new(std::collections::HashMap::<String, Value>::new()));
+    let fail_create = Arc::new(AtomicBool::new(false));
+    let delayed_validation = Arc::new(AtomicBool::new(false));
+    Mock::given(method("POST"))
+        .and(path("/v1/connections"))
+        .respond_with({
+            let connections = connections.clone();
+            let fail = fail_create.clone();
+            move |request: &wiremock::Request| {
+                let mut body: Value = serde_json::from_slice(&request.body).unwrap();
+                let id = body["request_id"].as_str().unwrap().to_string();
+                body["id"] = json!(id);
+                body["state"] = json!("active");
+                if let Some(previous) = connections.lock().unwrap().get(&id) {
+                    if previous != &body {
+                        return ResponseTemplate::new(409).set_body_string("file-secret-canary");
+                    }
+                }
+                connections.lock().unwrap().insert(id.clone(), body);
+                if fail.swap(false, Ordering::SeqCst) {
+                    ResponseTemplate::new(503).set_body_string("file-secret-canary")
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({"id":id}))
+                }
+            }
+        })
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/connections/[^/]+$"))
+        .respond_with({
+            let connections = connections.clone();
+            move |request: &wiremock::Request| {
+                let mut value = connections
+                    .lock()
+                    .unwrap()
+                    .get(request.url.path().rsplit('/').next().unwrap())
+                    .unwrap()
+                    .clone();
+                value.as_object_mut().unwrap().remove("credential");
+                ResponseTemplate::new(200).set_body_json(value)
+            }
+        })
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/connections/[^/]+/validate$"))
+        .respond_with({
+            let delay = delayed_validation.clone();
+            move |request: &wiremock::Request| {
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&request.body).unwrap(),
+                    json!({"claimed_assurance":"operator_attested"})
+                );
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"state":"active"}))
+                    .set_delay(std::time::Duration::from_millis(
+                        if delay.load(Ordering::SeqCst) { 250 } else { 0 },
+                    ))
+            }
+        })
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/connections/[^/]+/catalog$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"entities":1})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/connections/[^/]+/grants$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path_regex(r"^/v1/connections/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&mock)
+        .await;
+    let receipt = json!({"attested_by":"fixture operator","attested_at":chrono::Utc::now()-chrono::Duration::minutes(1),"expires_at":chrono::Utc::now()+chrono::Duration::hours(1),"actions":["s3:GetObject","s3:ListBucket"],"bucket":"reports","prefix":"approved","signature":"fixture operator receipt, not a crypto proof"});
+    let input = json!({"name":"Reports","alias":"file_json","endpoint":"http://127.0.0.1:59000","region":"us-east-1","bucket":"reports","prefix":"approved","table":"records","path":"data.json","format":"json","classification":"internal","columns":[{"name":"id","ty":{"type":"int64"},"nullable":false}],"policyReceipt":receipt,"accessKeyId":"file-access-canary","secretAccessKey":"file-secret-canary"});
+    set_member_permissions(&pool, ws, json!(["admin"])).await;
+    assert_eq!(
+        client
+            .post(format!("{root}/file-sources"))
+            .json(&input)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    set_member_permissions(&pool, ws, json!(["data:sources:write", "data:query"])).await;
+    let capability: Value = client
+        .get(format!("{root}/source-admin"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        capability["fileFormats"],
+        json!(["json", "ndjson", "ipc_file", "ipc_stream", "csv", "parquet"])
+    );
+    for format in ["json", "ndjson", "ipc_file", "ipc_stream", "csv", "parquet"] {
+        let mut body = input.clone();
+        body["alias"] = json!(format!("file_{format}"));
+        body["format"] = json!(format);
+        body["path"] = json!(format!("data.{format}"));
+        if format == "csv" {
+            body["csv"] = json!({"delimiter":",","quote":"\"","escape":null,"header":true,"nullValue":"NULL"});
+        }
+        if format == "parquet" {
+            body["columns"] = json!([]);
+        }
+        let response = client
+            .post(format!("{root}/file-sources"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "format {format}");
+        let text = response.text().await.unwrap();
+        assert!(!text.contains("file-secret-canary"));
+        assert!(!text.contains("file-access-canary"));
+        let mapping: Value = serde_json::from_str(&text).unwrap();
+        let retried: Value = client
+            .post(format!("{root}/file-sources"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(mapping["id"], retried["id"]);
+        let calls = mock.received_requests().await.unwrap();
+        let created: Value = calls
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "POST" && request.url.path() == "/v1/connections"
+            })
+            .map(|request| serde_json::from_slice::<Value>(&request.body).unwrap())
+            .find(|value| value["request_id"] == mapping["relayConnectionId"])
+            .unwrap();
+        assert_eq!(
+            created["kind"],
+            if format == "parquet" {
+                "parquet"
+            } else if format == "csv" {
+                "csv"
+            } else {
+                "file"
+            }
+        );
+        assert_eq!(created["public_config"]["policy_receipt"], receipt);
+        assert_eq!(
+            created["public_config"]["tables"]
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!created["public_config"]
+            .to_string()
+            .contains("file-secret-canary"));
+        assert_eq!(
+            serde_json::from_str::<Value>(created["credential"].as_str().unwrap()).unwrap(),
+            json!({"access_key_id":"file-access-canary","secret_access_key":"file-secret-canary"})
+        );
+        if format == "parquet" {
+            assert_eq!(created["public_config"]["classification"], "internal");
+        }
+        if format != "parquet" {
+            assert_eq!(
+                created["public_config"]["tables"]["records"]["columns"][0],
+                json!({"name":"id","ty":{"type":"int64"},"nullable":false,"classification":"internal","description":null,"is_key":false})
+            );
+        }
+        if format == "csv" {
+            assert_eq!(
+                created["public_config"]["tables"]["records"]["delimiter"],
+                44
+            );
+            assert_eq!(
+                created["public_config"]["tables"]["records"]["null_value"],
+                "NULL"
+            );
+        }
+        let grant: Value = serde_json::from_slice(
+            &calls
+                .iter()
+                .find(|request| {
+                    request.url.path()
+                        == format!(
+                            "/v1/connections/{}/grants",
+                            mapping["relayConnectionId"].as_str().unwrap()
+                        )
+                })
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        assert_eq!(grant["entity_allowlist"], json!(["records"]));
+        assert_eq!(grant["principal_id"], user.to_string());
+        assert_eq!(grant["workspace_id"], json!(ws));
+    }
+    let mut changed_keys = input.clone();
+    changed_keys["secretAccessKey"] = json!("changed-secret-canary");
+    let rejected = client
+        .post(format!("{root}/file-sources"))
+        .json(&changed_keys)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_GATEWAY);
+    assert!(!rejected.text().await.unwrap().contains("canary"));
+    for (floor, column, expected) in [
+        (None, None, "restricted"),
+        (Some("internal"), Some("confidential"), "confidential"),
+        (Some("restricted"), Some("public"), "restricted"),
+    ] {
+        let mut body = input.clone();
+        body["alias"] = json!(format!("class_{}", Uuid::new_v4().simple()));
+        if let Some(floor) = floor {
+            body["classification"] = json!(floor);
+        } else {
+            body.as_object_mut().unwrap().remove("classification");
+        }
+        if let Some(column) = column {
+            body["columns"][0]["classification"] = json!(column);
+        }
+        body["columns"][0]["ty"] = json!({"type":"uint64"});
+        let mapping: Value = client
+            .post(format!("{root}/file-sources"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let stored = connections.lock().unwrap();
+        let config = &stored[mapping["relayConnectionId"].as_str().unwrap()]["public_config"];
+        assert_eq!(
+            config["tables"]["records"]["columns"][0]["classification"],
+            expected
+        );
+        assert_eq!(
+            config["tables"]["records"]["columns"][0]["ty"],
+            json!({"type":"u_int64"})
+        );
+    }
+    let before = mock.received_requests().await.unwrap().len();
+    for (field, value) in [
+        ("path", json!("../escape.json")),
+        ("prefix", json!("approved/../other")),
+        ("endpoint", json!("http://private.example")),
+        ("endpoint", json!("https://key:secret@public.example")),
+        ("public_config", json!({})),
+        ("workspaceId", json!(Uuid::new_v4())),
+        ("grant", json!({})),
+        (
+            "columns",
+            json!([{"name":"id","ty":{"type":"list","item":{"type":"int64"}},"nullable":false}]),
+        ),
+        (
+            "columns",
+            json!([{"name":"id","ty":{"type":"timestamp","timezone":"UTC"},"nullable":false}]),
+        ),
+        ("policyReceipt", {
+            let mut v = receipt.clone();
+            v["bucket"] = json!("other");
+            v
+        }),
+        ("policyReceipt", {
+            let mut v = receipt.clone();
+            v["actions"] = json!(["s3:GetObject", "s3:PutObject"]);
+            v
+        }),
+        ("policyReceipt", {
+            let mut v = receipt.clone();
+            v["expires_at"] = json!("2020-01-01T00:00:00Z");
+            v
+        }),
+        ("policyReceipt", {
+            let mut v = receipt.clone();
+            v["signature"] = json!("");
+            v
+        }),
+    ] {
+        let mut body = input.clone();
+        body["alias"] = json!("invalid_source");
+        body[field] = value;
+        assert!(
+            client
+                .post(format!("{root}/file-sources"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_client_error(),
+            "accepted {field}"
+        );
+    }
+    assert_eq!(mock.received_requests().await.unwrap().len(), before);
+    let mut retry = input.clone();
+    retry["alias"] = json!("retry_file");
+    fail_create.store(true, Ordering::SeqCst);
+    let response = client
+        .post(format!("{root}/file-sources"))
+        .json(&retry)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(!response
+        .text()
+        .await
+        .unwrap()
+        .contains("file-secret-canary"));
+    assert_eq!(
+        client
+            .post(format!("{root}/file-sources"))
+            .json(&retry)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let calls = mock.received_requests().await.unwrap();
+    let creates: Vec<Value> = calls
+        .iter()
+        .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/v1/connections")
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(creates[creates.len() - 1], creates[creates.len() - 2]);
+    let before = mock
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().ends_with("/validate"))
+        .count();
+    let mut revoked = input.clone();
+    revoked["alias"] = json!("revoked_file");
+    delayed_validation.store(true, Ordering::SeqCst);
+    let pending = tokio::spawn({
+        let client = client.clone();
+        let root = root.clone();
+        async move {
+            client
+                .post(format!("{root}/file-sources"))
+                .json(&revoked)
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while mock
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with("/validate"))
+            .count()
+            == before
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    set_member_permissions(&pool, ws, json!([])).await;
+    assert_eq!(pending.await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert!(ione::repos::RelayMappingRepo::new(pool.clone())
+        .by_alias(org, ws, "revoked_file")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(mock
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.method.as_str() == "DELETE"));
+    let persisted: Vec<String> =
+        sqlx::query_scalar("SELECT row_to_json(m)::text FROM workspace_relay_mappings m")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(!persisted.join("").contains("file-secret-canary"));
+    assert!(!persisted.join("").contains("file-access-canary"));
+    pool.close().await;
+}
