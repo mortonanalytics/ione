@@ -646,9 +646,45 @@ pub async fn register_source(
         .map_err(|_| AppError::BadRequest("invalid source credential".into()))?;
     dsn.set_path(&format!("/{}", input.database));
     dsn.query_pairs_mut().append_pair("sslmode", &input.tls);
+    let mut intent = crate::rls::org_scoped_tx(&state.pool, ctx.org_id).await?;
+    sqlx::query("INSERT INTO relay_source_registrations (org_id,workspace_id,actor_id,alias) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+        .bind(ctx.org_id).bind(workspace_id).bind(ctx.user_id).bind(&input.alias)
+        .execute(&mut *intent).await.map_err(anyhow::Error::from)?;
+    intent.commit().await.map_err(anyhow::Error::from)?;
+
+    let mut registration = crate::rls::org_scoped_tx(&state.pool, ctx.org_id).await?;
+    let locked: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!(
+                "relay-source:{}:{}:{}",
+                ctx.org_id, workspace_id, input.alias
+            ))
+            .fetch_one(&mut *registration)
+            .await
+            .map_err(anyhow::Error::from)?;
+    if !locked {
+        return Err(AppError::ConflictJson(
+            serde_json::json!({"error":"registration_in_progress", "message":"This source is being registered. Retry after it finishes."}),
+        ));
+    }
+    if repo
+        .by_alias(ctx.org_id, workspace_id, &input.alias)
+        .await
+        .map_err(AppError::Internal)?
+        .is_some()
+    {
+        return Err(AppError::BadRequest(
+            "that source alias already exists".into(),
+        ));
+    }
+    let request_id: Uuid = sqlx::query_scalar("SELECT request_id FROM relay_source_registrations WHERE workspace_id=$1 AND actor_id=$2 AND alias=$3")
+        .bind(workspace_id).bind(ctx.user_id).bind(&input.alias)
+        .fetch_optional(&mut *registration).await.map_err(anyhow::Error::from)?
+        .ok_or_else(|| AppError::ConflictJson(serde_json::json!({"error":"registration_finished", "message":"The prior registration finished. Retry to start a new one."})))?;
+    authorize_source_admin(&state, &ctx, workspace_id).await?;
     let scope = scope_for(&ctx, workspace_id);
     let created = client.manage_source(reqwest::Method::POST, "/v1/connections", &scope,
-        serde_json::json!({"workspace_id": workspace_id, "kind": "postgres", "name": input.name,
+        serde_json::json!({"request_id": request_id, "workspace_id": workspace_id, "kind": "postgres", "name": input.name,
             "public_config": {"schema": input.schema, "relations": input.tables, "isolation": input.isolation},
             "credential": dsn.as_str()})).await.map_err(map_error)?;
     let id = created
@@ -675,7 +711,7 @@ pub async fn register_source(
         ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
         authorize_source_admin(&state, &ctx, workspace_id).await?;
         repo.create(ctx.org_id, workspace_id, ctx.user_id, NewRelayMapping {
-            relay_connection_id: id, display_name: input.name, alias: input.alias, principal_id: Some(ctx.user_id),
+            relay_connection_id: id, display_name: input.name, alias: input.alias.clone(), principal_id: Some(ctx.user_id),
         }).await.map_err(|_| AppError::BadRequest("source mapping could not be saved; retry with an unused alias".into()))
     }.await;
     if result.is_err() {
@@ -692,7 +728,11 @@ pub async fn register_source(
                 "source registration failed; administrator must revoke incomplete connection {id}"
             )));
         }
+        sqlx::query("DELETE FROM relay_source_registrations WHERE workspace_id=$1 AND actor_id=$2 AND alias=$3 AND request_id=$4")
+            .bind(workspace_id).bind(ctx.user_id).bind(&input.alias).bind(request_id)
+            .execute(&mut *registration).await.map_err(anyhow::Error::from)?;
     }
+    registration.commit().await.map_err(anyhow::Error::from)?;
     result.map(Json)
 }
 

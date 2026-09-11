@@ -940,10 +940,37 @@ async fn source_onboarding_scopes_grants_and_scrubs_failures() {
             .status(),
         StatusCode::OK
     );
+    let interrupted = Mock::given(method("POST"))
+        .and(path("/v1/connections"))
+        .respond_with(
+            ResponseTemplate::new(502).set_body_json(json!({"message":"secret-canary-531"})),
+        )
+        .mount_as_scoped(&mock)
+        .await;
+    let response = client
+        .post(sources_url(&base, ws))
+        .json(&source)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(!response.text().await.unwrap().contains("secret-canary"));
+    let pending: Uuid = sqlx::query_scalar("SELECT request_id FROM relay_source_registrations WHERE org_id=$1 AND workspace_id=$2 AND actor_id=$3 AND alias='sales'")
+        .bind(org).bind(ws).bind(user).fetch_one(&pool).await.unwrap();
+    let first_request: Value =
+        serde_json::from_slice(&mock.received_requests().await.unwrap()[0].body).unwrap();
+    assert_eq!(first_request["request_id"], json!(pending));
+    assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+    drop(interrupted);
+    mock.reset().await;
     let connection = Uuid::new_v4();
     Mock::given(method("POST"))
         .and(path("/v1/connections"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":connection})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id":connection}))
+                .set_delay(std::time::Duration::from_millis(200)),
+        )
         .mount(&mock)
         .await;
     Mock::given(method("POST"))
@@ -961,13 +988,18 @@ async fn source_onboarding_scopes_grants_and_scrubs_failures() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"grant_id":Uuid::new_v4()})))
         .mount(&mock)
         .await;
-    let response = client
-        .post(sources_url(&base, ws))
-        .json(&source)
-        .send()
-        .await
-        .unwrap();
+    let first = client.post(sources_url(&base, ws)).json(&source).send();
+    let second = client.post(sources_url(&base, ws)).json(&source).send();
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap();
+    let second = second.unwrap();
+    let (response, concurrent) = if first.status() == StatusCode::OK {
+        (first, second)
+    } else {
+        (second, first)
+    };
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(concurrent.status(), StatusCode::CONFLICT);
     let output = response.text().await.unwrap();
     assert!(!output.contains("secret-canary"));
     assert!(!output.contains("warehouse"));
@@ -998,6 +1030,7 @@ async fn source_onboarding_scopes_grants_and_scrubs_failures() {
         assert_eq!(scope["workspace_id"], ws.to_string());
     }
     let create: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(create["request_id"], json!(pending));
     assert!(create["credential"]
         .as_str()
         .unwrap()
@@ -1062,6 +1095,9 @@ async fn source_onboarding_scopes_grants_and_scrubs_failures() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert!(!response.text().await.unwrap().contains("secret-canary"));
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM relay_source_registrations WHERE org_id=$1 AND workspace_id=$2 AND actor_id=$3 AND alias='failed'")
+        .bind(org).bind(ws).bind(user).fetch_one(&pool).await.unwrap();
+    assert_eq!(remaining, 0);
     assert!(ione::repos::RelayMappingRepo::new(pool)
         .by_alias(org, ws, "failed")
         .await
