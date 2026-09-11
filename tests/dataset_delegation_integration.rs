@@ -26,6 +26,23 @@ async fn permissions(pool: &PgPool, ws: Uuid, enabled: bool) {
         .unwrap();
 }
 
+async fn metadata_rpc(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    origin: &Value,
+    input: Value,
+) -> reqwest::Response {
+    client
+        .post(url)
+        .bearer_auth(token)
+        .header("x-ione-dataset-origin", origin.to_string())
+        .json(&input)
+        .send()
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 #[ignore = "requires isolated migrated PostgreSQL"]
 async fn immutable_delegation_checks_every_identity_permission_expiry_and_download() {
@@ -210,6 +227,190 @@ async fn immutable_delegation_checks_every_identity_permission_expiry_and_downlo
     assert_eq!(descriptor["row_count"], 200);
     assert_eq!(descriptor["read_only"], true);
     assert!(descriptor.get("rows").is_none());
+    let mcp = format!("{base}/api/v1/dataset-delegations/{grant}/mcp");
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}});
+    let initialized = metadata_rpc(&client, &mcp, token, &origin, initialize.clone()).await;
+    assert_eq!(initialized.status(), 200);
+    assert_eq!(initialized.headers()["cache-control"], "no-store");
+    assert_eq!(initialized.headers()["mcp-protocol-version"], "2025-11-25");
+    assert!(initialized.headers().get("mcp-session-id").is_none());
+    assert_eq!(
+        initialized.json::<Value>().await.unwrap()["result"]["protocolVersion"],
+        "2025-11-25"
+    );
+    let notification = metadata_rpc(
+        &client,
+        &mcp,
+        token,
+        &origin,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await;
+    assert_eq!(notification.status(), 202);
+    assert_eq!(notification.headers()["cache-control"], "no-store");
+    assert!(notification.bytes().await.unwrap().is_empty());
+    let tools = metadata_rpc(
+        &client,
+        &mcp,
+        token,
+        &origin,
+        json!({"jsonrpc":"2.0","id":"tools","method":"tools/list"}),
+    )
+    .await
+    .json::<Value>()
+    .await
+    .unwrap();
+    assert_eq!(tools["result"]["tools"][0]["name"], "describe_dataset");
+    assert_eq!(
+        tools["result"]["tools"][0]["annotations"]["readOnlyHint"],
+        true
+    );
+    let described=metadata_rpc(&client,&mcp,token,&origin,json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"describe_dataset","arguments":{}}})).await.json::<Value>().await.unwrap();
+    assert_eq!(
+        described["result"]["structuredContent"]["descriptor"],
+        descriptor
+    );
+    assert_eq!(
+        described["result"]["structuredContent"]["read"]["path"],
+        format!("/api/v1/dataset-delegations/{grant}/read")
+    );
+    let resources = metadata_rpc(
+        &client,
+        &mcp,
+        token,
+        &origin,
+        json!({"jsonrpc":"2.0","id":3,"method":"resources/list"}),
+    )
+    .await
+    .json::<Value>()
+    .await
+    .unwrap();
+    let uri = resources["result"]["resources"][0]["uri"].as_str().unwrap();
+    assert_eq!(
+        uri,
+        format!("ione-dataset://{grant}/{dataset}/versions/{version}")
+    );
+    let resource = metadata_rpc(
+        &client,
+        &mcp,
+        token,
+        &origin,
+        json!({"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":uri}}),
+    )
+    .await
+    .json::<Value>()
+    .await
+    .unwrap();
+    let resource_metadata: Value =
+        serde_json::from_str(resource["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(resource_metadata, described["result"]["structuredContent"]);
+    for (request, code) in [
+        (json!([initialize.clone()]), -32600),
+        (json!({"jsonrpc":"2.0","id":5,"method":"unknown"}), -32601),
+        (
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"publish_dataset","arguments":{}}}),
+            -32602,
+        ),
+        (
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"describe_dataset","arguments":{"sql":"SELECT secret"}}}),
+            -32602,
+        ),
+        (
+            json!({"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"file:///etc/passwd"}}),
+            -32602,
+        ),
+        (
+            json!({"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":format!("ione-dataset://{}/{dataset}/versions/{version}",Uuid::new_v4())}}),
+            -32602,
+        ),
+        (
+            json!({"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":format!("ione-dataset://{grant}/{dataset}/versions/{}",Uuid::new_v4())}}),
+            -32602,
+        ),
+        (
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":{"cursor":"other"}}),
+            -32602,
+        ),
+        (
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/list","extra":"no"}),
+            -32600,
+        ),
+    ] {
+        assert_eq!(
+            metadata_rpc(&client, &mcp, token, &origin, request)
+                .await
+                .json::<Value>()
+                .await
+                .unwrap()["error"]["code"],
+            code
+        );
+    }
+    for credential in ["", "ione_sat_fake", "generic.ione.jwt"] {
+        let response = metadata_rpc(&client, &mcp, credential, &origin, initialize.clone()).await;
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+    let oversized = client
+        .post(&mcp)
+        .bearer_auth(token)
+        .header("x-ione-dataset-origin", origin.to_string())
+        .header("content-type", "application/json")
+        .body(" ".repeat(65537))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), 413);
+    assert_eq!(oversized.headers()["cache-control"], "no-store");
+    for secret in [
+        token,
+        "runtime-secret-canary",
+        "management-secret-canary",
+        "bounded binary fixture",
+    ] {
+        assert!(!described.to_string().contains(secret));
+        assert!(!resource.to_string().contains(secret));
+    }
+    assert!(mock
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.method == "GET"));
+    let previous_schema = manifest.lock().unwrap()["schema_ipc_base64"].clone();
+    let previous_hash = manifest.lock().unwrap()["arrow_schema_hash"].clone();
+    let large_schema = vec![1u8; 30000];
+    manifest.lock().unwrap()["schema_ipc_base64"] = json!(STANDARD.encode(&large_schema));
+    manifest.lock().unwrap()["arrow_schema_hash"] = json!(digest(&large_schema));
+    let large_grant: Value = client
+        .post(&root)
+        .json(&input)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let limited = metadata_rpc(
+        &client,
+        &format!(
+            "{base}/api/v1/dataset-delegations/{}/mcp",
+            large_grant["grant"]["grant_id"].as_str().unwrap()
+        ),
+        large_grant["token"].as_str().unwrap(),
+        &origin,
+        json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"describe_dataset"}}),
+    )
+    .await
+    .bytes()
+    .await
+    .unwrap();
+    assert!(limited.len() <= 65536);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&limited).unwrap()["error"]["code"],
+        -32603
+    );
+    manifest.lock().unwrap()["schema_ipc_base64"] = previous_schema;
+    manifest.lock().unwrap()["arrow_schema_hash"] = previous_hash;
     for field in [
         "deployment_id",
         "tenant_id",
@@ -236,6 +437,12 @@ async fn immutable_delegation_checks_every_identity_permission_expiry_and_downlo
                 .status(),
             401,
             "{field}"
+        );
+        assert_eq!(
+            metadata_rpc(&client, &mcp, token, &wrong, initialize.clone())
+                .await
+                .status(),
+            401
         );
     }
     for credential in ["", "ione_sat_bad", "peer-jwt", "runtime-secret-canary"] {
@@ -342,6 +549,12 @@ async fn immutable_delegation_checks_every_identity_permission_expiry_and_downlo
     }
     permissions(&pool, ws, false).await;
     assert_eq!(
+        metadata_rpc(&client, &mcp, token, &origin, initialize.clone())
+            .await
+            .status(),
+        403
+    );
+    assert_eq!(
         client
             .get(&desc)
             .bearer_auth(token)
@@ -429,6 +642,16 @@ async fn immutable_delegation_checks_every_identity_permission_expiry_and_downlo
                 "{field}"
             );
         }
+        assert_eq!(
+            metadata_rpc(&client, &mcp, token, &origin, initialize.clone())
+                .await
+                .status(),
+            if field == "requires_source_access" {
+                404
+            } else {
+                403
+            }
+        );
         manifest.lock().unwrap()[field] = previous;
     }
     let before = read_count.load(std::sync::atomic::Ordering::SeqCst);
@@ -483,6 +706,18 @@ async fn immutable_delegation_checks_every_identity_permission_expiry_and_downlo
             .status(),
         401
     );
+    assert_eq!(
+        metadata_rpc(
+            &client,
+            &mcp,
+            token,
+            &origin,
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .await
+        .status(),
+        401
+    );
     let second: Value = client
         .post(&root)
         .json(&input)
@@ -505,6 +740,18 @@ async fn immutable_delegation_checks_every_identity_permission_expiry_and_downlo
             .await
             .unwrap()
             .status(),
+        401
+    );
+    assert_eq!(
+        metadata_rpc(
+            &client,
+            &format!("{base}/api/v1/dataset-delegations/{second_id}/mcp"),
+            second["token"].as_str().unwrap(),
+            &origin,
+            initialize
+        )
+        .await
+        .status(),
         401
     );
     for req in mock.received_requests().await.unwrap() {

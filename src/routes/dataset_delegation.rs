@@ -234,3 +234,159 @@ pub async fn read(
     )
         .into_response())
 }
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataRpc {
+    jsonrpc: String,
+    id: Option<Value>,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+fn empty_params(value: &Value) -> bool {
+    value.is_null() || value.as_object().is_some_and(|v| v.is_empty())
+}
+
+pub async fn mcp(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, AppError> {
+    let grant = authenticate(&state, id, &headers).await?;
+    let manifest = service::validate_grant(&state, &grant).await?;
+    authenticate(&state, id, &headers).await?;
+    let protocol = crate::services::peer_tokens::MCP_PROTOCOL_VERSION;
+    let respond = |value: Value| {
+        let bytes = serde_json::to_vec(&value).expect("JSON value serialization");
+        let bytes = if bytes.len() > 65536 {
+            serde_json::to_vec(&json!({"jsonrpc":"2.0","id":value["id"],"error":{"code":-32603,"message":"Dataset metadata exceeds response limit"}})).expect("JSON value serialization")
+        } else {
+            bytes
+        };
+        (
+            [
+                ("content-type", "application/json"),
+                ("cache-control", "no-store"),
+                ("mcp-protocol-version", protocol),
+            ],
+            bytes,
+        )
+            .into_response()
+    };
+    let error = |id: Value, code: i32, message: &str| {
+        respond(json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}))
+    };
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(str::trim)
+        != Some("application/json")
+    {
+        let mut response = error(Value::Null, -32600, "Content-Type must be application/json");
+        *response.status_mut() = StatusCode::UNSUPPORTED_MEDIA_TYPE;
+        return Ok(response);
+    }
+    let raw: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => return Ok(error(Value::Null, -32700, "Invalid JSON")),
+    };
+    let request: MetadataRpc = match serde_json::from_value(raw) {
+        Ok(request) => request,
+        Err(_) => return Ok(error(Value::Null, -32600, "Expected one JSON-RPC request")),
+    };
+    let rpc_id = request.id.clone().unwrap_or(Value::Null);
+    if request.jsonrpc != "2.0"
+        || request.method.len() > 128
+        || request.id.as_ref().is_some_and(|id| {
+            !id.as_str().is_some_and(|s| s.len() <= 128) && !id.is_i64() && !id.is_u64()
+        })
+    {
+        return Ok(error(Value::Null, -32600, "Invalid JSON-RPC request"));
+    }
+    if headers
+        .get("mcp-protocol-version")
+        .is_some_and(|v| v != protocol)
+    {
+        return Ok(error(rpc_id, -32600, "Unsupported protocol version"));
+    }
+    if request.method == "notifications/initialized" {
+        if request.id.is_some() || !empty_params(&request.params) {
+            return Ok(error(rpc_id, -32602, "Invalid initialized notification"));
+        }
+        return Ok((
+            StatusCode::ACCEPTED,
+            [
+                ("cache-control", "no-store"),
+                ("mcp-protocol-version", protocol),
+            ],
+        )
+            .into_response());
+    }
+    if request.id.is_none() {
+        return Ok(error(Value::Null, -32600, "Request ID is required"));
+    }
+    let uri = format!(
+        "ione-dataset://{}/{}/versions/{}",
+        grant.grant_id, grant.dataset_id, grant.version_id
+    );
+    let metadata = json!({"descriptor":{"grant_id":grant.grant_id,"owner":grant.owner,"origin":grant.origin,"dataset_id":grant.dataset_id,"version_id":grant.version_id,"schema_ipc_base64":manifest["schema_ipc_base64"],"arrow_schema_hash":grant.arrow_schema_hash,"content_digest":grant.content_digest,"row_count":manifest["row_count"],"classification":manifest["classification"],"expires_at":grant.expires_at,"columns":grant.columns,"read_only":true},"read":{"method":"POST","path":format!("/api/v1/dataset-delegations/{}/read",grant.grant_id),"authentication":"dataset_delegation"}});
+    let result = match request.method.as_str() {
+        "initialize" => {
+            let valid = request.params.as_object().is_some_and(|p| {
+                p.keys().all(|k| {
+                    ["protocolVersion", "capabilities", "clientInfo"].contains(&k.as_str())
+                }) && p
+                    .get("protocolVersion")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| !v.is_empty() && v.len() <= 64)
+                    && p.get("capabilities").is_some_and(Value::is_object)
+                    && p.get("clientInfo").is_none_or(Value::is_object)
+            });
+            if !valid {
+                return Ok(error(rpc_id, -32602, "Invalid initialize parameters"));
+            }
+            json!({"protocolVersion":protocol,"capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"ione-dataset-delegation","version":env!("CARGO_PKG_VERSION")}})
+        }
+        "tools/list" if empty_params(&request.params) => {
+            json!({"tools":[{"name":"describe_dataset","description":"Describe the granted immutable dataset. Returns metadata only.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}]})
+        }
+        "tools/call" => {
+            let valid = request.params.as_object().is_some_and(|p| {
+                p.keys()
+                    .all(|k| ["name", "arguments"].contains(&k.as_str()))
+                    && p.get("name").and_then(Value::as_str) == Some("describe_dataset")
+                    && p.get("arguments").is_none_or(empty_params)
+            });
+            if !valid {
+                return Ok(error(
+                    rpc_id,
+                    -32602,
+                    "Only describe_dataset with empty arguments is allowed",
+                ));
+            }
+            json!({"content":[{"type":"text","text":metadata.to_string()}],"structuredContent":metadata,"isError":false})
+        }
+        "resources/list" if empty_params(&request.params) => {
+            json!({"resources":[{"uri":uri,"name":"Granted dataset version","mimeType":"application/json","description":"Immutable dataset metadata and authenticated read route"}]})
+        }
+        "resources/read" => {
+            if request.params.as_object().is_none_or(|p| {
+                p.len() != 1 || p.get("uri").and_then(Value::as_str) != Some(uri.as_str())
+            }) {
+                return Ok(error(rpc_id, -32602, "Resource URI is outside this grant"));
+            }
+            json!({"contents":[{"uri":uri,"mimeType":"application/json","text":metadata.to_string()}]})
+        }
+        "tools/list" | "resources/list" => {
+            return Ok(error(rpc_id, -32602, "List parameters must be empty"))
+        }
+        _ => return Ok(error(rpc_id, -32601, "Method is not available")),
+    };
+    Ok(respond(
+        json!({"jsonrpc":"2.0","id":rpc_id,"result":result}),
+    ))
+}

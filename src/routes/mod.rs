@@ -71,6 +71,19 @@ pub fn router(state: AppState) -> Router {
     // Routes that are always public (no auth middleware).
     let public = Router::new()
         .route(
+            "/api/v1/dataset-delegations/:grant_id/mcp",
+            post(dataset_delegation::mcp)
+                .layer(DefaultBodyLimit::max(65536))
+                .layer(axum::middleware::map_response(
+                    |mut response: Response| async {
+                        response
+                            .headers_mut()
+                            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                        response
+                    },
+                )),
+        )
+        .route(
             "/api/v1/dataset-delegations/:grant_id/descriptor",
             get(dataset_delegation::descriptor),
         )
