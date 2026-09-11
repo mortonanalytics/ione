@@ -193,8 +193,9 @@ test("private recipes save, reload, replay and append with workspace resets", as
   await page.route("**/relay/datasets", (route) => route.fulfill({ json: { datasets: [{ dataset_id: dataset, version_id: version, dataset_name: "Sales", row_count: 4000, column_count: 1, expires_at: "2026-10-01T00:00:00Z" }] } }));
   await page.route("**/relay/recipes", (route) => {
     if (route.request().method() === "POST") {
+      expect(route.request().headers()["content-type"]).toBe("application/json");
       saves.push(route.request().postDataJSON());
-      const entry = { recipe_id: recipe, version_id: entries.length ? "44444444-4444-4444-4444-444444444444" : recipeVersion, version: entries.length + 1, name: "Sales recipe", ask: "Count sales\n", sources: [{ alias: "pg", connection_id: "connection" }], mappingIds: [mapping], output_schema: [{ name: "count", ty: "int64" }], definition_hash: "sha256:fixture", clarifications: [{ question: "Which region?", answer: "<b>West</b>" }] };
+      const entry = { recipe_id: recipe, version_id: entries.length ? "44444444-4444-4444-4444-444444444444" : recipeVersion, version: entries.length + 1, name: "Sales recipe", ask: "Count sales\n", sources: [{ alias: "pg", connection_id: "connection" }], mappingIds: [mapping], output_schema: [{ name: "count", type: "Int64", nullable: false }], definition_hash: "sha256:fixture", clarifications: [{ question: "Which region?", answer: "<b>West</b>" }] };
       entries.push(entry);
       return route.fulfill({ json: entry });
     }
@@ -217,6 +218,8 @@ test("private recipes save, reload, replay and append with workspace resets", as
   await expect(page.locator("#data-source-list input")).toBeDisabled();
   await expect(page.locator("#data-recipe-details")).toContainText("<b>West</b>");
   await expect(page.locator("#data-recipe-details b")).toHaveCount(0);
+  await expect(page.locator("#data-recipe-details")).toContainText("count: Int64 (required)");
+  await expect(page.locator("#data-ask-hint")).toContainText("current permissions");
   await page.locator("#data-ask-submit").click();
   await expect.poll(() => asks.length).toBe(1);
   expect(asks[0]).toMatchObject({ ask: "Count sales\n", recipeId: recipe, recipeVersionId: recipeVersion, mappingIds: [mapping] });

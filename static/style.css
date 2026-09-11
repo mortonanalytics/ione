@@ -4117,6 +4117,11 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   word-break: break-word;
 }
 
+#data-recipe-details {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 #data-receipts {
   list-style: none;
   margin: 0;

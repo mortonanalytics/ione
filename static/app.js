@@ -6361,6 +6361,9 @@ async function loadDataSources() {
 }
 
 function renderDataSources() {
+  document.getElementById('data-ask-hint').textContent = dataRecipe
+    ? 'Connected sources are read-only. This saved query runs under your current permissions.'
+    : 'Connected sources are read-only. The question and the table names go to the model; your data does not.';
   dataSourceList.innerHTML = '';
   dataSourcesEmpty.hidden = dataSources.length > 0;
 
@@ -7292,7 +7295,7 @@ document.getElementById('data-recipe-select').addEventListener('change', async (
     entry.mappingIds.forEach((id) => dataSelected.add(id));
     dataAskInput.value = entry.ask;
     dataAskInput.readOnly = true;
-    document.getElementById('data-recipe-details').textContent = `${entry.name} — version ${entry.version}\nSources: ${entry.sources.map((source) => source.alias).join(', ')}\n${(entry.clarifications || []).map((pair) => `${pair.question}\n${pair.answer}`).join("\n")}\nOutput: ${JSON.stringify(entry.output_schema)}\n${entry.definition_hash}\nReplays the saved query against current source data without model inference.`;
+    document.getElementById('data-recipe-details').textContent = `${entry.name} — version ${entry.version}\nSources: ${entry.sources.map((source) => source.alias).join(', ')}\n${(entry.clarifications || []).map((pair) => `${pair.question}\n${pair.answer}`).join("\n")}\nOutput:\n${entry.output_schema.map((column) => `${column.name}: ${column.type} (${column.nullable ? 'nullable' : 'required'})`).join('\n')}\nVersion fingerprint: ${entry.definition_hash}\nReplays the saved query against current source data without model inference.`;
     renderDataSources();
   } catch (_) {
     if (activeWorkspace?.id !== workspace || event.target.value !== versionId) return;
@@ -7316,7 +7319,7 @@ document.getElementById('data-recipe-save-form').addEventListener('submit', asyn
   try {
     const recipeId = document.getElementById('data-recipe-append').value;
     const entry = await apiFetch(`/api/v1/workspaces/${selection.workspace}/relay/recipes`, {
-      method: 'POST', skipErrorToast: true,
+      method: 'POST', headers: { 'content-type': 'application/json' }, skipErrorToast: true,
       body: JSON.stringify({ name: document.getElementById('data-recipe-name').value.trim(), datasetId: selection.version.dataset_id, versionId: selection.version.version_id, ...(recipeId ? { recipeId } : {}) }),
     });
     if (dataRecipeSave !== selection || activeWorkspace?.id !== selection.workspace) return;
