@@ -1594,6 +1594,37 @@ async fn private_recipes_resolve_current_mappings_and_replay_without_model() {
     assert_eq!(sent["recipe_version_id"], json!(recipe_version));
     assert!(sent.get("model").is_none());
     assert_eq!(sent["sources"], entry["sources"]);
+    let refusal_status = Arc::new(std::sync::atomic::AtomicU16::new(400));
+    let responder_status = refusal_status.clone();
+    let refusal = Mock::given(method("POST"))
+        .and(path("/v1/recipes"))
+        .respond_with(move |_: &wiremock::Request| {
+            ResponseTemplate::new(responder_status.load(std::sync::atomic::Ordering::SeqCst))
+                .set_body_json(json!({"code":"raw-secret-canary","message":"raw-secret-canary"}))
+        })
+        .with_priority(1)
+        .mount_as_scoped(&mock)
+        .await;
+    for (remote_status, expected) in [
+        (400, StatusCode::BAD_REQUEST),
+        (404, StatusCode::NOT_FOUND),
+        (403, StatusCode::FORBIDDEN),
+        (500, StatusCode::BAD_GATEWAY),
+        (504, StatusCode::BAD_GATEWAY),
+    ] {
+        refusal_status.store(remote_status, std::sync::atomic::Ordering::SeqCst);
+        let response = client
+            .post(format!("{root}/recipes"))
+            .json(&save)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, expected, "remote={remote_status}: {body}");
+        assert!(!body.contains("raw-secret-canary"));
+    }
+    drop(refusal);
     for (key, value) in [
         ("ask", json!("Changed ask")),
         ("mappingIds", json!([Uuid::new_v4()])),

@@ -544,8 +544,16 @@ impl RelayClient {
             .await
             .map_err(|_| RelayError::Unreachable("recipe save unavailable".into()))?;
         if !response.status().is_success() {
+            let code = match response.status().as_u16() {
+                400 | 413 | 415 | 422 => "bad_request",
+                401 | 403 => "forbidden",
+                404 | 410 => "not_found",
+                409 => "conflict",
+                429 => "too_many_requests",
+                _ => return Err(RelayError::Unexpected("recipe save failed".into())),
+            };
             return Err(RelayError::Refused {
-                code: "forbidden".into(),
+                code: code.into(),
                 message: "recipe save refused".into(),
             });
         }
