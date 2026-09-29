@@ -62,7 +62,7 @@ async function openMap(page: Page) {
 async function waitForRasterLayer(page: Page) {
   await page.waitForFunction(() => {
     const m = (window as any).mapInstance;
-    return !!m && m.getStyle().layers.some((l: any) => l.type === "raster");
+    return !!m && (m.getStyle()?.layers ?? []).some((l: any) => l.type === "raster");
   });
 }
 
@@ -78,7 +78,7 @@ test("AC-6/AC-12: map renders canvas, layer row, attribution, opacity", async ({
   await waitForRasterLayer(page);
   const opacity = await page.evaluate(() => {
     const m = (window as any).mapInstance;
-    const lyr = m.getStyle().layers.find((l: any) => l.type === "raster");
+    const lyr = (m.getStyle()?.layers ?? []).find((l: any) => l.type === "raster");
     return m.getPaintProperty(lyr.id, "raster-opacity");
   });
   expect(opacity).toBe(0.85);
@@ -124,7 +124,7 @@ test("AC-8: visibility toggle hides the raster layer", async ({ page }) => {
   await page.locator("#map-layer-list .layer-row input[type=checkbox]").first().uncheck();
   const vis = await page.evaluate(() => {
     const m = (window as any).mapInstance;
-    const lyr = m.getStyle().layers.find((l: any) => l.type === "raster");
+    const lyr = (m.getStyle()?.layers ?? []).find((l: any) => l.type === "raster");
     return m.getLayoutProperty(lyr.id, "visibility");
   });
   expect(vis).toBe("none");
