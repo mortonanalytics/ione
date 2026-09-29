@@ -11,9 +11,9 @@ use crate::{
         federation::{PeerManifest, PeerMcpSession, SliceEntry},
         interaction_sink::{InteractionSink, InteractionWriterRx},
         ollama::OllamaClient,
-        relay_client::RelayClient,
         peer_governor::PeerGovernor,
         pipeline_bus::PipelineBus,
+        relay_client::RelayClient,
     },
 };
 

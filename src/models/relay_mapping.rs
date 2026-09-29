@@ -101,7 +101,15 @@ mod tests {
     fn an_alias_may_not_carry_sql_syntax() {
         assert!(alias_is_valid("pg"));
         assert!(alias_is_valid("lake_2024"));
-        for bad in ["pg.main", "pg-main", "PG", "2pg", "", "pg\"; DROP", "pg main"] {
+        for bad in [
+            "pg.main",
+            "pg-main",
+            "PG",
+            "2pg",
+            "",
+            "pg\"; DROP",
+            "pg main",
+        ] {
             assert!(!alias_is_valid(bad), "{bad} was accepted");
         }
         assert!(!alias_is_valid(&"a".repeat(64)));
