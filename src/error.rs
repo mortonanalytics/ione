@@ -61,6 +61,14 @@ pub enum AppError {
     #[error("broker upstream error: {0}")]
     BrokerUpstream(String),
 
+    /// The relay data service was unreachable or answered with something this
+    /// service could not read. Distinct from `BrokerUpstream` so an operator
+    /// reading a log can tell which upstream failed, and distinct from
+    /// `NotFound` because a deployment without relay configured is a different
+    /// situation from one whose relay is down.
+    #[error("relay upstream error: {0}")]
+    RelayUpstream(String),
+
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
 
@@ -203,6 +211,15 @@ impl IntoResponse for AppError {
                 })),
             )
                 .into_response(),
+            AppError::RelayUpstream(msg) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": "relay_upstream",
+                    "message": msg,
+                    "hint": "The data service did not answer. The question was not run; try again."
+                })),
+            )
+                .into_response(),
             AppError::BrokerUpstream(msg) => (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({
@@ -292,6 +309,7 @@ mod tests {
             },
             AppError::ConnectorError("connector failed".into()),
             AppError::BrokerUpstream("provider rejected refresh".into()),
+            AppError::RelayUpstream("the data service is unreachable".into()),
             AppError::PayloadTooLarge("too much".into()),
             AppError::TooManyRequests("one export at a time".into()),
             AppError::WorkspaceBindingConflict {

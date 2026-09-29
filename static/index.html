@@ -81,6 +81,7 @@
         <button id="tab-chart" role="tab" aria-selected="false" aria-controls="panel-chart" class="tab">Charts</button>
         <button id="tab-table" role="tab" aria-selected="false" aria-controls="panel-table" class="tab">Tables</button>
         <button id="tab-document" role="tab" aria-selected="false" aria-controls="panel-document" class="tab">Documents</button>
+        <button id="tab-data" role="tab" aria-selected="false" aria-controls="panel-data" class="tab" hidden>Data Query</button>
         <button id="tab-catalog" role="tab" aria-selected="false" aria-controls="panel-catalog" class="tab tab--ops">Catalog</button>
         <button id="tab-connectors" role="tab" aria-selected="false" aria-controls="panel-connectors" class="tab tab--ops">Connectors</button>
         <button id="tab-signals" role="tab" aria-selected="false" aria-controls="panel-signals" class="tab tab--ops">Signals</button>
@@ -163,6 +164,250 @@
       </div>
 
       <!-- Chart panel -->
+      <div id="panel-data" role="tabpanel" aria-labelledby="tab-data" aria-label="Data query" hidden>
+        <div class="data-layout">
+          <aside class="data-sidebar" aria-label="Available data sources">
+            <div class="data-sidebar-header">
+              <h2 class="data-heading">Sources</h2>
+              <button id="data-refresh-sources" type="button">Refresh</button>
+            </div>
+            <p id="data-sources-empty" class="data-empty" hidden>
+              No data sources are available to you in this workspace. A workspace
+              admin can map one, and it will appear here once the data service
+              also grants it.
+            </p>
+            <details id="data-source-admin" class="data-limits" hidden>
+              <summary>Add PostgreSQL source</summary>
+              <form id="data-source-form" autocomplete="off">
+                <label>Name <input name="name" required maxlength="128"></label>
+                <label>Query alias <input name="alias" required pattern="[a-z_][a-z0-9_]{0,62}" placeholder="sales"></label>
+                <label>Host <input name="host" required></label>
+                <label>Port <input name="port" type="number" value="5432" min="1" max="65535" required></label>
+                <label>Database <input name="database" required></label>
+                <label>Schema <input name="schema" value="public" required></label>
+                <label>Approved tables (comma separated) <input name="tables" required></label>
+                <label>Read-only username <input name="username" autocomplete="off" required></label>
+                <label>Password <input name="password" type="password" autocomplete="new-password" required></label>
+                <label>TLS <select name="tls"><option value="verify-full">Verify server certificate</option><option value="disable">Local loopback without TLS</option></select></label>
+                <label>Tenant isolation <select name="isolation"><option value="forced_rls">Forced row-level security</option><option value="dedicated_role">Dedicated tenant role</option><option value="single_tenant">Entire source belongs to this tenant</option></select></label>
+                <p class="data-hint">Choose only tables this workspace may read. Credentials go directly to encrypted source storage. This source is initially available only to you.</p>
+                <button type="submit">Validate and add source</button>
+                <p id="data-source-status" role="status"></p>
+              </form>
+            </details>
+            <details id="data-file-admin" class="data-limits" hidden>
+              <summary>Add object-store file source</summary>
+              <form id="data-file-form" autocomplete="off">
+                <label>Name <input name="name" maxlength="128" required></label>
+                <label>Query alias <input name="alias" pattern="[a-z_][a-z0-9_]{0,62}" required></label>
+                <label>Object-store endpoint <input name="endpoint" type="url" placeholder="https://s3.example.com" required></label>
+                <label>Region <input name="region" value="us-east-1" required></label>
+                <label>Bucket <input name="bucket" required></label>
+                <label>Approved prefix <input name="prefix" placeholder="reports" required></label>
+                <label>Table name <input name="table" value="records" required></label>
+                <label><span id="data-file-path-label">Object path relative to prefix</span> <input name="path" placeholder="sales.json" aria-describedby="data-file-path-help" required></label>
+                <p id="data-file-path-help" class="data-hint">Exact object key beneath the approved prefix, for example sales.json. Do not repeat the approved prefix.</p>
+                <label>Source classification floor <select name="classification"><option value="restricted">Restricted</option><option value="confidential">Confidential</option><option value="internal">Internal</option><option value="public">Public</option></select></label>
+                <label>Format <select name="format"><option value="json">JSON array</option><option value="ndjson">NDJSON</option><option value="ipc_file">Arrow IPC file</option><option value="ipc_stream">Arrow IPC stream</option><option value="csv">CSV</option><option value="parquet">Parquet</option></select></label>
+                <div id="data-file-columns">
+                  <label>Ordered columns (JSON) <textarea name="columns" rows="4" maxlength="16384" placeholder='[{"name":"id","ty":{"type":"int64"},"nullable":false,"classification":"restricted"}]'></textarea></label>
+                  <p class="data-hint">Types: boolean, int8, int16, int32, int64, uint64, float32, float64, utf8, date32, decimal (precision/scale). IPC also supports timestamp with UTC or null timezone. Each column accepts classification: public/internal/confidential/restricted (omitted inherits the source floor). The strongest of source and column classification applies. Parquet discovers its schema under the source classification floor.</p>
+                </div>
+                <fieldset id="data-file-csv" hidden>
+                  <legend>CSV dialect</legend>
+                  <label>Delimiter <input name="delimiter" value="," maxlength="1"></label>
+                  <label>Quote <input name="quote" value='"' maxlength="1"></label>
+                  <label>Escape (blank for none) <input name="escape" maxlength="1"></label>
+                  <label><input name="header" type="checkbox" checked> Header row</label>
+                  <label>Null marker <input name="nullValue" value="NULL" maxlength="64"></label>
+                </fieldset>
+                <label>Operator policy receipt (JSON) <textarea name="policyReceipt" rows="6" maxlength="16384" required></textarea></label>
+                <p class="data-hint">Supply your existing receipt: attested_by, attested_at, actions, bucket, prefix, signature, expires_at. Bucket/prefix must match exactly. Only s3:GetObject, s3:GetObjectVersion and s3:ListBucket are allowed; GetObject and ListBucket are required. This is operator-attested access; the signature is retained, not cryptographically verified.</p>
+                <label>Access key ID <input name="accessKeyId" type="password" autocomplete="new-password" required></label>
+                <label>Secret access key <input name="secretAccessKey" type="password" autocomplete="new-password" required></label>
+                <p class="data-hint">One table, read-only, initially available only to you. Credentials go to encrypted Relay storage. Objects are limited to 8 MiB. Use HTTPS except for loopback development endpoints.</p>
+                <button type="submit">Validate and add file source</button>
+                <button id="data-file-clear" type="button">Clear file source</button>
+                <p id="data-file-status" role="status"></p>
+              </form>
+            </details>
+            <details id="data-peer-dataset-admin" class="data-limits" hidden>
+              <summary>Add peer dataset source</summary>
+              <p>Send this origin identity to the dataset owner to request a read grant.</p>
+              <label>Your origin identity <textarea id="data-origin-identity" readonly></textarea></label>
+              <button id="data-origin-copy" type="button">Copy origin identity</button>
+              <form id="data-peer-dataset-form" autocomplete="off">
+                <label>Active bound peer <select name="peerId" required><option value="">Choose peer</option></select></label>
+                <label>Owner grant ID <input name="grantId" required></label>
+                <label>Read grant credential <input name="token" type="password" autocomplete="new-password" required></label>
+                <label>Name <input name="name" maxlength="128" required></label>
+                <label>Query alias <input name="alias" required pattern="[a-z_][a-z0-9_]{0,62}"></label>
+                <button type="submit">Inspect granted dataset</button>
+                <button id="data-peer-dataset-import" type="button" disabled>Add dataset source</button>
+                <button id="data-peer-dataset-cancel" type="button">Clear import</button>
+              </form>
+              <p id="data-peer-dataset-status" role="status"></p>
+            </details>
+            <details id="data-destination-admin" class="data-limits" hidden>
+              <summary>Create dataset storage</summary>
+              <form id="data-destination-form">
+                <label>Name <input name="name" required maxlength="128"></label>
+                <label>Maximum rows <input name="max_rows" type="number" min="1" max="5000" value="5000" required></label>
+                <label>Maximum columns <input name="max_columns" type="number" min="1" max="64" value="64" required></label>
+                <label>Maximum cells <input name="max_cells" type="number" min="1" max="320000" value="320000" required></label>
+                <label>Maximum bytes <input name="max_bytes" type="number" min="1" max="2097152" value="2097152" required></label>
+                <label>Maximum retention (seconds) <input name="max_ttl_seconds" type="number" min="1" max="3600" value="3600" required></label>
+                <label>Classification <select name="max_classification"><option value="internal">Internal</option><option value="public">Public</option></select></label>
+                <label><input type="checkbox" name="allowRedistribution"> Allow redistribution of datasets saved in this new storage</label>
+                <p class="data-hint">Redistribution permits explicit read grants without the recipient having source permissions. This policy cannot be changed later.</p>
+                <button type="submit">Create storage</button>
+                <p id="data-destination-status" role="status"></p>
+              </form>
+            </details>
+            <ul id="data-source-list" role="list" aria-label="Sources"></ul>
+            <details class="data-limits">
+              <summary>Limits for this question</summary>
+              <p class="data-hint">
+                These may only lower what your grant already allows.
+              </p>
+              <label for="data-limit-rows">Maximum rows</label>
+              <input id="data-limit-rows" type="number" min="1" step="1" placeholder="grant default">
+              <label for="data-limit-seconds">Maximum seconds</label>
+              <input id="data-limit-seconds" type="number" min="1" step="1" placeholder="grant default">
+            </details>
+          </aside>
+
+          <section class="data-main" aria-label="Ask a question">
+            <label for="data-recipe-select">Saved recipe version</label>
+            <select id="data-recipe-select"><option value="">New question</option></select>
+            <button id="data-recipe-new-ask" type="button">New question</button>
+            <pre id="data-recipe-details" aria-live="polite"></pre>
+            <form id="data-ask-form" class="data-ask">
+              <label for="data-ask-input" class="sr-only">Your question</label>
+              <textarea id="data-ask-input" rows="3"
+                placeholder="Ask a question of the selected sources."
+                aria-describedby="data-ask-hint"></textarea>
+              <p id="data-ask-hint" class="data-hint">
+                Connected sources are read-only. The question and the table names go to the model; your
+                data does not.
+              </p>
+              <fieldset id="data-publication" hidden>
+                <legend>Dataset output</legend>
+                <label><input id="data-save-dataset" type="checkbox"> Save dataset</label>
+                <div id="data-publication-fields" hidden>
+                  <label>Output <select id="data-publication-mode"><option value="new">New dataset</option><option value="refresh" disabled>Refresh dataset</option></select></label>
+                  <label id="data-refresh-choice" hidden>Dataset to refresh <select id="data-refresh-target"><option value="">Choose dataset</option></select></label>
+                  <p id="data-refresh-status" role="status"></p>
+                  <label>Name <input id="data-dataset-name" maxlength="128"></label>
+                  <label>Storage <select id="data-destination"><option value="">Choose storage</option></select></label>
+                  <label>Retention (seconds) <input id="data-dataset-ttl" type="number" min="1" max="3600" value="3600"></label>
+                </div>
+              </fieldset>
+              <div class="data-ask-actions">
+                <button id="data-ask-submit" type="submit">Ask</button>
+                <button id="data-cancel" type="button" hidden>Cancel</button>
+              </div>
+            </form>
+
+            <section aria-label="Saved datasets">
+              <h2 class="data-heading">Saved datasets</h2>
+              <button id="data-datasets-refresh" type="button">Refresh datasets</button>
+              <p id="data-published" role="status"></p>
+              <ul id="data-dataset-list" role="list"></ul>
+              <p id="data-dataset-status" role="status"></p>
+              <section id="data-dataset-history" hidden aria-label="Dataset version history">
+                <h3>Version history</h3>
+                <p id="data-dataset-history-status" role="status"></p>
+                <ul id="data-dataset-history-list"></ul>
+                <button id="data-dataset-history-close" type="button">Close history</button>
+              </section>
+              <form id="data-recipe-save-form" hidden>
+                <h3>Save recipe</h3>
+                <label>Name <input id="data-recipe-name" maxlength="128" required></label>
+                <label>Version of <select id="data-recipe-append"><option value="">New recipe</option></select></label>
+                <button id="data-recipe-save-submit" type="submit">Save recipe</button>
+                <button id="data-recipe-save-cancel" type="button">Cancel</button>
+              </form>
+              <p id="data-recipe-status" role="status"></p>
+              <section id="data-delegation" aria-label="Share dataset version" hidden>
+                <h3 id="data-delegation-title">Share dataset version</h3>
+                <p>Grant read access to this immutable version for one origin identity. The credential appears once and expires with the grant.</p>
+                <form id="data-delegation-form">
+                  <label>Origin deployment ID <input name="deployment_id" required></label>
+                  <label>Origin tenant ID <input name="tenant_id" required></label>
+                  <label>Origin workspace ID <input name="workspace_id" required></label>
+                  <label>Origin actor ID <input name="actor_id" maxlength="256" required></label>
+                  <label>Origin service account ID <input name="service_account_id" maxlength="256" required></label>
+                  <label>Grant lifetime (seconds) <input name="ttlSeconds" type="number" min="1" max="3600" value="3600" required></label>
+                  <button type="submit">Create read grant</button>
+                </form>
+                <div id="data-delegation-secret" hidden>
+                  <label>Copy-once credential <textarea id="data-delegation-token" readonly autocomplete="off"></textarea></label>
+                  <button id="data-delegation-copy" type="button">Copy credential</button>
+                </div>
+                <p id="data-delegation-status" role="status"></p>
+                <ul id="data-delegation-list"></ul>
+                <button id="data-delegation-close" type="button">Close sharing</button>
+              </section>
+            </section>
+            <div id="data-progress" class="data-progress" role="status" aria-live="polite" hidden>
+              <span id="data-progress-state">Queued</span>
+              <span id="data-progress-detail"></span>
+            </div>
+
+            <div id="data-disconnected" class="data-notice data-notice--warn" role="status" aria-live="polite" hidden>
+              <p>The live connection dropped. Reconnecting where it left off.</p>
+            </div>
+
+            <form id="data-clarification" class="data-notice data-notice--ask" hidden>
+              <p id="data-clarification-question"></p>
+              <div id="data-clarification-options" role="group" aria-label="Suggested answers"></div>
+              <label for="data-clarification-input" class="sr-only">Your answer</label>
+              <input id="data-clarification-input" type="text" placeholder="Your answer">
+              <button type="submit">Answer</button>
+            </form>
+
+            <div id="data-refusal" class="data-notice data-notice--refused" role="alert" hidden>
+              <h3>Not run</h3>
+              <p id="data-refusal-reason"></p>
+              <p id="data-refusal-detail" class="data-hint"></p>
+            </div>
+
+            <div id="data-error" class="data-notice data-notice--error" role="alert" hidden>
+              <p id="data-error-message"></p>
+              <button id="data-error-retry" type="button">Try again</button>
+            </div>
+
+            <div id="data-expired" class="data-notice data-notice--warn" role="status" hidden>
+              <p>This result has expired. Its receipts and audit trail remain.</p>
+            </div>
+
+            <div id="data-result" class="data-result" hidden>
+              <div id="data-truncated" class="data-notice data-notice--warn" role="status" hidden>
+                <p id="data-truncated-detail"></p>
+              </div>
+              <div class="data-table-scroll">
+                <table id="data-table" class="data-table">
+                  <caption id="data-table-caption" class="sr-only">Query result</caption>
+                  <thead></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <details id="data-details" class="data-details">
+                <summary>How this was answered</summary>
+                <h4>Query</h4>
+                <pre id="data-sql" class="data-sql"></pre>
+                <h4>Sources read</h4>
+                <ul id="data-receipts" role="list"></ul>
+                <h4>Usage</h4>
+                <p id="data-usage"></p>
+                <p><a id="data-audit-link" href="#">Audit trail for this run</a></p>
+              </details>
+            </div>
+          </section>
+        </div>
+      </div>
+
       <div id="panel-chart" role="tabpanel" aria-labelledby="tab-chart" aria-label="Charts" hidden>
         <div id="chart-loading" class="chart-state-overlay" aria-live="polite" hidden>
           <div class="chart-skeleton"></div>

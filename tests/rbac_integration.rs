@@ -446,3 +446,27 @@ async fn membership_grant_escalation_409() {
     let body: Value = resp.json().await.expect("body");
     assert_eq!(body["error"], "permission_escalation");
 }
+
+#[tokio::test]
+#[ignore]
+async fn source_admin_permission_can_be_preserved_and_delegated() {
+    let (base, pool) = spawn_app().await;
+    let ws = ops_workspace_id(&pool).await;
+    set_member_permissions(&pool, ws, json!(["roles:manage", "data:sources:write"])).await;
+    let role_id = insert_role(&pool, ws, "source_admin", 0, json!([])).await;
+    for _ in 0..2 {
+        let response = reqwest::Client::new()
+            .put(put_url(&base, ws, role_id))
+            .json(&json!({"permissions": ["data:sources:write"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let permissions: Value = sqlx::query_scalar("SELECT permissions FROM roles WHERE id = $1")
+        .bind(role_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(permissions, json!(["data:sources:write"]));
+}

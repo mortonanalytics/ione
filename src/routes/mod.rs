@@ -1,3 +1,4 @@
+pub mod dataset_delegation;
 use axum::{
     body::Body,
     extract::DefaultBodyLimit,
@@ -51,6 +52,8 @@ pub mod peers;
 pub mod pipeline_events;
 pub mod provision;
 pub mod public_issuers;
+pub mod relay;
+pub mod relay_files;
 pub mod roles;
 pub mod rule_diagnostics;
 pub mod service_account_tokens;
@@ -68,6 +71,27 @@ pub fn router(state: AppState) -> Router {
 
     // Routes that are always public (no auth middleware).
     let public = Router::new()
+        .route(
+            "/api/v1/dataset-delegations/:grant_id/mcp",
+            post(dataset_delegation::mcp)
+                .layer(DefaultBodyLimit::max(65536))
+                .layer(axum::middleware::map_response(
+                    |mut response: Response| async {
+                        response
+                            .headers_mut()
+                            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                        response
+                    },
+                )),
+        )
+        .route(
+            "/api/v1/dataset-delegations/:grant_id/descriptor",
+            get(dataset_delegation::descriptor),
+        )
+        .route(
+            "/api/v1/dataset-delegations/:grant_id/read",
+            post(dataset_delegation::read),
+        )
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth::discovery),
@@ -161,6 +185,84 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/:id/document-panels",
             get(document_panels::list_document_panels),
+        )
+        // ── Data Query ──────────────────────────────────────────────────
+        // A second door, not a change to the first one. Nothing here touches
+        // the conversation surface: the Ollama client, the generator, the
+        // critic, and the router are untouched, and these routes are absent
+        // from a deployment with no relay configured.
+        .route("/api/v1/workspaces/:id/relay/file-sources",post(relay_files::register_file))
+        .route(
+            "/api/v1/workspaces/:id/relay/sources",
+            get(relay::available_sources).post(relay::register_source),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/source-admin",
+            get(relay::source_admin_status),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/destinations",
+            get(relay::dataset_destinations).post(relay::create_dataset_destination),
+        )
+        .route("/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id/delegations", get(dataset_delegation::list).post(dataset_delegation::create))
+        .route("/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id/delegations/:grant_id", delete(dataset_delegation::revoke))
+        .route("/api/v1/workspaces/:id/relay/dataset-origin", get(crate::services::peer_dataset::identity))
+        .route("/api/v1/workspaces/:id/relay/peer-datasets", get(crate::services::peer_dataset::choices))
+        .route("/api/v1/workspaces/:id/relay/peer-datasets/descriptor", post(crate::services::peer_dataset::discover))
+        .route("/api/v1/workspaces/:id/relay/peer-datasets/import", post(crate::services::peer_dataset::import))
+        .route("/api/v1/workspaces/:id/relay/recipes", get(relay::recipe_list).post(relay::save_recipe))
+        .route("/api/v1/workspaces/:id/relay/recipes/:recipe_id/versions/:version_id", get(relay::recipe_version))
+        .route(
+            "/api/v1/workspaces/:id/relay/datasets",
+            get(relay::dataset_list),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/dataset",
+            get(relay::run_datasets),
+        )
+        .route("/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions",get(relay::dataset_history))
+        .route(
+            "/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id",
+            get(relay::dataset_version),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/datasets/:dataset_id/versions/:version_id/arrow",
+            get(relay::dataset_arrow),
+        )
+        .route("/api/v1/workspaces/:id/relay/ask", post(relay::ask))
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id",
+            get(relay::run_status),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/cancel",
+            post(relay::cancel_run),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/clarification",
+            post(relay::answer_clarification),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/events",
+            get(relay::run_events),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/result",
+            get(relay::run_result),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/runs/:run_id/receipts",
+            get(relay::run_receipts),
+        )
+        .route("/api/v1/workspaces/:id/relay/runs", get(relay::recent_runs))
+        // Workspace administration for the mappings themselves.
+        .route(
+            "/api/v1/workspaces/:id/relay/mappings",
+            get(relay::list_mappings).post(relay::create_mapping),
+        )
+        .route(
+            "/api/v1/workspaces/:id/relay/mappings/:mapping_id",
+            put(relay::set_mapping_enabled),
         )
         .route(
             "/api/v1/workspaces/:id/event-aggregates",

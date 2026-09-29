@@ -13,6 +13,7 @@ use crate::{
         ollama::OllamaClient,
         peer_governor::PeerGovernor,
         pipeline_bus::PipelineBus,
+        relay_client::RelayClient,
     },
 };
 
@@ -92,6 +93,11 @@ pub struct AppState {
     pub peer_refresh_locks: Arc<dashmap::DashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
     /// Per-org single-flight for audit exports: occupied entry = export in progress.
     pub export_locks: Arc<dashmap::DashMap<Uuid, ()>>,
+    /// The relay client, when relay is configured. `None` means the Data Query
+    /// surface is absent -- a deployment without relay shows no tab rather than
+    /// a tab that errors. Additive: the Ollama client above is untouched, and
+    /// the conversation path does not know this field exists.
+    pub relay: Option<Arc<RelayClient>>,
 }
 
 impl AppState {
@@ -112,6 +118,14 @@ impl AppState {
     ) -> (Self, InteractionWriterRx) {
         let http = crate::util::url_guard::guarded_client(15_000);
         let ollama = Arc::new(OllamaClient::new(config.ollama_base_url.clone()));
+        // Built once at startup so a misconfigured relay fails here rather than
+        // on somebody's first question.
+        let relay = config.relay.clone().map(|relay_config| {
+            Arc::new(
+                RelayClient::new(relay_config)
+                    .expect("the relay client could not be built from its configuration"),
+            )
+        });
         let pipeline_bus = Arc::new(PipelineBus::new());
         let (interaction_sink, interaction_rx) = InteractionSink::new();
         (
@@ -132,6 +146,7 @@ impl AppState {
                 mcp_sessions: Arc::new(dashmap::DashMap::new()),
                 peer_refresh_locks: Arc::new(dashmap::DashMap::new()),
                 export_locks: Arc::new(dashmap::DashMap::new()),
+                relay,
             },
             interaction_rx,
         )

@@ -83,7 +83,7 @@ test("raster and event circles coexist with correct z-order and Events badge", a
   await page.waitForFunction(() => {
     const m = (window as any).mapInstance;
     if (!m) return false;
-    const layers = m.getStyle().layers;
+    const layers = (m.getStyle()?.layers ?? []);
     return layers.some((l: any) => l.type === "raster") && layers.some((l: any) => l.type === "circle");
   });
 
@@ -109,13 +109,13 @@ test("unchecking the event row hides the circle layer", async ({ page }) => {
 
   await page.waitForFunction(() => {
     const m = (window as any).mapInstance;
-    return !!m && m.getStyle().layers.some((l: any) => l.type === "circle");
+    return !!m && (m.getStyle()?.layers ?? []).some((l: any) => l.type === "circle");
   });
 
   await page.locator("#map-layer-list .layer-row--event input[type=checkbox]").uncheck();
   const vis = await page.evaluate(() => {
     const m = (window as any).mapInstance;
-    const lyr = m.getStyle().layers.find((l: any) => l.type === "circle");
+    const lyr = (m.getStyle()?.layers ?? []).find((l: any) => l.type === "circle");
     return m.getLayoutProperty(lyr.id, "visibility");
   });
   expect(vis).toBe("none");
@@ -140,7 +140,7 @@ test("event-only workspace renders circles when there are no raster layers", asy
   await page.waitForFunction(() => {
     const m = (window as any).mapInstance;
     if (!m) return false;
-    const layers = m.getStyle().layers;
+    const layers = (m.getStyle()?.layers ?? []);
     return layers.some((l: any) => l.type === "circle") && !layers.some((l: any) => l.type === "raster");
   });
 
@@ -159,7 +159,7 @@ test("raster stays alive when event layers fail and error row has retry", async 
   await expect(page.locator("#map-canvas-container")).toBeVisible();
   await page.waitForFunction(() => {
     const m = (window as any).mapInstance;
-    return !!m && m.getStyle().layers.some((l: any) => l.type === "raster");
+    return !!m && (m.getStyle()?.layers ?? []).some((l: any) => l.type === "raster");
   });
   const errorRow = page.locator("#map-layer-list .layer-row--error").filter({ hasText: "Event layers unavailable" });
   await expect(errorRow).toBeVisible();
@@ -174,7 +174,7 @@ test("event list supports keyboard popup flow and map panel has no axe violation
 
   await page.waitForFunction(() => {
     const m = (window as any).mapInstance;
-    return !!m && m.getStyle().layers.some((l: any) => l.type === "circle");
+    return !!m && (m.getStyle()?.layers ?? []).some((l: any) => l.type === "circle");
   });
 
   await expect(page.locator("#event-layer-legend")).toBeVisible();
@@ -239,7 +239,7 @@ test("empty states distinguish no geo streams, quiet geo streams, and event-only
   await page.waitForFunction(() => {
     const m = (window as any).mapInstance;
     if (!m) return false;
-    const layers = m.getStyle().layers;
+    const layers = (m.getStyle()?.layers ?? []);
     return layers.some((l: any) => l.type === "circle") && !layers.some((l: any) => l.type === "raster");
   });
 });

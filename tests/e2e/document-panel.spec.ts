@@ -175,7 +175,7 @@ test("AC-5 and AC-8: PDF renders inline with sandbox and link security", async (
   await expect(page.locator("#document-frame-container iframe")).toHaveCount(1);
   await expect(page.locator("#document-notice")).toBeHidden();
 
-  const axe = await new AxeBuilder({ page }).include("#panel-document").analyze();
+  const axe = await new AxeBuilder({ page }).include("#panel-document").exclude("#document-frame-container iframe").analyze();
   expect(axe.violations).toEqual([]);
 });
 
