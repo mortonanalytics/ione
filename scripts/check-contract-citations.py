@@ -37,7 +37,7 @@ def main() -> int:
 
     by_name: dict[str, list[Path]] = {}
     for path in ROOT.rglob("*.rs"):
-        if "/target/" in str(path):
+        if "target" in path.relative_to(ROOT).parts:
             continue
         by_name.setdefault(path.name, []).append(path)
 
