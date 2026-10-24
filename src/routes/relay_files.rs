@@ -220,7 +220,9 @@ impl RegisterFile {
                 json!({"endpoint":endpoint.as_str(),"region":self.region,"bucket":self.bucket,"prefix":self.prefix,"tables":{&self.table:&self.path},"policy_receipt":receipt,"allow_http":endpoint.scheme()=="http","classification":self.classification,"bounds":{"max_footer_bytes":8388608,"max_schema_depth":16,"max_row_groups":4096,"max_pages":1000000,"max_dictionary_bytes":67108864,"max_expansion_ratio":100,"max_object_bytes":8388608,"max_objects":1,"max_geometry_bytes":8388608,"verify_checksums":true}}),
             ));
         }
-        if self.columns.is_empty() || self.columns.len() > 64 {
+        // A CSV may leave its columns to relay, which infers them from the
+        // header and rows. Every other format declares them.
+        if (self.columns.is_empty() && self.format != Format::Csv) || self.columns.len() > 64 {
             return Err(invalid());
         }
         let mut names = std::collections::BTreeSet::new();
@@ -248,6 +250,11 @@ impl RegisterFile {
         let mut config = json!({"endpoint":endpoint.as_str(),"region":self.region,"policy_receipt":receipt,"max_object_bytes":8388608,"batch_rows":1024,"allow_http":endpoint.scheme()=="http"});
         let kind = if self.format == Format::Csv {
             let dialect = self.csv.as_ref().ok_or_else(invalid)?;
+            // Relay classifies the columns it infers as internal, so a stricter
+            // floor can only be kept by declaring the columns.
+            if self.columns.is_empty() && self.classification > Classification::Internal {
+                return Err(AppError::BadRequest("relay classifies inferred CSV columns as internal; set the classification floor to public or internal, or declare the columns".into()));
+            }
             if dialect.delimiter.len() != 1
                 || dialect.quote.len() != 1
                 || !dialect

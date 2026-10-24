@@ -2066,6 +2066,88 @@ async fn file_sources_build_typed_configs_retry_and_recheck_permissions() {
         assert_eq!(grant["principal_id"], user.to_string());
         assert_eq!(grant["workspace_id"], json!(ws));
     }
+    // A CSV with no declared columns goes to relay with an empty list, which
+    // relay infers from the header and rows (RDY-005). Absent and [] both work.
+    for (alias, columns) in [("csv_absent", None), ("csv_empty", Some(json!([])))] {
+        let mut body = input.clone();
+        body["alias"] = json!(alias);
+        body["format"] = json!("csv");
+        body["path"] = json!("counties");
+        body["csv"] =
+            json!({"delimiter":"|","quote":"\"","escape":null,"header":true,"nullValue":""});
+        match columns {
+            Some(columns) => body["columns"] = columns,
+            None => {
+                body.as_object_mut().unwrap().remove("columns");
+            }
+        }
+        let response = client
+            .post(format!("{root}/file-sources"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{alias}");
+        let mapping: Value = response.json().await.unwrap();
+        let stored = connections.lock().unwrap();
+        let created = &stored[mapping["relayConnectionId"].as_str().unwrap()];
+        assert_eq!(created["kind"], "csv");
+        let table = &created["public_config"]["tables"]["records"];
+        assert_eq!(table["columns"], json!([]));
+        assert_eq!(table["delimiter"], 124);
+        assert_eq!(table["header"], true);
+    }
+    for format in ["json", "ndjson", "ipc_file", "ipc_stream"] {
+        let mut body = input.clone();
+        body["alias"] = json!("no_columns");
+        body["format"] = json!(format);
+        body["columns"] = json!([]);
+        assert_eq!(
+            client
+                .post(format!("{root}/file-sources"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "format {format} without columns"
+        );
+    }
+    let mut undialected = input.clone();
+    undialected["alias"] = json!("csv_no_dialect");
+    undialected["format"] = json!("csv");
+    undialected["path"] = json!("counties");
+    undialected["columns"] = json!([]);
+    assert_eq!(
+        client
+            .post(format!("{root}/file-sources"))
+            .json(&undialected)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    // Relay classifies inferred columns internal, so a stricter floor needs
+    // declared columns rather than being silently lowered.
+    let mut strict = undialected.clone();
+    strict["alias"] = json!("csv_restricted");
+    strict["csv"] =
+        json!({"delimiter":"|","quote":"\"","escape":null,"header":true,"nullValue":""});
+    strict["classification"] = json!("restricted");
+    let response = client
+        .post(format!("{root}/file-sources"))
+        .json(&strict)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response
+        .text()
+        .await
+        .unwrap()
+        .contains("classifies inferred CSV columns as internal"));
     for format in ["csv", "parquet"] {
         let mut invalid = input.clone();
         invalid["alias"] = json!("bad_directory");

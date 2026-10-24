@@ -7465,7 +7465,9 @@ dataFileForm.addEventListener('submit', async (event) => {
   submit.disabled = true;
   status.textContent = 'Validating operator attestation and discovering the table…';
   try {
-    body.columns = body.format === 'parquet' ? [] : JSON.parse(body.columns);
+    // Parquet discovers its schema; a CSV with a blank columns field leaves
+    // relay to infer them from the header row.
+    body.columns = body.format === 'parquet' || (body.format === 'csv' && !body.columns.trim()) ? [] : JSON.parse(body.columns);
     body.policyReceipt = JSON.parse(body.policyReceipt);
     if (body.format === 'csv') body.csv = { delimiter: body.delimiter, quote: body.quote, escape: body.escape || null, header: dataFileForm.elements.header.checked, nullValue: body.nullValue };
     ['delimiter', 'quote', 'escape', 'header', 'nullValue'].forEach((key) => delete body[key]);

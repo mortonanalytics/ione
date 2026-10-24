@@ -211,7 +211,7 @@
                 <label>Format <select name="format"><option value="json">JSON array</option><option value="ndjson">NDJSON</option><option value="ipc_file">Arrow IPC file</option><option value="ipc_stream">Arrow IPC stream</option><option value="csv">CSV</option><option value="parquet">Parquet</option></select></label>
                 <div id="data-file-columns">
                   <label>Ordered columns (JSON) <textarea name="columns" rows="4" maxlength="16384" placeholder='[{"name":"id","ty":{"type":"int64"},"nullable":false,"classification":"restricted"}]'></textarea></label>
-                  <p class="data-hint">Types: boolean, int8, int16, int32, int64, uint64, float32, float64, utf8, date32, decimal (precision/scale). IPC also supports timestamp with UTC or null timezone. Each column accepts classification: public/internal/confidential/restricted (omitted inherits the source floor). The strongest of source and column classification applies. Parquet discovers its schema under the source classification floor.</p>
+                  <p class="data-hint">Types: boolean, int8, int16, int32, int64, uint64, float32, float64, utf8, date32, decimal (precision/scale). IPC also supports timestamp with UTC or null timezone. Each column accepts classification: public/internal/confidential/restricted (omitted inherits the source floor). The strongest of source and column classification applies. Parquet discovers its schema under the source classification floor. For a CSV with a header row, leave columns blank and relay infers them; inferred columns are classified internal, so the floor must be public or internal.</p>
                 </div>
                 <fieldset id="data-file-csv" hidden>
                   <legend>CSV dialect</legend>

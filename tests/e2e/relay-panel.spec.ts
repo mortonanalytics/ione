@@ -295,6 +295,24 @@ test("file onboarding submits typed formats with JSON headers and clears both ke
   await expect(page.locator("body")).not.toContainText("file-secret-canary");
 });
 
+test("a CSV with blank columns is sent with an empty list for relay to infer", async ({ page }) => {
+  await page.route("**/relay/source-admin", (route) => route.fulfill({ json: { fileFormats: ["csv"] } }));
+  let sent: any;
+  await page.route("**/relay/file-sources", (route) => { sent = route.request().postDataJSON(); return route.fulfill({ json: { id: mapping } }); });
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await page.locator("#data-file-admin summary").click();
+  const form = page.locator("#data-file-form");
+  for (const [name, value] of Object.entries({ name: "Counties", alias: "census_counties", endpoint: "http://127.0.0.1:59000", bucket: "reports", prefix: "approved", path: "counties", policyReceipt: "{}", accessKeyId: "access-canary", secretAccessKey: "secret-canary" })) await form.locator(`[name=${name}]`).fill(value);
+  await form.locator("[name=format]").selectOption("csv");
+  await form.locator("[name=classification]").selectOption("public");
+  await form.locator("[name=delimiter]").fill("|");
+  await form.locator("button[type=submit]").click();
+  await expect(page.locator("#data-file-status")).toContainText("operator-attested");
+  expect(sent.columns).toEqual([]);
+  expect(sent.csv).toMatchObject({ delimiter: "|", header: true });
+});
+
 test("file onboarding discards workspace drafts and late responses", async ({ page }) => {
   await page.route("**/relay/source-admin", (route) => route.fulfill({ json: { fileFormats: ["json", "parquet"] } }));
   let submitted = false;
