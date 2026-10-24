@@ -1,10 +1,10 @@
+use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose, Engine};
-use rand::RngCore;
 
 const NONCE_LEN: usize = 12;
 pub const TOKEN_KEY_VERSION_CURRENT: u8 = 0x01;

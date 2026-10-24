@@ -7,7 +7,7 @@ use axum::{
 };
 use chrono::{DateTime, TimeZone, Utc};
 use hmac::{Hmac, Mac};
-use rand::RngCore;
+use rand::TryRng;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Sha256;
@@ -79,7 +79,9 @@ pub async fn provision_webhook(
         .is_some();
 
     let mut raw = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut raw);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut raw)
+        .expect("OS random number generator failed");
     let signing_secret = hex::encode(raw);
     let ciphertext =
         encrypt_webhook_secret(signing_secret.as_bytes()).map_err(AppError::Internal)?;

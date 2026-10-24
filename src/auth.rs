@@ -9,7 +9,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -126,7 +126,7 @@ fn init_session_key() -> [u8; 64] {
         );
     }
     let mut key = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut key);
     key
 }
 
@@ -551,7 +551,7 @@ pub fn pkce_challenge(verifier: &str) -> String {
 /// Generate a cryptographically random URL-safe base64 string (32 bytes → 43 chars).
 pub fn random_url_safe_string() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

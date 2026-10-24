@@ -1,7 +1,7 @@
 use axum::{extract::State, http::StatusCode, response::Json, Extension};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use data_encoding::BASE32_NOPAD;
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -46,7 +46,7 @@ pub async fn enroll_totp(
     Extension(ctx): Extension<AuthContext>,
 ) -> Result<Json<EnrollResp>, AppError> {
     let mut secret = [0u8; 20];
-    rand::thread_rng().fill_bytes(&mut secret);
+    rand::rng().fill_bytes(&mut secret);
     let secret_b32 = BASE32_NOPAD.encode(&secret);
     let ciphertext =
         crate::util::token_crypto::encrypt_versioned(&secret).map_err(AppError::Internal)?;
@@ -183,7 +183,7 @@ pub async fn recovery_codes(
     let mut codes = Vec::new();
     for _ in 0..8 {
         let mut raw = [0u8; 10];
-        rand::thread_rng().fill_bytes(&mut raw);
+        rand::rng().fill_bytes(&mut raw);
         let code = URL_SAFE_NO_PAD.encode(raw);
         let hash = hash_code(&code);
         sqlx::query(

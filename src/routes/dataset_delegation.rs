@@ -16,7 +16,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{Duration, Utc};
-use rand::RngCore;
+use rand::TryRng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -74,7 +74,9 @@ pub async fn create(
         revoked_at: None,
     };
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("OS random number generator failed");
     let token = format!("ione_dg_{}", URL_SAFE_NO_PAD.encode(bytes));
     let hash = hex::encode(Sha256::digest(token.as_bytes()));
     service::owner_identity(&state, &ctx, workspace).await?;

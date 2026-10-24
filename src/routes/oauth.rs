@@ -417,9 +417,9 @@ async fn token_belongs_to_client(
 }
 
 fn generate_opaque_token(bytes: usize) -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut buf = vec![0u8; bytes];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     general_purpose::URL_SAFE_NO_PAD.encode(buf)
 }
 
