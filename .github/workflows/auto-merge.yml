@@ -9,9 +9,11 @@ name: Auto-merge
 # This bypasses nothing. Branch protection still requires every check, and the
 # builder's rule is unchanged: green CI is the only merge authority.
 #
-# AUTOMERGE_TOKEN must be a PAT, not GITHUB_TOKEN — a merge attributed to
-# GITHUB_TOKEN does not trigger downstream workflow runs. Without the secret
-# this job fails, so a missing token shows red instead of a green no-op (#78).
+# AUTOMERGE_TOKEN is optional. The backlog builder now runs on a local launchd
+# runner that merges its own PRs with `gh pr merge` once checks pass, so nothing
+# depends on this workflow. If the secret is set it must be a PAT, not
+# GITHUB_TOKEN — a merge attributed to GITHUB_TOKEN does not trigger downstream
+# workflow runs. Without it these jobs log a warning and exit 0 (#78).
 on:
   pull_request_target:
     types: [opened, reopened, ready_for_review]
@@ -37,8 +39,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::AUTOMERGE_TOKEN is not set; auto-merge was not armed."
-            exit 1
+            echo "::warning::AUTOMERGE_TOKEN is not set; auto-merge was not armed."
+            exit 0
           fi
           gh pr merge --auto --squash "$PR"
 
@@ -59,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::AUTOMERGE_TOKEN is not set; auto-merge was not armed."
-            exit 1
+            echo "::warning::AUTOMERGE_TOKEN is not set; auto-merge was not armed."
+            exit 0
           fi
           gh pr merge --auto --squash "$PR"
