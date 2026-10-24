@@ -11,8 +11,7 @@ name: Auto-merge
 #
 # AUTOMERGE_TOKEN must be a PAT, not GITHUB_TOKEN — a merge attributed to
 # GITHUB_TOKEN does not trigger downstream workflow runs. Without the secret
-# this job warns and no-ops, and the builder merges the PR itself as it does
-# today.
+# this job fails, so a missing token shows red instead of a green no-op (#78).
 on:
   pull_request_target:
     types: [opened, reopened, ready_for_review]
@@ -23,7 +22,12 @@ permissions:
 
 jobs:
   arm:
-    if: github.event.pull_request.draft == false && github.actor != 'dependabot[bot]'
+    # pull_request_target runs for fork PRs too, and main requires no review: arming
+    # auto-merge on a stranger's green fork PR would land it unread. Same-repo only.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: Enable auto-merge
@@ -33,8 +37,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::warning::AUTOMERGE_TOKEN is not set; PRs will need auto-merge armed by hand."
-            exit 0
+            echo "::error::AUTOMERGE_TOKEN is not set; auto-merge was not armed."
+            exit 1
           fi
           gh pr merge --auto --squash "$PR"
 
@@ -55,7 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::warning::AUTOMERGE_TOKEN is not set; PRs will need auto-merge armed by hand."
-            exit 0
+            echo "::error::AUTOMERGE_TOKEN is not set; auto-merge was not armed."
+            exit 1
           fi
           gh pr merge --auto --squash "$PR"
