@@ -4031,6 +4031,23 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   font-size: 0.95rem;
 }
 
+.data-notice--interpretation { border-left-color: #3b82f6; }
+
+.data-notice--interpretation h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.data-notice--interpretation p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.data-interpretation--none p {
+  opacity: 0.75;
+}
+
 #data-clarification-options {
   display: flex;
   flex-wrap: wrap;

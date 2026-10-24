@@ -407,3 +407,58 @@ test("recipe refresh pins the target version, preserves retry identity and offer
   await expect(page.locator("#data-dataset-history")).toBeHidden();
   await expect(page.locator("#data-dataset-history-list")).toBeEmpty();
 });
+
+test("the result shows relay's stated interpretation as text, above the table", async ({ page }) => {
+  const results = [
+    { interpretation: { stated: true, text: "Counted <b>declarations</b> per state" }, expected: "Counted <b>declarations</b> per state" },
+    { interpretation: { stated: false, reason: "the clarification settled it" }, expected: "No interpretation was stated: the clarification settled it" },
+    { interpretation: null, expected: "did not state how it read this question" },
+  ];
+  let current = 0;
+  await page.route("**/relay/runs/*/result", (route) => route.fulfill({ json: { schema: [{ name: "n", ty: "int64" }], rows: [[{ t: "int64", v: "3" }]], row_count: 1, truncated: false, interpretation: results[current].interpretation } }));
+  await page.route("**/relay/ask", (route) => route.fulfill({ json: { run: { id: run }, outcome: { kind: "succeeded" } } }));
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await page.locator("#data-source-list input").check();
+  for (const [index, entry] of results.entries()) {
+    current = index;
+    await page.locator("#data-ask-input").fill(`Count declarations ${index}`);
+    await page.locator("#data-ask-submit").click();
+    await expect(page.locator("#data-table tbody")).toHaveText("3");
+    await expect(page.locator("#data-interpretation")).toBeVisible();
+    await expect(page.locator("#data-interpretation-text")).toContainText(entry.expected);
+  }
+  current = 0;
+  await page.locator("#data-ask-input").fill("Count declarations again");
+  await page.locator("#data-ask-submit").click();
+  await expect(page.locator("#data-interpretation-text")).toHaveText(results[0].expected);
+  await expect(page.locator("#data-interpretation b")).toHaveCount(0);
+  const above = await page.evaluate(() => {
+    const note = document.getElementById("data-interpretation")!;
+    const table = document.getElementById("data-table")!;
+    return !!(note.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+  expect(above).toBe(true);
+});
+
+test("a fan-out refusal shows relay's repair message, from the ask and from the stream", async ({ page }) => {
+  const detail = "SUM over total from summaries is multiplied by the join with declarations on id: one row is counted up to 3 times.";
+  let streamed = false;
+  await page.route("**/relay/ask", (route) => route.fulfill({ json: streamed
+    ? { run: { id: run }, accepted: true }
+    : { run: { id: run }, outcome: { kind: "refused", reason: "policy_violation", detail } } }));
+  await page.route("**/relay/runs/*/events", (route) => route.fulfill({ contentType: "text/event-stream", body: `id: 1\nevent: refused\ndata: ${JSON.stringify({ reason: "policy_violation", detail })}\n\n` }));
+  await page.goto("/");
+  await page.locator("#tab-data").click();
+  await page.locator("#data-source-list input").check();
+  await page.locator("#data-ask-input").fill("Total across inspected sites");
+  await page.locator("#data-ask-submit").click();
+  await expect(page.locator("#data-refusal")).toBeVisible();
+  await expect(page.locator("#data-refusal-reason")).toHaveText("The generated query broke a rule this workspace enforces.");
+  await expect(page.locator("#data-refusal-detail")).toContainText("multiplied by the join");
+  streamed = true;
+  await page.locator("#data-ask-input").fill("Total across inspected sites, streamed");
+  await page.locator("#data-ask-submit").click();
+  await expect(page.locator("#data-refusal-detail")).toContainText("multiplied by the join");
+  await expect(page.locator("#data-error")).toBeHidden();
+});

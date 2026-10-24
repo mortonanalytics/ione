@@ -859,6 +859,123 @@ async fn configured_relay_lifecycle_preserves_request_identity_and_run_access() 
     assert!(status.is_server_error());
 }
 
+/// RDY-011: relay's stated interpretation and a refusal's detail reach the
+/// browser unchanged on the ask, run and result routes.
+#[tokio::test]
+#[ignore = "requires a migrated database"]
+async fn run_interpretation_and_refusal_detail_pass_through_unchanged() {
+    use std::sync::Arc;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    let (_unused, pool) = spawn_app().await;
+    let ws = ops_workspace_id(&pool).await;
+    set_member_permissions(&pool, ws, json!(["data:query", "workspace:write"])).await;
+    let mock = MockServer::start().await;
+    let (_, mut state) = ione::app_with_state(pool.clone()).await;
+    let mut config = (*state.config).clone();
+    config.relay = Some(Arc::new(ione::config::RelayConfig {
+        base_url: mock.uri(),
+        deployment_id: Uuid::new_v4(),
+        runtime_token: "test-runtime".into(),
+        management_token: None,
+        signing_key_id: "test-key".into(),
+        signing_key: "test-signing-key".into(),
+        callback_verification_key: "test-callback".into(),
+        default_model: "fixture-model".into(),
+        timeout_ms: 5000,
+    }));
+    state.relay = Some(Arc::new(
+        ione::services::relay_client::RelayClient::new(config.relay.clone().unwrap()).unwrap(),
+    ));
+    state.config = Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, ione::routes::router(state))
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let connection = Uuid::new_v4();
+    Mock::given(method("GET"))
+        .and(path("/v1/connections/available"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"connections":[{"connection_id":connection}]})),
+        )
+        .mount(&mock)
+        .await;
+    let mapping: Value = client
+        .post(format!("{base}/api/v1/workspaces/{ws}/relay/mappings"))
+        .json(&json!({"relayConnectionId":connection,"displayName":"Fixture","alias":"pg"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let run = Uuid::new_v4();
+    let stated = json!({"stated":true,"text":"Counted <b>declarations</b> per state & year"});
+    let unstated = json!({"stated":false,"reason":"the clarification settled the question"});
+    let detail = "SUM over total from summaries is multiplied by the join with declarations on id: one row is counted up to 3 times. Reduce summaries to one row per key, or aggregate each side per key in a CTE before joining";
+    let created = json!({
+        "run":{"id":run,"state":"refused","refusal_reason":"policy_violation","interpretation":stated},
+        "outcome":{"kind":"refused","reason":"policy_violation","detail":detail},
+    });
+    Mock::given(method("POST"))
+        .and(path("/v1/runs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(created.clone()))
+        .mount(&mock)
+        .await;
+    let asked: Value = client
+        .post(ask_url(&base, ws))
+        .json(&json!({"ask":"Total by state","mappingIds":[mapping["id"]]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(asked, created);
+
+    let run_url = format!("{base}/api/v1/workspaces/{ws}/relay/runs/{run}");
+    for (suffix, body) in [
+        (
+            "",
+            json!({"id":run,"state":"succeeded","interpretation":unstated}),
+        ),
+        (
+            "/result",
+            json!({"schema":[{"name":"n","ty":"int64"}],"rows":[[{"t":"int64","v":"3"}]],"row_count":1,"truncated":false,"interpretation":stated}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/runs/{run}{suffix}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+            .mount(&mock)
+            .await;
+        let proxied: Value = client
+            .get(format!("{run_url}{suffix}"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(proxied, body, "run{suffix}");
+    }
+    pool.close().await;
+}
+
 #[tokio::test]
 #[ignore = "requires a migrated database"]
 async fn source_onboarding_scopes_grants_and_scrubs_failures() {

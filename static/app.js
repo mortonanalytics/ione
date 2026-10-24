@@ -6291,6 +6291,8 @@ const dataErrorMessage      = document.getElementById('data-error-message');
 const dataErrorRetry        = document.getElementById('data-error-retry');
 const dataExpired           = document.getElementById('data-expired');
 const dataResult            = document.getElementById('data-result');
+const dataInterpretation    = document.getElementById('data-interpretation');
+const dataInterpretationText = document.getElementById('data-interpretation-text');
 const dataTruncated         = document.getElementById('data-truncated');
 const dataTruncatedDetail   = document.getElementById('data-truncated-detail');
 const dataTable             = document.getElementById('data-table');
@@ -6616,7 +6618,7 @@ function openDataStream() {
     if (event.lastEventId) dataLastEventId = event.lastEventId;
     let payload = {};
     try { payload = JSON.parse(event.data); } catch (_) {}
-    showDataRefusal({ reason: payload.reason, detail: '' });
+    showDataRefusal({ reason: payload.reason, detail: payload.detail || '' });
     closeDataStream();
   });
 
@@ -6789,6 +6791,7 @@ async function loadDataResult() {
 
   if (!activeWorkspace || activeWorkspace.id !== resultWorkspace || dataCurrentRunId !== resultRun) return;
   dataResult.hidden = false;
+  renderDataInterpretation(result.interpretation);
   renderDataTable(result);
 
   if (result.truncated) {
@@ -6807,6 +6810,21 @@ async function loadDataResult() {
   } catch (_) {
     // The table is the answer; the receipts are the explanation. A missing
     // explanation should not hide the answer.
+  }
+}
+
+// Relay's account of how it read the question: {stated:true,text},
+// {stated:false,reason}, or null. Model text, so it is set as text only.
+function renderDataInterpretation(interpretation) {
+  const stated = interpretation && interpretation.stated === true && interpretation.text;
+  dataInterpretation.classList.toggle('data-interpretation--none', !stated);
+  if (stated) {
+    dataInterpretationText.textContent = interpretation.text;
+  } else if (interpretation && interpretation.stated === false) {
+    dataInterpretationText.textContent =
+      'No interpretation was stated' + (interpretation.reason ? `: ${interpretation.reason}` : '.');
+  } else {
+    dataInterpretationText.textContent = 'The data service did not state how it read this question.';
   }
 }
 
