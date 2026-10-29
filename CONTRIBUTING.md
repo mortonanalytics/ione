@@ -51,7 +51,7 @@ DATABASE_URL=postgres://ione:ione@localhost:5433/ione \
 - Single-line subject, ≤72 chars.
 - Body wraps at 80.
 - No emoji.
-- Every commit is co-authored if produced with Claude Code; keep the trailer.
+- No co-author or "Generated with" trailers.
 
 ## PR checklist
 
