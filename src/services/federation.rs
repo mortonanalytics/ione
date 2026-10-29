@@ -1579,7 +1579,7 @@ fn catalog_content_hash(
     hasher.update(sample_queries.join("\u{1f}").as_bytes());
     hasher.update([0x1f]);
     hasher.update(schema_field_names.join("\u{1f}").as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Renders from `Peer::COLUMNS`, like every other `peers` projection. This used

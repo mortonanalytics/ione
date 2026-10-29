@@ -1,10 +1,10 @@
-use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose, Engine};
+use rand::Rng;
 
 const NONCE_LEN: usize = 12;
 pub const TOKEN_KEY_VERSION_CURRENT: u8 = 0x01;
@@ -12,9 +12,9 @@ pub const TOKEN_KEY_VERSION_CURRENT: u8 = 0x01;
 pub fn encrypt_token(token: &str) -> Result<Vec<u8>> {
     let cipher = cipher_from_env()?;
     let mut nonce = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), token.as_bytes())
+        .encrypt(&Nonce::from(nonce), token.as_bytes())
         .map_err(|_| anyhow::anyhow!("encrypt token"))?;
     let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     out.extend_from_slice(&nonce);
@@ -30,7 +30,7 @@ pub fn decrypt_token(ciphertext: &[u8]) -> Result<String> {
     let cipher = cipher_from_env()?;
     let (nonce, body) = ciphertext.split_at(NONCE_LEN);
     let plaintext = cipher
-        .decrypt(Nonce::from_slice(nonce), body)
+        .decrypt(&Nonce::try_from(nonce)?, body)
         .map_err(|_| anyhow::anyhow!("decrypt token"))?;
     String::from_utf8(plaintext).context("token plaintext is not utf-8")
 }
@@ -38,9 +38,9 @@ pub fn decrypt_token(ciphertext: &[u8]) -> Result<String> {
 pub fn encrypt_webhook_secret(secret: &[u8]) -> Result<Vec<u8>> {
     let cipher = webhook_cipher_from_env()?;
     let mut nonce = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), secret)
+        .encrypt(&Nonce::from(nonce), secret)
         .map_err(|_| anyhow::anyhow!("encrypt webhook secret"))?;
     let mut out = Vec::with_capacity(1 + NONCE_LEN + ciphertext.len());
     out.push(TOKEN_KEY_VERSION_CURRENT);
@@ -61,7 +61,7 @@ pub fn decrypt_webhook_secret(ciphertext: &[u8]) -> Result<String> {
     let cipher = webhook_cipher_from_env()?;
     let (nonce, body) = ciphertext[1..].split_at(NONCE_LEN);
     let plaintext = cipher
-        .decrypt(Nonce::from_slice(nonce), body)
+        .decrypt(&Nonce::try_from(nonce)?, body)
         .map_err(|_| anyhow::anyhow!("decrypt webhook secret"))?;
     String::from_utf8(plaintext).context("webhook secret plaintext is not utf-8")
 }
@@ -69,9 +69,9 @@ pub fn decrypt_webhook_secret(ciphertext: &[u8]) -> Result<String> {
 pub fn encrypt_versioned(plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = cipher_from_env()?;
     let mut nonce = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .encrypt(&Nonce::from(nonce), plaintext)
         .map_err(|_| anyhow::anyhow!("encrypt token"))?;
     let mut out = Vec::with_capacity(1 + NONCE_LEN + ciphertext.len());
     out.push(TOKEN_KEY_VERSION_CURRENT);
@@ -92,7 +92,7 @@ pub fn decrypt_versioned(ciphertext: &[u8]) -> Result<Vec<u8>> {
     let cipher = cipher_from_env()?;
     let (nonce, body) = ciphertext[1..].split_at(NONCE_LEN);
     cipher
-        .decrypt(Nonce::from_slice(nonce), body)
+        .decrypt(&Nonce::try_from(nonce)?, body)
         .map_err(|_| anyhow::anyhow!("decrypt token"))
 }
 

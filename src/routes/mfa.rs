@@ -348,7 +348,7 @@ fn hash_code(code: &str) -> String {
 }
 
 fn totp_code(secret: &[u8], counter: u64) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     type HmacSha1 = Hmac<sha1::Sha1>;
     let mut msg = [0u8; 8];
     msg.copy_from_slice(&counter.to_be_bytes());

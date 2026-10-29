@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use chrono::{Duration, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use sha2::Sha256;

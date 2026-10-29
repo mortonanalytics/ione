@@ -37,7 +37,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;

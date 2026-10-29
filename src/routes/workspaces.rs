@@ -149,13 +149,15 @@ pub async fn patch_workspace(
                     "detail": "severity must be routine, flagged, or command",
                 })));
             }
-            evalexpr::build_operator_tree(&rule.when).map_err(|err| {
-                AppError::UnprocessableEntityJson(json!({
-                    "error": "invalid_rule_expression",
-                    "ruleIndex": i,
-                    "detail": err.to_string(),
-                }))
-            })?;
+            evalexpr::build_operator_tree::<evalexpr::DefaultNumericTypes>(&rule.when).map_err(
+                |err| {
+                    AppError::UnprocessableEntityJson(json!({
+                        "error": "invalid_rule_expression",
+                        "ruleIndex": i,
+                        "detail": err.to_string(),
+                    }))
+                },
+            )?;
         }
     }
     let repo = WorkspaceRepo::new(state.pool.clone());

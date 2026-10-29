@@ -6,7 +6,7 @@ use axum::{
     Extension,
 };
 use chrono::{DateTime, TimeZone, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::TryRng;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

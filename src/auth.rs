@@ -136,7 +136,7 @@ fn init_session_key() -> [u8; 64] {
 /// HMAC-SHA256 is computed over `<payload>` using the session key.
 /// Final cookie value: `<payload>.<hex_hmac>`.
 fn sign_payload(key: &[u8; 64], payload: &str) -> String {
-    use sha2::digest::Mac;
+    use sha2::digest::{KeyInit, Mac};
     type HmacSha256 = hmac::Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key size");
     mac.update(payload.as_bytes());
@@ -152,7 +152,7 @@ fn build_cookie_value(key: &[u8; 64], session_id: Uuid, exp: DateTime<Utc>) -> S
 
 /// Parse and verify a cookie value. Returns `None` if signature invalid or expired.
 fn parse_cookie_value(key: &[u8; 64], value: &str) -> Option<Uuid> {
-    use sha2::digest::Mac;
+    use sha2::digest::{KeyInit, Mac};
     type HmacSha256 = hmac::Hmac<Sha256>;
 
     let dot = value.rfind('.')?;
