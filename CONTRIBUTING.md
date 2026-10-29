@@ -64,7 +64,7 @@ DATABASE_URL=postgres://ione:ione@localhost:5433/ione \
 
 ## License
 
-By contributing, you agree that your contribution is licensed under the project's license (Apache 2.0), the same terms everyone else receives. No separate agreement is needed.
+By contributing you agree that your contribution is licensed under Apache 2.0, same as the project.
 
 ## Contact
 
