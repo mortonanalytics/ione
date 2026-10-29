@@ -62,11 +62,9 @@ DATABASE_URL=postgres://ione:ione@localhost:5433/ione \
 - [ ] Contract doc updated if any name or type changed
 - [ ] CHANGELOG entry under an `## [Unreleased]` section
 
-## Contributor License Agreement
+## License
 
-Before a pull request can merge, you sign the [Contributor License Agreement](CLA.md) once, by commenting on the pull request as the CLA check instructs. The CLA lets Morton Analytics LLC license the project, your contribution included, under other terms in future without asking you again. You keep the copyright in your work.
-
-The project itself is licensed under Apache 2.0.
+By contributing, you agree that your contribution is licensed under the project's license (Apache 2.0), the same terms everyone else receives. No separate agreement is needed.
 
 ## Contact
 
