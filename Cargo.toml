@@ -43,19 +43,19 @@ async-trait = "0.1"
 # sqlx_core versions in the graph and breaks every `query_as` over a Vector
 # column. Bump this together with sqlx, not before it.
 pgvector = { version = "0.4", features = ["sqlx"] }
-evalexpr = "11"
+evalexpr = "13"
 futures-util = "0.3"
 dashmap = "6"
 governor = "0.6"
 
 rand = "0.10"
 base64 = "0.22"
-sha2 = "0.10"
-sha1 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+sha1 = "0.11"
+hmac = "0.13"
 hex = "0.4"
 subtle = "2"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls"] }
 jsonwebtoken = "9"
 tokio-stream = { version = "0.1", features = ["sync"] }
