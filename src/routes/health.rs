@@ -1,4 +1,6 @@
-use axum::{extract::State, response::Json};
+use std::time::Duration;
+
+use axum::{extract::State, http::StatusCode, response::Json};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -9,6 +11,38 @@ pub(crate) async fn health() -> Json<Value> {
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION")
     }))
+}
+
+/// Readiness: 200 only when Postgres answers `SELECT 1` within 2 s. The pool has
+/// no `acquire_timeout`, so without the outer bound a dead DB would hold the
+/// probe for sqlx's 30 s default. The failure body names the reason class only,
+/// never the URL, host, or driver error text.
+pub(crate) async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
+    let check = tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.pool),
+    )
+    .await;
+    let reason = match check {
+        Ok(Ok(_)) => {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "ready",
+                    "version": env!("CARGO_PKG_VERSION")
+                })),
+            )
+        }
+        Ok(Err(_)) => "error",
+        Err(_) => "timeout",
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "status": "unavailable",
+            "checks": { "database": reason }
+        })),
+    )
 }
 
 #[derive(Serialize)]

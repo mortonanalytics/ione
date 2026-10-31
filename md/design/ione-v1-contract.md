@@ -292,6 +292,7 @@ from `GET /api/v1/workspaces` list items.*
 | Operation | Method | Path | Request body | Response body |
 |-----------|--------|------|--------------|---------------|
 | health check | GET | `/api/v1/health` | — | `{ status: "ok", version }` |
+| readiness check | GET | `/api/v1/health/ready` | — | 200 `{ status: "ready", version }` when Postgres answers `SELECT 1` within 2 s; otherwise 503 `{ status: "unavailable", checks: { database: "timeout" \| "error" } }` |
 | chat once (Phase 1) | POST | `/api/v1/chat` | `{ model?: string, prompt: string }` | `{ reply: string, model: string }` |
 | list conversations | GET | `/api/v1/conversations` | — | `{ items: Conversation[] }` |
 | create conversation | POST | `/api/v1/conversations` | `{ title?: string, workspaceId?: UUID }` | `Conversation` |
