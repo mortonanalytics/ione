@@ -489,6 +489,56 @@ async fn phase3_recovery_gap() {
     assert_eq!(occurred, t0);
     assert_eq!(body["summary"]["count"], 1);
     assert_eq!(body["summary"]["p50"], 90.0);
+    assert_eq!(body["truncated"], false);
+}
+
+/// #102: a window with more than 10,000 gaps says so, and items and summary
+/// both cover the earliest 10,000.
+#[tokio::test]
+#[ignore]
+async fn phase3_recovery_gap_truncated() {
+    let (base, pool) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    elevate_default_user_to_admin(&pool, ws).await;
+    let t0 = seed_base_time();
+    let conn = insert_connector(&pool, ws, "busy-conn").await;
+
+    // 10,001 error → publish_started pairs, one a minute, each a 30 s gap.
+    sqlx::query(
+        "INSERT INTO pipeline_events (workspace_id, connector_id, stage, occurred_at)
+         SELECT $1, $2, s.stage, $3::timestamptz + make_interval(secs => i * 60 + s.offset_secs)
+         FROM generate_series(0, 10000) AS i,
+              (VALUES ('error', 0), ('publish_started', 30)) AS s(stage, offset_secs)",
+    )
+    .bind(ws)
+    .bind(conn)
+    .bind(t0)
+    .execute(&pool)
+    .await
+    .expect("seed 10,001 gaps");
+
+    let since = ts(t0 - Duration::hours(1));
+    let until = ts(t0 + Duration::days(8));
+    let resp = get(
+        &base,
+        &format!(
+            "/api/v1/workspaces/{ws}/pipeline-aggregates?op=recovery_gap&since={since}&until={until}"
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.expect("json");
+    let items = body["items"].as_array().expect("items");
+    assert_eq!(items.len(), 10_000);
+    assert_eq!(body["summary"]["count"], 10_000);
+    assert_eq!(body["truncated"], true);
+    let last: DateTime<Utc> =
+        serde_json::from_value(items[9_999]["occurred_at"].clone()).expect("occurred_at");
+    assert_eq!(
+        last,
+        t0 + Duration::seconds(9_999 * 60),
+        "the earliest 10,000 are kept"
+    );
 }
 
 /// Codex finding 4 contract: intervening stages are ignored, gaps pair within
