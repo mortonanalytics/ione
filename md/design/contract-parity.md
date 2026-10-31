@@ -1,7 +1,7 @@
 # Design — Contract parity between production and the conformance kit
 
 **Date:** 2026-08-29
-**Status:** Implemented, partially. Covered rules are listed below; the rest are in issue #62.
+**Status:** Implemented. All six historical drift cases are covered (#24, #62).
 **Source:** GitHub issue #24
 **Layers:** test only — no production behaviour changes
 **Related:** [peer-conformance-kit.md](peer-conformance-kit.md), [app-integration-contract-v1.md](app-integration-contract-v1.md)
@@ -76,17 +76,24 @@ alternative is either widening production visibility or giving the kit an
 | Cursor termination — `null` and `""` are terminal, `cursor` is the legacy spelling | `services::federation::next_cursor` | `next_cursor` |
 | SSE events joining multi-line `data:` | `services::peer_tokens::sse_event_payloads` | `sse_event_payloads` |
 | Panel URL validation — https-only, SSRF guard, loopback and private allowed | `util::url_guard` | `validate_panel_url` |
+| Signature grammar — `t`/`v1` once each, no other keys, uppercase hex digest accepted | `routes::webhooks::{parse_signature_header, verify_signature}` | `verify_signature_header` |
+| `registration_endpoint` optional when CIMD is advertised | `services::peer_oauth::PeerDiscovery` deserialization | `verify_oauth_metadata` |
+| `foreign_roles` may be `null`; wrongly-typed values fail | `services::workspace_peer_binding::WhoamiResponse` deserialization | `verify_whoami_document` |
 
-Three of the six historical failures are directly covered (`approval_required`,
-pagination, SSE). Their vectors are the exact shapes that broke.
+All six historical failures are directly covered. Their vectors are the exact
+shapes that broke.
+
+For the last three (#62), production's header grammar was split out of the
+`HeaderMap`-shaped `parse_signature` into `parse_signature_header(&str)`, and
+the kit's metadata and whoami checks were split out of their async fetchers into
+`verify_oauth_metadata` and `verify_whoami_document`. Neither move changes
+behaviour. A discovery document with neither `registration_endpoint` nor CIMD is
+rejected by both sides, but production rejects it in `begin_federation`, not on
+deserialization, so that vector stays in the kit's own tests.
 
 ## Not covered yet
 
-`foreign_roles: null`, `registration_endpoint` optional, and the signature
-grammar's hex case have no production predicate reachable as a pure function —
-they live inside route handlers and async discovery paths. Pairing them means
-either an HTTP-level test or extracting the predicate, both of which are more
-than a parity harness should decide on its own. Issue #62 carries them.
+None.
 
 ## Acceptance
 

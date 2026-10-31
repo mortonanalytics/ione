@@ -164,7 +164,7 @@ pub async fn receive_webhook(
     }
 }
 
-struct ParsedSignature {
+pub(crate) struct ParsedSignature {
     timestamp_raw: String,
     timestamp: i64,
     digest: Vec<u8>,
@@ -175,6 +175,12 @@ fn parse_signature(headers: &HeaderMap) -> Result<ParsedSignature, AppError> {
         .get("X-IONe-Signature")
         .and_then(|v| v.to_str().ok())
         .ok_or(AppError::WebhookRejected)?;
+    parse_signature_header(value)
+}
+
+/// The §3.1 `X-IONe-Signature` grammar: `t=<unix seconds>,v1=<64 hex chars>`,
+/// each key once, nothing else.
+pub(crate) fn parse_signature_header(value: &str) -> Result<ParsedSignature, AppError> {
     let mut timestamp_raw: Option<String> = None;
     let mut digest_raw: Option<String> = None;
     for part in value.split(',') {
@@ -204,7 +210,11 @@ fn parse_signature(headers: &HeaderMap) -> Result<ParsedSignature, AppError> {
     })
 }
 
-fn verify_signature(secret: &[u8], sig: &ParsedSignature, body: &Bytes) -> Result<(), AppError> {
+pub(crate) fn verify_signature(
+    secret: &[u8],
+    sig: &ParsedSignature,
+    body: &Bytes,
+) -> Result<(), AppError> {
     let mut mac = HmacSha256::new_from_slice(secret).map_err(|_| AppError::WebhookUnauthorized)?;
     mac.update(sig.timestamp_raw.as_bytes());
     mac.update(b".");

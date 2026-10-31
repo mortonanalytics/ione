@@ -865,6 +865,50 @@ async fn check_oauth(options: &Options) -> Surface {
         }
     };
 
+    verify_oauth_metadata(&mut surface, &metadata);
+
+    // The authorization endpoint is interactive and cannot be driven headlessly.
+    // The token endpoint can: an unsupported grant must produce an OAuth error,
+    // which proves the endpoint is live and speaks the protocol.
+    if let Some(token_endpoint) = metadata.get("token_endpoint").and_then(Value::as_str) {
+        let probe = http
+            .post(token_endpoint)
+            .form(&[("grant_type", "__ione_conformance_probe__")])
+            .send()
+            .await;
+        match probe {
+            Ok(response) => {
+                let status = response.status();
+                let body: Value = response.json().await.unwrap_or(Value::Null);
+                let has_error = body.get("error").and_then(Value::as_str).is_some();
+                surface.check(
+                    status.is_client_error() && has_error,
+                    format!(
+                        "token_endpoint rejects an unsupported grant with HTTP {status} and an \
+                         OAuth error body"
+                    ),
+                    format!(
+                        "token_endpoint answered HTTP {status} body {body} for an unsupported \
+                         grant; RFC 6749 §5.2 requires a 4xx with {{\"error\": ...}}"
+                    ),
+                );
+            }
+            Err(err) => surface.fail(format!(
+                "token_endpoint {token_endpoint} unreachable: {err}"
+            )),
+        }
+    }
+
+    surface.ok(
+        "note: the authorization endpoint requires a human, so this kit checks metadata and the \
+         token endpoint only",
+    );
+    surface
+}
+
+/// The §2 checks on an authorization-server metadata document, separate from
+/// fetching it so they can be run against a fixed vector.
+pub fn verify_oauth_metadata(surface: &mut Surface, metadata: &Value) {
     for field in [
         "issuer",
         "authorization_endpoint",
@@ -911,59 +955,21 @@ async fn check_oauth(options: &Options) -> Surface {
          with a pre-brokered credential instead of OAuth.",
     );
     surface.check(
-        string_array_contains(&metadata, "code_challenge_methods_supported", "S256"),
+        string_array_contains(metadata, "code_challenge_methods_supported", "S256"),
         "PKCE S256 is advertised",
         "code_challenge_methods_supported does not include 'S256'; §2 requires PKCE",
     );
     surface.check(
-        string_array_contains(&metadata, "grant_types_supported", "refresh_token"),
+        string_array_contains(metadata, "grant_types_supported", "refresh_token"),
         "the refresh_token grant is advertised",
         "grant_types_supported does not include 'refresh_token'; IONe refreshes delegated \
          tokens automatically (§2)",
     );
     surface.check(
-        string_array_contains(&metadata, "grant_types_supported", "authorization_code"),
+        string_array_contains(metadata, "grant_types_supported", "authorization_code"),
         "the authorization_code grant is advertised",
         "grant_types_supported does not include 'authorization_code' (§2)",
     );
-
-    // The authorization endpoint is interactive and cannot be driven headlessly.
-    // The token endpoint can: an unsupported grant must produce an OAuth error,
-    // which proves the endpoint is live and speaks the protocol.
-    if let Some(token_endpoint) = metadata.get("token_endpoint").and_then(Value::as_str) {
-        let probe = http
-            .post(token_endpoint)
-            .form(&[("grant_type", "__ione_conformance_probe__")])
-            .send()
-            .await;
-        match probe {
-            Ok(response) => {
-                let status = response.status();
-                let body: Value = response.json().await.unwrap_or(Value::Null);
-                let has_error = body.get("error").and_then(Value::as_str).is_some();
-                surface.check(
-                    status.is_client_error() && has_error,
-                    format!(
-                        "token_endpoint rejects an unsupported grant with HTTP {status} and an \
-                         OAuth error body"
-                    ),
-                    format!(
-                        "token_endpoint answered HTTP {status} body {body} for an unsupported \
-                         grant; RFC 6749 §5.2 requires a 4xx with {{\"error\": ...}}"
-                    ),
-                );
-            }
-            Err(err) => surface.fail(format!(
-                "token_endpoint {token_endpoint} unreachable: {err}"
-            )),
-        }
-    }
-
-    surface.ok(
-        "note: the authorization endpoint requires a human, so this kit checks metadata and the \
-         token endpoint only",
-    );
-    surface
 }
 
 fn string_array_contains(value: &Value, field: &str, needle: &str) -> bool {
@@ -1152,7 +1158,7 @@ async fn receive_webhook(
 ///     `sig.timestamp_raw.as_bytes()`. Canonicalizing it through `i64` first
 ///     would report a digest mismatch for a peer sending a non-canonical but
 ///     parseable `t` (`t=01753440000`, `t=+1753440000`) that IONe accepts.
-fn verify_signature_header(header: &str, secret: &str, body: &[u8]) -> Result<i64, String> {
+pub fn verify_signature_header(header: &str, secret: &str, body: &[u8]) -> Result<i64, String> {
     let mut timestamp: Option<&str> = None;
     let mut digest: Option<&str> = None;
     for part in header.split(',') {
@@ -1813,9 +1819,16 @@ async fn check_whoami(client: &McpClient) -> Surface {
         ),
     }
 
-    let Some(object) = body.json.as_object() else {
+    verify_whoami_document(&mut surface, &body.json);
+    surface
+}
+
+/// The §6 checks on a whoami document's contents, separate from fetching it so
+/// they can be run against a fixed vector.
+pub fn verify_whoami_document(surface: &mut Surface, json: &Value) {
+    let Some(object) = json.as_object() else {
         surface.fail("contents[0].text must parse to a JSON object (§6)");
-        return surface;
+        return;
     };
 
     // §6: all seven keys must be present. A value may be null, and a consumer
@@ -1890,8 +1903,6 @@ async fn check_whoami(client: &McpClient) -> Surface {
             "foreign_roles must be an array of role names (it may be empty), got {other} (§6)"
         )),
     }
-
-    surface
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
