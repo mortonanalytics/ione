@@ -165,3 +165,16 @@ test("AC-14: chat resource chip navigates to map and highlights the layer", asyn
   // Highlight clears after 1500 ms.
   await expect(row).not.toHaveClass(/layer-row--highlight/, { timeout: 3000 });
 });
+
+test("map tab clicked before the workspace list loads still renders its layers", async ({ page }) => {
+  await stubMapLayers(page, { items: [mapItem()], peersOk: ["11111111-1111-1111-1111-111111111111"], peersFailed: [] });
+  // Hold the workspace list so the click lands before init() has a workspace.
+  await page.route("**/api/v1/workspaces", async (route) => {
+    await new Promise((r) => setTimeout(r, 1500));
+    await route.continue();
+  });
+  await openMap(page);
+  await expect(page.locator("#tab-map")).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#map-canvas-container")).toBeVisible();
+  await waitForRasterLayer(page);
+});
