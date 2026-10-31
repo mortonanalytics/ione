@@ -5691,6 +5691,9 @@ tokensRefreshBtn.addEventListener('click', loadTokens);
       probePoliciesAccess(initial.id);
       probeTokensAccess();
       probeDataQueryAccess(initial.id);
+      // A tab clicked before the workspace list resolved found no workspace and
+      // loaded nothing; run its loaders now that there is one.
+      if (activeTab !== 'chat') switchTab(activeTab);
     } else {
       workspaceNameEl.textContent = 'No workspaces';
     }
