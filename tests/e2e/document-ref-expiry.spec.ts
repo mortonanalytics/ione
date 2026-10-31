@@ -101,10 +101,16 @@ test("an expired embed re-requests the ref and renders the freshly-signed URL", 
   await page.locator("#document-list .document-row").first().click();
 
   const iframe = page.locator("#document-frame-container iframe");
-  await expect(iframe).toHaveAttribute("src", EXPIRED_PDF_URL);
   // The ref — not the object — is re-requested, and the fresh URL is embedded.
   await expect(iframe).toHaveAttribute("src", FRESH_PDF_URL, { timeout: 10000 });
   await expect(page.locator("#document-toolbar a").first()).toHaveAttribute("href", FRESH_PDF_URL);
+  // The expired URL was followed first. Asserted on the request log rather than
+  // the iframe's `src`, which holds the expired URL only until the stubbed 403
+  // and re-request resolve — too briefly to sample reliably on a fast host.
+  await expect
+    .poll(() => documentByteRequests.indexOf(FRESH_PDF_URL))
+    .toBeGreaterThan(documentByteRequests.indexOf(EXPIRED_PDF_URL));
+  expect(documentByteRequests.indexOf(EXPIRED_PDF_URL)).toBeGreaterThanOrEqual(0);
   // Nothing was ever fetched through IONe: the browser really did request the
   // object (so this is not vacuous), and every such request went to the peer's
   // origin rather than to the app's.
