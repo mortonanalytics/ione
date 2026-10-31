@@ -26,6 +26,9 @@ pub struct PermissionCandidate {
     pub namespaced_name: String,
     pub peer_name: String,
     pub raw_name: String,
+    pub kind: CatalogEntryKind,
+    pub tool_allowlist: serde_json::Value,
+    pub tool_allowlist_configured: bool,
 }
 
 /// A ranked search hit returned to the service layer.
@@ -132,7 +135,8 @@ impl CatalogRepo {
         org_id: Uuid,
     ) -> anyhow::Result<Vec<PermissionCandidate>> {
         sqlx::query_as::<_, PermissionCandidate>(
-            "SELECT e.namespaced_name, p.name AS peer_name, e.raw_name
+            "SELECT e.namespaced_name, p.name AS peer_name, e.raw_name, e.kind,
+                    p.tool_allowlist, p.tool_allowlist_configured
              FROM peer_catalog_entries e
              JOIN peers p ON p.id = e.peer_id
              WHERE e.org_id = $1",

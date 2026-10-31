@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use uuid::Uuid;
 
 use crate::{
@@ -5,6 +7,7 @@ use crate::{
     error::AppError,
     models::CatalogEntryKind,
     repos::{CatalogRepo, CatalogSearchRow, RoleRepo},
+    services::federation::allowlist_admits,
     state::AppState,
 };
 
@@ -61,10 +64,17 @@ impl CatalogService {
         workspace_id: Uuid,
         auth: &AuthContext,
     ) -> Result<Vec<String>, AppError> {
-        let (held, _) = RoleRepo::new(state.pool.clone())
-            .effective_permissions(auth.user_id, workspace_id)
-            .await
-            .map_err(AppError::Internal)?;
+        // Same branch as `require_permission`: a service account's synthetic
+        // user has no memberships, so its grants come from the token itself.
+        let held: HashSet<String> = if auth.is_service_account {
+            auth.permissions.iter().cloned().collect()
+        } else {
+            RoleRepo::new(state.pool.clone())
+                .effective_permissions(auth.user_id, workspace_id)
+                .await
+                .map_err(AppError::Internal)?
+                .0
+        };
         let candidates = CatalogRepo::new(state.pool.clone())
             .permission_candidates_for_org(auth.org_id)
             .await
@@ -75,7 +85,16 @@ impl CatalogService {
             .into_iter()
             .filter(|c| {
                 let needed = format!("tool_invoke:{}:{}", c.peer_name, c.raw_name);
-                is_admin || permission_grants(&held, &needed)
+                let permitted = is_admin || permission_grants(&held, &needed);
+                // `route_tool_call` also rejects tools outside the peer's
+                // allowlist; resources are not allowlisted.
+                let allowlisted = c.kind != CatalogEntryKind::Tool
+                    || allowlist_admits(
+                        &c.tool_allowlist,
+                        c.tool_allowlist_configured,
+                        &c.raw_name,
+                    );
+                permitted && allowlisted
             })
             .map(|c| c.namespaced_name)
             .collect())
