@@ -10,9 +10,27 @@ pub mod slack;
 pub mod smtp;
 pub mod validate;
 
+use std::time::Duration;
+
 use sqlx::PgPool;
 
 use crate::models::{Connector, ConnectorKind};
+
+/// Request bound for the built-in FIRMS, IRWIN, NWS and Slack connectors. The
+/// scheduler bounds its own polls, but the "poll now" and connector-create
+/// routes call `poll` directly, so without this a silent upstream hangs them.
+pub(crate) const CONNECTOR_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// An HTTP client with a whole-request timeout and a connect timeout of at most
+/// 10 s. Falls back to an unbounded client rather than panicking if the builder
+/// fails.
+pub(crate) fn connector_http_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10).min(timeout))
+        .timeout(timeout)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// Describes a stream that a connector exposes by default.
 pub struct StreamDescriptor {
@@ -156,5 +174,35 @@ pub fn build_with_pool(
             let c = openapi::OpenApiConnector::from_config(config)?;
             Ok(Box::new(c))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connector_http_client_times_out_against_a_silent_upstream() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        // Accept and hold connections open without ever writing a byte.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+
+        let client = connector_http_client(Duration::from_millis(300));
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.get(format!("http://{addr}/")).send(),
+        )
+        .await
+        .expect("the client's own timeout must fire well before 5 s");
+        let err = result.expect_err("a silent upstream must not produce a response");
+        assert!(err.is_timeout(), "expected a timeout error, got {err:?}");
     }
 }
