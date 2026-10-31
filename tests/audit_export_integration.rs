@@ -696,9 +696,24 @@ async fn phase4_concurrent_export_429() {
     let ws = default_workspace_id(&pool).await;
     elevate_default_user_to_admin(&pool, ws).await;
     let t0 = seed_base_time();
-    // Enough bytes that the server can't flush the whole stream into socket
-    // buffers — the first response must still be in flight for the 429 check.
-    bulk_seed_audit_events(&pool, ws, 10_500, t0).await;
+    // The permit is held until the server finishes writing the body, so the
+    // body must be larger than the kernel send + receive buffers combined or
+    // the first stream completes before the second request lands. 2,000 rows
+    // with 16 KiB payloads is ~32 MiB, well past the autotuning maximums on
+    // Linux (tcp_wmem + tcp_rmem defaults top out near 10 MiB) and macOS.
+    sqlx::query(
+        "INSERT INTO audit_events
+           (workspace_id, actor_kind, actor_ref, verb, object_kind, payload, created_at)
+         SELECT $1, 'peer'::actor_kind, 'peer-1', 'peer_tool_executed', 'test_object',
+                jsonb_build_object('pad', repeat('x', 16384)),
+                $2::timestamptz + make_interval(secs => i)
+         FROM generate_series(1, 2000) AS i",
+    )
+    .bind(ws)
+    .bind(t0)
+    .execute(&pool)
+    .await
+    .expect("seed padded audit events");
 
     let since = ts(t0);
     let until = ts(t0 + Duration::days(7));
