@@ -17,7 +17,7 @@ impl SlackConnector {
             .to_string();
         Ok(Self {
             webhook_url,
-            http: reqwest::Client::new(),
+            http: super::connector_http_client(super::CONNECTOR_HTTP_TIMEOUT),
         })
     }
 }

@@ -26,7 +26,7 @@ impl NwsConnector {
         Ok(Self {
             lat,
             lon,
-            http: reqwest::Client::new(),
+            http: super::connector_http_client(super::CONNECTOR_HTTP_TIMEOUT),
             ua,
         })
     }

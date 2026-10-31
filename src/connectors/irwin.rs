@@ -55,7 +55,7 @@ impl IrwinConnector {
         Ok(Self {
             base_url,
             api_key,
-            http: reqwest::Client::new(),
+            http: super::connector_http_client(super::CONNECTOR_HTTP_TIMEOUT),
             mock_mode,
             fixture_path,
         })

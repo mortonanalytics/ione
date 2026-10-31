@@ -55,7 +55,7 @@ impl FirmsConnector {
             map_key,
             area,
             days,
-            http: reqwest::Client::new(),
+            http: super::connector_http_client(super::CONNECTOR_HTTP_TIMEOUT),
             demo_mode,
             fixture_path,
         })
