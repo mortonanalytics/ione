@@ -50,7 +50,7 @@ impl PipelineEventAggregateRepo {
                AND ($3::uuid IS NULL OR f.connector_id = $3)
                AND f.occurred_at >= $4 AND f.occurred_at < $5
              ORDER BY f.occurred_at
-             LIMIT 10000",
+             LIMIT 10001",
         )
         .bind(workspace_id)
         .bind(org_id)

@@ -128,6 +128,9 @@ pub async fn get_audit_aggregates(
     }
 }
 
+/// Most recovery gaps one pipeline-aggregates response covers, oldest first.
+const RECOVERY_GAP_CAP: usize = 10_000;
+
 /// GET /api/v1/workspaces/:id/pipeline-aggregates
 pub async fn get_pipeline_aggregates(
     State(state): State<AppState>,
@@ -155,10 +158,14 @@ pub async fn get_pipeline_aggregates(
     let params = parse_audit_query(raw)?;
     let (since, until) = resolve_window(params.filter.since, params.filter.until)?;
 
-    let gaps = PipelineEventAggregateRepo::new(state.pool.clone())
+    let mut gaps = PipelineEventAggregateRepo::new(state.pool.clone())
         .recovery_gaps(workspace_id, ctx.org_id, connector_id, since, until)
         .await
         .map_err(AppError::Internal)?;
+    // The repo fetches one row past the cap so a full window is distinguishable
+    // from one that held exactly the cap.
+    let truncated = gaps.len() > RECOVERY_GAP_CAP;
+    gaps.truncate(RECOVERY_GAP_CAP);
 
     let mut sorted: Vec<f64> = gaps.iter().map(|g| g.gap_seconds).collect();
     sorted.sort_by(|a, b| a.partial_cmp(b).expect("gap_seconds is never NaN"));
@@ -172,6 +179,7 @@ pub async fn get_pipeline_aggregates(
         "op": "recovery_gap",
         "items": gaps,
         "summary": summary,
+        "truncated": truncated,
     })))
 }
 
