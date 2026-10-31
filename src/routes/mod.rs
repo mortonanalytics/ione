@@ -104,6 +104,7 @@ pub fn router(state: AppState) -> Router {
         .route("/mcp/oauth/token", post(oauth::token))
         .route("/mcp/oauth/revoke", post(oauth::revoke))
         .route("/api/v1/health", get(health::health))
+        .route("/api/v1/health/ready", get(health::health_ready))
         .route("/api/v1/health/ollama", get(health::health_ollama))
         .route("/auth/login", get(auth_routes::login))
         .route("/auth/callback", get(auth_routes::callback))
