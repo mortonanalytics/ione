@@ -1209,11 +1209,21 @@ fn looks_like_missing_session(error: &anyhow::Error) -> bool {
 ///
 /// A non-empty allowlist is enforced on every federated invocation path.
 fn tool_is_allowlisted(peer: &Peer, raw_tool: &str) -> bool {
-    let Some(entries) = peer.tool_allowlist.as_array() else {
-        return !peer.tool_allowlist_configured;
+    allowlist_admits(
+        &peer.tool_allowlist,
+        peer.tool_allowlist_configured,
+        raw_tool,
+    )
+}
+
+/// The allowlist rule from [`tool_is_allowlisted`], on the raw column values, so
+/// catalog search can apply exactly the gate `tools/call` does (FCS-C1).
+pub(crate) fn allowlist_admits(allowlist: &Value, configured: bool, raw_tool: &str) -> bool {
+    let Some(entries) = allowlist.as_array() else {
+        return !configured;
     };
     if entries.is_empty() {
-        return !peer.tool_allowlist_configured;
+        return !configured;
     }
     entries
         .iter()

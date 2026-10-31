@@ -481,6 +481,108 @@ async fn phase2_prefilter_hides_uninvokable() {
     );
 }
 
+/// Insert a service-account token in `org_id` holding exactly `permissions`.
+async fn insert_service_token(pool: &PgPool, org_id: Uuid, permissions: &[&str]) -> String {
+    let plaintext = format!("ione_sat_{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO service_account_tokens (org_id, name, token_hash, permissions)
+         VALUES ($1, $2, $3, $4::jsonb)",
+    )
+    .bind(org_id)
+    .bind(format!("catalog-{}", Uuid::new_v4().simple()))
+    .bind(ione::auth::sha256_hex(&plaintext))
+    .bind(json!(permissions))
+    .execute(pool)
+    .await
+    .expect("insert service account token");
+    plaintext
+}
+
+async fn search_as_token(base: &str, token: &str, workspace_id: Uuid, query: &str) -> Value {
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{base}/api/v1/workspaces/{workspace_id}/catalog-search"
+        ))
+        .query(&[("q", query)])
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), StatusCode::OK);
+    resp.json::<Value>().await.expect("json")
+}
+
+/// #107 (a): a service account's visible set comes from its own grants, as in
+/// `require_permission`, not from the synthetic user's (empty) memberships.
+#[tokio::test]
+#[ignore]
+async fn phase2_service_account_sees_what_it_can_invoke() {
+    let (base, pool, state) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let org_id = default_org_id(&pool).await;
+    let peer = seed_peer(&pool, "weatherpeer", "weatherpeer").await;
+    index_peer(
+        &state,
+        &peer,
+        vec![tool("get_storm", "storm surge flood", &[])],
+    )
+    .await;
+
+    let all = insert_service_token(&pool, org_id, &["tool_invoke:*:*"]).await;
+    let got = names(&search_as_token(&base, &all, ws, "flood").await);
+    assert_eq!(got, vec!["weatherpeer:get_storm".to_string()]);
+
+    let other = insert_service_token(&pool, org_id, &["tool_invoke:someotherpeer:*"]).await;
+    let body = search_as_token(&base, &other, ws, "flood").await;
+    assert_eq!(body["items"], json!([]));
+}
+
+/// #107 (b): a tool outside a configured peer allowlist is hidden even from a
+/// caller holding the permission, because `tools/call` would reject it.
+#[tokio::test]
+#[ignore]
+async fn phase2_prefilter_applies_peer_allowlist() {
+    let (base, pool, state) = spawn_app().await;
+    let ws = default_workspace_id(&pool).await;
+    let peer = seed_peer(&pool, "weatherpeer", "weatherpeer").await;
+    sqlx::query(
+        "UPDATE peers SET tool_allowlist = '[\"allowed_tool\"]'::jsonb,
+                          tool_allowlist_configured = true
+         WHERE id = $1",
+    )
+    .bind(peer.id)
+    .execute(&pool)
+    .await
+    .expect("set allowlist");
+    let peer = PeerRepo::new(pool.clone())
+        .get(peer.id)
+        .await
+        .expect("load peer")
+        .expect("peer exists");
+    index_peer(
+        &state,
+        &peer,
+        vec![
+            tool("allowed_tool", "flood gauge readings", &[]),
+            tool("blocked_tool", "flood model internals", &[]),
+        ],
+    )
+    .await;
+    set_member_permissions(&pool, ws, json!(["tool_invoke:*:*"])).await;
+
+    let (status, body) = search(&base, &pool, ws, "flood").await;
+    assert_eq!(status, StatusCode::OK);
+    let got = names(&body);
+    assert!(
+        got.contains(&"weatherpeer:allowed_tool".to_string()),
+        "allowlisted tool must appear: {got:?}"
+    );
+    assert!(
+        !got.contains(&"weatherpeer:blocked_tool".to_string()),
+        "tool outside the allowlist must be hidden: {got:?}"
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn phase2_injection_string_200() {
