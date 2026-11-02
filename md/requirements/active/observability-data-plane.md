@@ -35,7 +35,7 @@ Trusted-peer JWT callers remain represented by their resolved user principal unl
 
 ## Authz And Isolation
 
-Every read endpoint enforces `ensure_workspace_in_org` and `require_permission(..., "audit:read")`. Repository queries also join through `workspaces` and bind `org_id` as a database backstop. RLS exists for parity with org-scoped tables but is not the application isolation mechanism.
+Every read endpoint enforces `ensure_workspace_in_org` and `require_permission(..., "audit:read")`. Repository queries also join through `workspaces` and bind `org_id` as a database backstop. Every `InteractionEventRepo` query also runs inside `rls::org_scoped_tx`, so reads and writes work under the restricted `ione_app` role. The batch writer groups rows by `org_id` and writes each group under that org's context, because the RLS policy is also the insert check (#64). The application-layer checks above remain the isolation mechanism while the deployment connects as the bypassing `ione` role (#65).
 
 The federated tool invocation gate uses `require_permission`, not a direct user-role lookup, so service-account `tool_invoke:*:*` grants work.
 
