@@ -6,6 +6,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::models::{outcome, ActorKind, InteractionEvent};
+use crate::rls::org_scoped_tx;
 
 pub struct InteractionEventRepo {
     pool: PgPool,
@@ -119,36 +120,58 @@ impl InteractionEventRepo {
             return Ok(0);
         }
 
-        let mut qb = QueryBuilder::new(
-            "INSERT INTO interaction_events
-             (id, org_id, workspace_id, peer_id, peer_name, tool_name, caller_kind,
-              caller_user_id, caller_peer_id, caller_token_id, session_id, sequence_number,
-              outcome, latency_ms, detail, recorded_at) ",
-        );
-        qb.push_values(events, |mut b, event| {
-            b.push_bind(event.id)
-                .push_bind(event.org_id)
-                .push_bind(event.workspace_id)
-                .push_bind(event.peer_id)
-                .push_bind(event.peer_name.clone())
-                .push_bind(event.tool_name.clone())
-                .push_bind(event.caller_kind.clone())
-                .push_bind(event.caller_user_id)
-                .push_bind(event.caller_peer_id)
-                .push_bind(event.caller_token_id)
-                .push_bind(event.session_id)
-                .push_bind(event.sequence_number)
-                .push_bind(event.outcome.clone())
-                .push_bind(event.latency_ms)
-                .push_bind(sanitize_detail(event.detail.clone()))
-                .push_bind(event.recorded_at);
-        });
+        // The RLS policy doubles as the insert check, so each org's rows must be
+        // written under that org's context. One batch can span orgs: the writer
+        // flushes whatever the bus delivered.
+        let mut org_ids: Vec<Uuid> = Vec::new();
+        for event in events {
+            if !org_ids.contains(&event.org_id) {
+                org_ids.push(event.org_id);
+            }
+        }
 
-        qb.build()
-            .execute(&self.pool)
-            .await
-            .map(|r| r.rows_affected())
-            .context("failed to insert interaction_events batch")
+        let mut written = 0;
+        for org_id in org_ids {
+            let mut qb = QueryBuilder::new(
+                "INSERT INTO interaction_events
+                 (id, org_id, workspace_id, peer_id, peer_name, tool_name, caller_kind,
+                  caller_user_id, caller_peer_id, caller_token_id, session_id, sequence_number,
+                  outcome, latency_ms, detail, recorded_at) ",
+            );
+            qb.push_values(
+                events.iter().filter(|event| event.org_id == org_id),
+                |mut b, event| {
+                    b.push_bind(event.id)
+                        .push_bind(event.org_id)
+                        .push_bind(event.workspace_id)
+                        .push_bind(event.peer_id)
+                        .push_bind(event.peer_name.clone())
+                        .push_bind(event.tool_name.clone())
+                        .push_bind(event.caller_kind.clone())
+                        .push_bind(event.caller_user_id)
+                        .push_bind(event.caller_peer_id)
+                        .push_bind(event.caller_token_id)
+                        .push_bind(event.session_id)
+                        .push_bind(event.sequence_number)
+                        .push_bind(event.outcome.clone())
+                        .push_bind(event.latency_ms)
+                        .push_bind(sanitize_detail(event.detail.clone()))
+                        .push_bind(event.recorded_at);
+                },
+            );
+
+            let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+            written += qb
+                .build()
+                .execute(&mut *tx)
+                .await
+                .context("failed to insert interaction_events batch")?
+                .rows_affected();
+            tx.commit()
+                .await
+                .context("failed to commit interaction_events batch")?;
+        }
+        Ok(written)
     }
 
     pub async fn list_filtered(
@@ -166,10 +189,16 @@ impl InteractionEventRepo {
         }
         qb.push(" ORDER BY ie.recorded_at DESC, ie.id DESC LIMIT ");
         qb.push_bind(limit);
-        qb.build_query_as::<InteractionEvent>()
-            .fetch_all(&self.pool)
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let rows = qb
+            .build_query_as::<InteractionEvent>()
+            .fetch_all(&mut *tx)
             .await
-            .context("failed to list filtered interaction_events")
+            .context("failed to list filtered interaction_events")?;
+        tx.commit()
+            .await
+            .context("failed to commit interaction_events read")?;
+        Ok(rows)
     }
 
     pub async fn list_session_steps(
@@ -189,10 +218,16 @@ impl InteractionEventRepo {
             " ORDER BY ie.sequence_number ASC NULLS LAST, ie.recorded_at ASC, ie.id ASC LIMIT ",
         );
         qb.push_bind(limit);
-        qb.build_query_as::<InteractionEvent>()
-            .fetch_all(&self.pool)
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let rows = qb
+            .build_query_as::<InteractionEvent>()
+            .fetch_all(&mut *tx)
             .await
-            .context("failed to list interaction session steps")
+            .context("failed to list interaction session steps")?;
+        tx.commit()
+            .await
+            .context("failed to commit interaction_events read")?;
+        Ok(rows)
     }
 
     pub async fn outcome_summary(
@@ -204,10 +239,16 @@ impl InteractionEventRepo {
         let mut qb = QueryBuilder::new("SELECT ie.outcome, COUNT(*)::bigint AS count");
         push_filtered_from_where(&mut qb, workspace_id, org_id, filter);
         qb.push(" GROUP BY ie.outcome ORDER BY ie.outcome ASC");
-        qb.build_query_as::<OutcomeCount>()
-            .fetch_all(&self.pool)
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let rows = qb
+            .build_query_as::<OutcomeCount>()
+            .fetch_all(&mut *tx)
             .await
-            .context("failed to summarize interaction outcomes")
+            .context("failed to summarize interaction outcomes")?;
+        tx.commit()
+            .await
+            .context("failed to commit interaction_events read")?;
+        Ok(rows)
     }
 
     pub async fn count_by_bucket(
@@ -233,11 +274,15 @@ impl InteractionEventRepo {
             " GROUP BY bucket, ie.peer_id, ie.peer_name, ie.outcome \
                  ORDER BY bucket ASC, ie.peer_name ASC, ie.outcome ASC",
         );
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         let rows = qb
             .build_query_as::<(DateTime<Utc>, Uuid, String, String, i64)>()
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await
             .context("failed to count interaction events by bucket")?;
+        tx.commit()
+            .await
+            .context("failed to commit interaction_events read")?;
         Ok(rows
             .into_iter()
             .map(|(bucket, peer_id, peer_name, outcome, count)| {
@@ -267,10 +312,16 @@ impl InteractionEventRepo {
         );
         push_filtered_from_where(&mut qb, workspace_id, org_id, filter);
         qb.push(" GROUP BY ie.caller_kind, caller_id ORDER BY count DESC, caller_id ASC LIMIT 200");
-        qb.build_query_as::<PrincipalCount>()
-            .fetch_all(&self.pool)
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let rows = qb
+            .build_query_as::<PrincipalCount>()
+            .fetch_all(&mut *tx)
             .await
-            .context("failed to count interaction events by principal")
+            .context("failed to count interaction events by principal")?;
+        tx.commit()
+            .await
+            .context("failed to commit interaction_events read")?;
+        Ok(rows)
     }
 
     pub async fn validate_filter(filter: &InteractionEventFilter) -> anyhow::Result<()> {
