@@ -452,6 +452,146 @@ async fn migrated_broker_repo_works_under_the_restricted_role() {
     cleanup(&pool, &seed).await;
 }
 
+/// `interaction_events` writes and reads must work under the restricted role.
+/// The policy has no separate `WITH CHECK`, so before the threading the batch
+/// insert was rejected outright and every read returned nothing. The batch here
+/// mixes two orgs on purpose: the writer flushes whatever the bus delivered, so
+/// one batch can span orgs and each org's rows need their own context.
+#[tokio::test]
+#[ignore]
+async fn interaction_event_repo_works_under_the_restricted_role() {
+    use ione::models::{ActorKind, InteractionEvent};
+    use ione::repos::{InteractionEventFilter, InteractionEventRepo};
+
+    let pool = default_pool().await;
+    let seed = seed_two_orgs(&pool).await;
+    let restricted = restricted_pool().await;
+
+    let mut workspaces = Vec::new();
+    for org_id in [seed.org_a, seed.org_b] {
+        let workspace_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO workspaces (org_id, name, domain, lifecycle)
+             VALUES ($1, 'rls-interactions', 'test', 'continuous'::workspace_lifecycle)
+             RETURNING id",
+        )
+        .bind(org_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert workspace");
+        workspaces.push(workspace_id);
+    }
+    let (workspace_a, workspace_b) = (workspaces[0], workspaces[1]);
+
+    let issuer_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO trust_issuers (org_id, issuer_url, audience, jwks_uri, claim_mapping)
+         VALUES ($1, $2, 'aud', 'secret:test', '{}'::jsonb)
+         RETURNING id",
+    )
+    .bind(seed.org_a)
+    .bind(format!("https://issuer-{workspace_a}.example"))
+    .fetch_one(&pool)
+    .await
+    .expect("insert trust issuer");
+    let peer_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO peers (org_id, name, mcp_url, issuer_id, sharing_policy, tool_allowlist, status)
+         VALUES ($1, 'rls-interaction-peer', $3, $2, '{}'::jsonb, '[]'::jsonb,
+                 'active'::peer_status)
+         RETURNING id",
+    )
+    .bind(seed.org_a)
+    .bind(issuer_id)
+    .bind(format!("https://peer-{workspace_a}.example/mcp"))
+    .fetch_one(&pool)
+    .await
+    .expect("insert peer");
+
+    let event = |org_id: Uuid, workspace_id: Uuid, user_id: Uuid| InteractionEvent {
+        id: Uuid::new_v4(),
+        org_id,
+        workspace_id,
+        peer_id,
+        peer_name: "rls-interaction-peer".into(),
+        tool_name: "probe".into(),
+        caller_kind: ActorKind::User,
+        caller_user_id: Some(user_id),
+        caller_peer_id: None,
+        caller_token_id: None,
+        session_id: None,
+        sequence_number: None,
+        outcome: "allow".into(),
+        latency_ms: Some(1),
+        detail: serde_json::json!({}),
+        recorded_at: chrono::Utc::now(),
+    };
+
+    let repo = InteractionEventRepo::new(restricted.clone());
+    let written = repo
+        .insert_batch(&[
+            event(seed.org_a, workspace_a, seed.user_a),
+            event(seed.org_b, workspace_b, seed.user_b),
+        ])
+        .await
+        .expect("a mixed-org batch must insert under the restricted role");
+    assert_eq!(written, 2, "both orgs' rows should be written");
+
+    let filter = InteractionEventFilter::default();
+    for (org_id, workspace_id) in [(seed.org_a, workspace_a), (seed.org_b, workspace_b)] {
+        let rows = repo
+            .list_filtered(workspace_id, org_id, &filter, None, 50)
+            .await
+            .expect("list under the restricted role");
+        assert_eq!(rows.len(), 1, "the org's own interaction should be visible");
+        assert_eq!(rows[0].org_id, org_id);
+
+        let summary = repo
+            .outcome_summary(workspace_id, org_id, &filter)
+            .await
+            .expect("summary under the restricted role");
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].count, 1);
+    }
+
+    // RLS alone, with no org predicate in the SQL: org B's context sees only
+    // org B's row, never org A's.
+    let mut tx = ione::rls::org_scoped_tx(&restricted, seed.org_b)
+        .await
+        .expect("org B context");
+    let visible: Vec<Uuid> =
+        sqlx::query_scalar("SELECT org_id FROM interaction_events WHERE workspace_id = ANY($1)")
+            .bind(vec![workspace_a, workspace_b])
+            .fetch_all(&mut *tx)
+            .await
+            .expect("unfiltered read");
+    assert_eq!(
+        visible,
+        vec![seed.org_b],
+        "org B's context must not see org A's interaction"
+    );
+    tx.commit().await.expect("commit");
+
+    sqlx::query("DELETE FROM interaction_events WHERE workspace_id = ANY($1)")
+        .bind(vec![workspace_a, workspace_b])
+        .execute(&pool)
+        .await
+        .expect("cleanup interactions");
+    sqlx::query("DELETE FROM peers WHERE id = $1")
+        .bind(peer_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup peer");
+    sqlx::query("DELETE FROM trust_issuers WHERE id = $1")
+        .bind(issuer_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup issuer");
+    sqlx::query("DELETE FROM workspaces WHERE id = ANY($1)")
+        .bind(vec![workspace_a, workspace_b])
+        .execute(&pool)
+        .await
+        .expect("cleanup workspaces");
+    cleanup(&pool, &seed).await;
+}
+
 async fn cleanup(pool: &PgPool, seed: &TwoOrgs) {
     sqlx::query("DELETE FROM broker_credentials WHERE org_id = ANY($1)")
         .bind(vec![seed.org_a, seed.org_b])

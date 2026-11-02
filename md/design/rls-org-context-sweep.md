@@ -59,7 +59,7 @@ All eleven `FORCE`d tables, with what each needs.
 | `workspace_peer_bindings` | unscoped | 1, 2 | `WorkspacePeerBindingRepo`, `webhook_ingress` (case 2 — the peer names the org) |
 | `service_account_tokens` | unscoped | 3 | authentication by token hash. Called out separately as HP-M4 in [headless-provisioning.md](headless-provisioning.md) |
 | `auto_exec_policies` | unscoped | 1 | workspace-scoped call sites |
-| `interaction_events` | unscoped | 1 | writers carry a workspace |
+| `interaction_events` | **scoped** | 1 | `InteractionEventRepo`: reads take an org id; `insert_batch` writes each org's rows under that org's context (#64) |
 | `peer_catalog_entries` | unscoped | 1, 2 | `catalog_repo`, `federation` |
 | `mfa_enrollments`, `mfa_recovery_codes` | unscoped | 1 | `routes::mfa`, which has a session |
 | `identity_audit_events` | unscoped | 1 | `identity_audit_writer` |
