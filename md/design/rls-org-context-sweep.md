@@ -62,7 +62,7 @@ All eleven `FORCE`d tables, with what each needs.
 | `interaction_events` | **scoped** | 1 | `InteractionEventRepo`: reads take an org id; `insert_batch` writes each org's rows under that org's context (#64) |
 | `peer_catalog_entries` | unscoped | 1, 2 | `catalog_repo`, `federation` |
 | `mfa_enrollments`, `mfa_recovery_codes` | unscoped | 1 | `routes::mfa`, which has a session |
-| `identity_audit_events` | unscoped | 1 | `identity_audit_writer` |
+| `identity_audit_events` | **scoped** | 1 | `IdentityAuditWriter::write` inserts under the caller's org context (#64) |
 
 ## Phase 1 — this change
 

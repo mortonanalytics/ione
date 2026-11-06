@@ -592,6 +592,65 @@ async fn interaction_event_repo_works_under_the_restricted_role() {
     cleanup(&pool, &seed).await;
 }
 
+/// `identity_audit_events` writes must land under the restricted role. The
+/// policy has no separate `WITH CHECK`, so an insert without the org context is
+/// rejected outright, and an identity audit row lost that way is a login or MFA
+/// event with no record.
+#[tokio::test]
+#[ignore]
+async fn identity_audit_writer_works_under_the_restricted_role() {
+    use ione::services::{IdentityAuditWriter, IdentityEvent};
+
+    let pool = default_pool().await;
+    let seed = seed_two_orgs(&pool).await;
+    let restricted = restricted_pool().await;
+
+    let writer = IdentityAuditWriter::new(&restricted);
+    for (org_id, user_id) in [(seed.org_a, seed.user_a), (seed.org_b, seed.user_b)] {
+        writer
+            .write(
+                IdentityEvent::OidcLogin,
+                org_id,
+                Some(user_id),
+                None,
+                None,
+                None,
+                "success",
+                serde_json::json!({ "probe": seed.provider }),
+            )
+            .await
+            .expect("identity audit write must succeed under the restricted role");
+    }
+
+    // RLS alone, with no org predicate in the SQL: each org's context sees only
+    // its own audit row.
+    for (org_id, user_id) in [(seed.org_a, seed.user_a), (seed.org_b, seed.user_b)] {
+        let mut tx = ione::rls::org_scoped_tx(&restricted, org_id)
+            .await
+            .expect("org context");
+        let visible: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+            "SELECT org_id, user_id FROM identity_audit_events WHERE detail->>'probe' = $1",
+        )
+        .bind(&seed.provider)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("unfiltered read");
+        assert_eq!(
+            visible,
+            vec![(org_id, Some(user_id))],
+            "an org's context must see its own audit row and not the other org's"
+        );
+        tx.commit().await.expect("commit");
+    }
+
+    sqlx::query("DELETE FROM identity_audit_events WHERE org_id = ANY($1)")
+        .bind(vec![seed.org_a, seed.org_b])
+        .execute(&pool)
+        .await
+        .expect("cleanup identity audit events");
+    cleanup(&pool, &seed).await;
+}
+
 async fn cleanup(pool: &PgPool, seed: &TwoOrgs) {
     sqlx::query("DELETE FROM broker_credentials WHERE org_id = ANY($1)")
         .bind(vec![seed.org_a, seed.org_b])
