@@ -68,6 +68,7 @@ impl<'a> IdentityAuditWriter<'a> {
         detail: Value,
     ) -> anyhow::Result<()> {
         let actor_ip = actor_ip.map(|ip| ip.to_string());
+        let mut tx = crate::rls::org_scoped_tx(self.pool, org_id).await?;
         sqlx::query(
             "INSERT INTO identity_audit_events
                 (event_type, org_id, user_id, actor_ip, session_id, peer_id, outcome, detail)
@@ -81,8 +82,9 @@ impl<'a> IdentityAuditWriter<'a> {
         .bind(peer_id)
         .bind(outcome)
         .bind(detail)
-        .execute(self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 }
