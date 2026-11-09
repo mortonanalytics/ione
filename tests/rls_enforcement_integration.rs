@@ -651,6 +651,148 @@ async fn identity_audit_writer_works_under_the_restricted_role() {
     cleanup(&pool, &seed).await;
 }
 
+/// Every `AutoExecPolicyRepo` method must work under the restricted role, and
+/// another org's context must never reach the policy. Unscoped, the list reads
+/// return nothing (the engine silently stops auto-executing) and the create is
+/// rejected by the policy's implicit insert check.
+#[tokio::test]
+#[ignore]
+async fn auto_exec_policy_repo_works_under_the_restricted_role() {
+    use ione::repos::{AutoExecPolicyInput, AutoExecPolicyRepo};
+
+    let pool = default_pool().await;
+    let seed = seed_two_orgs(&pool).await;
+    let restricted = restricted_pool().await;
+
+    let mut workspaces = Vec::new();
+    for org_id in [seed.org_a, seed.org_b] {
+        let workspace_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO workspaces (org_id, name, domain, lifecycle)
+             VALUES ($1, 'rls-auto-exec', 'test', 'continuous'::workspace_lifecycle)
+             RETURNING id",
+        )
+        .bind(org_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert workspace");
+        workspaces.push(workspace_id);
+    }
+    let (workspace_a, workspace_b) = (workspaces[0], workspaces[1]);
+    let connector_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO connectors (workspace_id, kind, name, config)
+         VALUES ($1, 'rust_native'::connector_kind, 'rls-auto-exec', '{}'::jsonb)
+         RETURNING id",
+    )
+    .bind(workspace_a)
+    .fetch_one(&pool)
+    .await
+    .expect("insert connector");
+
+    let input = |enabled: bool| AutoExecPolicyInput {
+        name: "rls-auto-exec".into(),
+        trigger_signal_title_prefix: None,
+        trigger_severity_at_most: None,
+        connector_id,
+        op: "probe".into(),
+        args_template: serde_json::json!({}),
+        rate_limit_per_min: 1,
+        severity_cap: "routine".into(),
+        authorized_by_permission: "approvals:decide".into(),
+        enabled,
+    };
+
+    let repo = AutoExecPolicyRepo::new(restricted.clone());
+    let created = repo
+        .create(seed.org_a, workspace_a, seed.user_a, &input(true))
+        .await
+        .expect("create must succeed under the restricted role");
+    assert_eq!(created.org_id, seed.org_a);
+
+    let listed = repo
+        .list_for_workspace(seed.org_a, workspace_a)
+        .await
+        .expect("list");
+    assert_eq!(
+        listed.iter().map(|p| p.id).collect::<Vec<_>>(),
+        [created.id]
+    );
+    let enabled = repo
+        .list_enabled_for_workspace(seed.org_a, workspace_a)
+        .await
+        .expect("list enabled");
+    assert_eq!(
+        enabled.iter().map(|p| p.id).collect::<Vec<_>>(),
+        [created.id]
+    );
+    assert!(repo
+        .get(seed.org_a, created.id, workspace_a)
+        .await
+        .expect("get")
+        .is_some());
+    let updated = repo
+        .update(seed.org_a, created.id, workspace_a, &input(false))
+        .await
+        .expect("update")
+        .expect("update must find the policy");
+    assert!(!updated.enabled);
+
+    // The other org's context sees nothing and changes nothing, even when the
+    // caller names the right workspace and policy id.
+    assert!(repo
+        .list_for_workspace(seed.org_b, workspace_a)
+        .await
+        .expect("foreign list")
+        .is_empty());
+    assert!(repo
+        .get(seed.org_b, created.id, workspace_a)
+        .await
+        .expect("foreign get")
+        .is_none());
+    assert!(repo
+        .update(seed.org_b, created.id, workspace_a, &input(true))
+        .await
+        .expect("foreign update")
+        .is_none());
+    assert!(!repo
+        .delete(seed.org_b, created.id, workspace_a)
+        .await
+        .expect("foreign delete"));
+    // Nor can it create a policy in a workspace that belongs to org A.
+    assert!(repo
+        .create(seed.org_b, workspace_a, seed.user_b, &input(true))
+        .await
+        .is_err());
+    assert!(repo
+        .list_for_workspace(seed.org_b, workspace_b)
+        .await
+        .expect("org B list")
+        .is_empty());
+
+    assert!(repo
+        .delete(seed.org_a, created.id, workspace_a)
+        .await
+        .expect("delete"));
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM auto_exec_policies WHERE workspace_id = $1")
+            .bind(workspace_a)
+            .fetch_one(&pool)
+            .await
+            .expect("count remaining");
+    assert_eq!(remaining, 0);
+
+    sqlx::query("DELETE FROM connectors WHERE id = $1")
+        .bind(connector_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup connector");
+    sqlx::query("DELETE FROM workspaces WHERE id = ANY($1)")
+        .bind(vec![workspace_a, workspace_b])
+        .execute(&pool)
+        .await
+        .expect("cleanup workspaces");
+    cleanup(&pool, &seed).await;
+}
+
 async fn cleanup(pool: &PgPool, seed: &TwoOrgs) {
     sqlx::query("DELETE FROM broker_credentials WHERE org_id = ANY($1)")
         .bind(vec![seed.org_a, seed.org_b])

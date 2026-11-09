@@ -3,6 +3,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::AutoExecPolicy;
+use crate::rls::org_scoped_tx;
 
 const RETURNING: &str = "id, org_id, workspace_id, name, trigger_signal_title_prefix,
      trigger_severity_at_most, connector_id, op, args_template, rate_limit_per_min,
@@ -22,6 +23,8 @@ pub struct AutoExecPolicyInput {
     pub enabled: bool,
 }
 
+/// Every method runs inside `rls::org_scoped_tx` for the caller's org: the
+/// `aep_org_isolation` policy filters reads and is also the insert check.
 pub struct AutoExecPolicyRepo {
     pool: PgPool,
 }
@@ -33,58 +36,78 @@ impl AutoExecPolicyRepo {
 
     pub async fn list_for_workspace(
         &self,
+        org_id: Uuid,
         workspace_id: Uuid,
     ) -> anyhow::Result<Vec<AutoExecPolicy>> {
-        sqlx::query_as::<_, AutoExecPolicy>(&format!(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query_as::<_, AutoExecPolicy>(&format!(
             "SELECT {RETURNING} FROM auto_exec_policies
              WHERE workspace_id = $1
              ORDER BY created_at"
         ))
         .bind(workspace_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .context("failed to list auto_exec policies")
+        .context("failed to list auto_exec policies")?;
+        tx.commit()
+            .await
+            .context("failed to commit auto_exec policy list")?;
+        Ok(row)
     }
 
     /// Engine read path: enabled policies only.
     pub async fn list_enabled_for_workspace(
         &self,
+        org_id: Uuid,
         workspace_id: Uuid,
     ) -> anyhow::Result<Vec<AutoExecPolicy>> {
-        sqlx::query_as::<_, AutoExecPolicy>(&format!(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query_as::<_, AutoExecPolicy>(&format!(
             "SELECT {RETURNING} FROM auto_exec_policies
              WHERE workspace_id = $1 AND enabled = true
              ORDER BY created_at"
         ))
         .bind(workspace_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .context("failed to list enabled auto_exec policies")
+        .context("failed to list enabled auto_exec policies")?;
+        tx.commit()
+            .await
+            .context("failed to commit auto_exec policy list enabled")?;
+        Ok(row)
     }
 
     pub async fn get(
         &self,
+        org_id: Uuid,
         id: Uuid,
         workspace_id: Uuid,
     ) -> anyhow::Result<Option<AutoExecPolicy>> {
-        sqlx::query_as::<_, AutoExecPolicy>(&format!(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query_as::<_, AutoExecPolicy>(&format!(
             "SELECT {RETURNING} FROM auto_exec_policies
              WHERE id = $1 AND workspace_id = $2"
         ))
         .bind(id)
         .bind(workspace_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .context("failed to get auto_exec policy")
+        .context("failed to get auto_exec policy")?;
+        tx.commit()
+            .await
+            .context("failed to commit auto_exec policy get")?;
+        Ok(row)
     }
 
     pub async fn create(
         &self,
+        org_id: Uuid,
         workspace_id: Uuid,
         created_by: Uuid,
         input: &AutoExecPolicyInput,
     ) -> anyhow::Result<AutoExecPolicy> {
-        sqlx::query_as::<_, AutoExecPolicy>(&format!(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query_as::<_, AutoExecPolicy>(&format!(
             "INSERT INTO auto_exec_policies
                (org_id, workspace_id, name, trigger_signal_title_prefix,
                 trigger_severity_at_most, connector_id, op, args_template,
@@ -106,19 +129,25 @@ impl AutoExecPolicyRepo {
         .bind(&input.authorized_by_permission)
         .bind(input.enabled)
         .bind(created_by)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
-        .context("failed to create auto_exec policy")
+        .context("failed to create auto_exec policy")?;
+        tx.commit()
+            .await
+            .context("failed to commit auto_exec policy create")?;
+        Ok(row)
     }
 
     /// Full replace. Returns None if the policy does not exist in the workspace.
     pub async fn update(
         &self,
+        org_id: Uuid,
         id: Uuid,
         workspace_id: Uuid,
         input: &AutoExecPolicyInput,
     ) -> anyhow::Result<Option<AutoExecPolicy>> {
-        sqlx::query_as::<_, AutoExecPolicy>(&format!(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query_as::<_, AutoExecPolicy>(&format!(
             "UPDATE auto_exec_policies SET
                name = $3,
                trigger_signal_title_prefix = $4,
@@ -145,19 +174,27 @@ impl AutoExecPolicyRepo {
         .bind(&input.severity_cap)
         .bind(&input.authorized_by_permission)
         .bind(input.enabled)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .context("failed to update auto_exec policy")
+        .context("failed to update auto_exec policy")?;
+        tx.commit()
+            .await
+            .context("failed to commit auto_exec policy update")?;
+        Ok(row)
     }
 
-    pub async fn delete(&self, id: Uuid, workspace_id: Uuid) -> anyhow::Result<bool> {
+    pub async fn delete(&self, org_id: Uuid, id: Uuid, workspace_id: Uuid) -> anyhow::Result<bool> {
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         let result =
             sqlx::query("DELETE FROM auto_exec_policies WHERE id = $1 AND workspace_id = $2")
                 .bind(id)
                 .bind(workspace_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .context("failed to delete auto_exec policy")?;
+        tx.commit()
+            .await
+            .context("failed to commit auto_exec policy delete")?;
         Ok(result.rows_affected() > 0)
     }
 }
