@@ -216,10 +216,11 @@ fn policy_from_row(row: crate::models::AutoExecPolicy) -> AutoExecPolicy {
 
 async fn fetch_enabled_policies(
     pool: &sqlx::PgPool,
+    org_id: Uuid,
     workspace_id: Uuid,
 ) -> anyhow::Result<Vec<AutoExecPolicy>> {
     let rows = AutoExecPolicyRepo::new(pool.clone())
-        .list_enabled_for_workspace(workspace_id)
+        .list_enabled_for_workspace(org_id, workspace_id)
         .await?;
     Ok(rows.into_iter().map(policy_from_row).collect())
 }
@@ -295,6 +296,7 @@ fn render_string(s: &str, title: &str, body: &str, severity: &str) -> anyhow::Re
 // ── Survivor context fetch ────────────────────────────────────────────────────
 
 struct SurvivorContext {
+    org_id: Uuid,
     workspace_id: Uuid,
     signal_title: String,
     signal_body: String,
@@ -305,13 +307,15 @@ async fn fetch_survivor_context(
     pool: &sqlx::PgPool,
     survivor_id: Uuid,
 ) -> anyhow::Result<Option<SurvivorContext>> {
-    let row: Option<(Uuid, String, String, Severity)> = sqlx::query_as(
-        "SELECT sig.workspace_id,
+    let row: Option<(Uuid, Uuid, String, String, Severity)> = sqlx::query_as(
+        "SELECT ws.org_id,
+                sig.workspace_id,
                 sig.title AS signal_title,
                 sig.body AS signal_body,
                 sig.severity AS signal_severity
          FROM survivors sv
          JOIN signals sig ON sig.id = sv.signal_id
+         JOIN workspaces ws ON ws.id = sig.workspace_id
          WHERE sv.id = $1",
     )
     .bind(survivor_id)
@@ -320,7 +324,8 @@ async fn fetch_survivor_context(
     .context("failed to fetch survivor context")?;
 
     Ok(row.map(
-        |(workspace_id, signal_title, signal_body, signal_severity)| SurvivorContext {
+        |(org_id, workspace_id, signal_title, signal_body, signal_severity)| SurvivorContext {
+            org_id,
             workspace_id,
             signal_title,
             signal_body,
@@ -350,7 +355,7 @@ pub async fn evaluate(
         None => return Ok(None),
     };
 
-    let policies = fetch_enabled_policies(&state.pool, ctx.workspace_id).await?;
+    let policies = fetch_enabled_policies(&state.pool, ctx.org_id, ctx.workspace_id).await?;
     if policies.is_empty() {
         return Ok(None);
     }
@@ -461,7 +466,7 @@ async fn run_auto_exec(state: &AppState, survivor_id: Uuid) -> anyhow::Result<Au
         None => return Ok(AutoExecOutcome::NoMatch),
     };
 
-    let policies = fetch_enabled_policies(&state.pool, ctx.workspace_id).await?;
+    let policies = fetch_enabled_policies(&state.pool, ctx.org_id, ctx.workspace_id).await?;
     if policies.is_empty() {
         return Ok(AutoExecOutcome::NoMatch);
     }
