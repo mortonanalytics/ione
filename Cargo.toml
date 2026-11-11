@@ -58,7 +58,7 @@ hex = "0.4"
 subtle = "2"
 aes-gcm = "0.11"
 lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls"] }
-jsonwebtoken = "11"
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
 csv = "1"
@@ -76,5 +76,5 @@ s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
 
 [dev-dependencies]
 wiremock = "0.6"
-jsonwebtoken = "11"
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 base64 = "0.22"
