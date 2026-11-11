@@ -108,7 +108,8 @@ jobs:
                    peer_projection_contract_integration \
                    whoami_and_error_mapping_integration \
                    rls_enforcement_integration health_ready_integration \
-                   graceful_shutdown_integration; do
+                   graceful_shutdown_integration \
+                   list_limit_clamp_integration; do
             echo "=== $p ==="
             # --include-ignored, not --ignored: the latter runs ONLY #[ignore]d
             # tests, so a suite whose tests are not ignore-gated (e.g.

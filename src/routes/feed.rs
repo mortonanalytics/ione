@@ -36,7 +36,7 @@ pub async fn get_feed(
         }
     };
 
-    let limit = query.limit.unwrap_or(100).min(500);
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
 
     let repo = RoutingDecisionRepo::new(state.pool.clone());
     let items = repo
