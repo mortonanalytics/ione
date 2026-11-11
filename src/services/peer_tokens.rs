@@ -756,15 +756,20 @@ async fn discover_peer(peer: &Peer, http: &reqwest::Client) -> Result<PeerDiscov
 }
 
 async fn fetch_discovery_at(url: &str, http: &reqwest::Client) -> Result<PeerDiscovery> {
-    http.get(url)
+    let resp = http
+        .get(url)
         .send()
         .await
         .context("peer discovery request failed")?
         .error_for_status()
-        .context("peer discovery status")?
-        .json()
-        .await
-        .context("peer discovery json")
+        .context("peer discovery status")?;
+    let value = crate::util::safe_http::read_json_body(
+        resp,
+        crate::services::peer_oauth::MAX_PEER_METADATA_BYTES,
+    )
+    .await
+    .context("peer discovery json")?;
+    serde_json::from_value(value).context("peer discovery json")
 }
 
 fn verify_refresh_endpoint_host(peer: &Peer, discovery: &PeerDiscovery) -> Result<()> {
@@ -895,5 +900,40 @@ mod reply_cap_tests {
             .await
             .expect("under the cap");
         assert_eq!(reply["id"], json!(1));
+    }
+}
+
+#[cfg(test)]
+mod discovery_cap_tests {
+    use super::fetch_discovery_at;
+    use serde_json::json;
+    use wiremock::{matchers::any, Mock, MockServer, ResponseTemplate};
+
+    async fn discovery_with_pad(pad: usize) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        let mut doc = json!({
+            "authorization_endpoint": format!("{}/oauth/authorize", server.uri()),
+            "token_endpoint": format!("{}/oauth/token", server.uri()),
+        });
+        if pad > 0 {
+            doc["pad"] = json!("x".repeat(pad));
+        }
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc))
+            .mount(&server)
+            .await;
+        fetch_discovery_at(&server.uri(), &reqwest::Client::new())
+            .await
+            .map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn a_discovery_document_over_the_cap_is_refused() {
+        assert!(discovery_with_pad(70_000).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_normal_discovery_document_still_parses() {
+        discovery_with_pad(0).await.expect("under the cap");
     }
 }

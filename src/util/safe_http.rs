@@ -90,7 +90,10 @@ async fn reject_private_resolutions(url: &Url) -> Result<(), AppError> {
     Ok(())
 }
 
-async fn read_json_body(resp: reqwest::Response, max_bytes: usize) -> anyhow::Result<Value> {
+pub(crate) async fn read_json_body(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> anyhow::Result<Value> {
     let mut body = Vec::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
