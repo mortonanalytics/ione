@@ -302,7 +302,7 @@ async fn seed_stream_events(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> a
         sqlx::query(
             "INSERT INTO stream_events (stream_id, payload, observed_at)
              VALUES ($1, $2, $3)
-             ON CONFLICT (stream_id, observed_at) DO NOTHING",
+             ON CONFLICT (stream_id, observed_at) WHERE dedup_key IS NULL DO NOTHING",
         )
         .bind(ev.stream_id)
         .bind(ev.payload)
