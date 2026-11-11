@@ -30,12 +30,12 @@ impl ServiceAccountTokenRepo {
         created_by: Option<Uuid>,
         expires_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<ServiceAccountToken> {
-        sqlx::query_as::<_, ServiceAccountToken>(&format!(
+        sqlx::query_as::<_, ServiceAccountToken>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO service_account_tokens
                (org_id, name, token_hash, permissions, provisionable_max_coc, created_by, expires_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
              RETURNING {TOKEN_COLUMNS}"
-        ))
+        )))
         .bind(org_id)
         .bind(name)
         .bind(token_hash)
@@ -50,12 +50,12 @@ impl ServiceAccountTokenRepo {
 
     /// Active (not-revoked) tokens for an org, newest first.
     pub async fn list_active(&self, org_id: Uuid) -> anyhow::Result<Vec<ServiceAccountToken>> {
-        sqlx::query_as::<_, ServiceAccountToken>(&format!(
+        sqlx::query_as::<_, ServiceAccountToken>(sqlx::AssertSqlSafe(format!(
             "SELECT {TOKEN_COLUMNS}
              FROM service_account_tokens
              WHERE org_id = $1 AND revoked_at IS NULL
              ORDER BY created_at DESC"
-        ))
+        )))
         .bind(org_id)
         .fetch_all(&self.pool)
         .await
@@ -82,13 +82,13 @@ impl ServiceAccountTokenRepo {
     /// Look up a token by hash, accepting only rows that are not revoked and
     /// not expired. Fail-closed: anything else returns `None`.
     pub async fn verify(&self, token_hash: &str) -> anyhow::Result<Option<ServiceAccountToken>> {
-        sqlx::query_as::<_, ServiceAccountToken>(&format!(
+        sqlx::query_as::<_, ServiceAccountToken>(sqlx::AssertSqlSafe(format!(
             "SELECT {TOKEN_COLUMNS}
              FROM service_account_tokens
              WHERE token_hash = $1
                AND revoked_at IS NULL
                AND (expires_at IS NULL OR expires_at > now())"
-        ))
+        )))
         .bind(token_hash)
         .fetch_optional(&self.pool)
         .await

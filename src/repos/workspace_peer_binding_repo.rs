@@ -119,9 +119,9 @@ impl WorkspacePeerBindingRepo {
         workspace_id: Uuid,
         peer_id: Uuid,
     ) -> anyhow::Result<Option<WorkspacePeerBinding>> {
-        sqlx::query_as::<_, WorkspacePeerBinding>(&select_binding_sql(
+        sqlx::query_as::<_, WorkspacePeerBinding>(sqlx::AssertSqlSafe(select_binding_sql(
             "WHERE workspace_id = $1 AND peer_id = $2",
-        ))
+        )))
         .bind(workspace_id)
         .bind(peer_id)
         .fetch_optional(&self.pool)
@@ -135,10 +135,10 @@ impl WorkspacePeerBindingRepo {
         org_id: Uuid,
     ) -> anyhow::Result<Vec<WorkspacePeerBinding>> {
         sqlx::query_as::<_, WorkspacePeerBinding>(
-            &select_binding_sql(
+            sqlx::AssertSqlSafe(select_binding_sql(
                 "WHERE b.workspace_id = $1
                    AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = b.workspace_id AND w.org_id = $2)",
-            ),
+            )),
         )
         .bind(workspace_id)
         .bind(org_id)
@@ -153,11 +153,11 @@ impl WorkspacePeerBindingRepo {
         org_id: Uuid,
     ) -> anyhow::Result<Vec<WorkspacePeerBinding>> {
         sqlx::query_as::<_, WorkspacePeerBinding>(
-            &select_binding_sql(
+            sqlx::AssertSqlSafe(select_binding_sql(
                 "WHERE b.peer_id = $1
                    AND EXISTS (SELECT 1 FROM peers p WHERE p.id = b.peer_id AND p.org_id = $2)
                    AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = b.workspace_id AND w.org_id = $2)",
-            ),
+            )),
         )
         .bind(peer_id)
         .bind(org_id)
@@ -178,7 +178,7 @@ impl WorkspacePeerBindingRepo {
         org_id: Uuid,
     ) -> anyhow::Result<Vec<crate::models::Peer>> {
         let columns = crate::models::Peer::columns_aliased("p");
-        let peers = sqlx::query_as::<_, crate::models::Peer>(&format!(
+        let peers = sqlx::query_as::<_, crate::models::Peer>(sqlx::AssertSqlSafe(format!(
             "SELECT {columns}
              FROM workspace_peer_bindings b
              JOIN peers p ON p.id = b.peer_id
@@ -190,7 +190,7 @@ impl WorkspacePeerBindingRepo {
                    SELECT 1 FROM workspaces w WHERE w.id = b.workspace_id AND w.org_id = $2
                )
              ORDER BY b.created_at DESC"
-        ))
+        )))
         .bind(workspace_id)
         .bind(org_id)
         .fetch_all(&self.pool)
@@ -208,10 +208,10 @@ impl WorkspacePeerBindingRepo {
         org_id: Uuid,
     ) -> anyhow::Result<Option<WorkspacePeerBinding>> {
         sqlx::query_as::<_, WorkspacePeerBinding>(
-            &select_binding_sql(
+            sqlx::AssertSqlSafe(select_binding_sql(
                 "WHERE b.id = $1
                    AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = b.workspace_id AND w.org_id = $2)",
-            ),
+            )),
         )
         .bind(id)
         .bind(org_id)

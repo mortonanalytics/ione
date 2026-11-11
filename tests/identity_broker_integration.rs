@@ -1266,10 +1266,12 @@ async fn rls_policies_are_present_but_inert_as_deployed() {
     insert_broker_credential(&f.pool, f.user_id, f.org_id, "visible-anyway", None).await;
 
     let mut conn = f.pool.acquire().await.expect("pinned connection");
-    sqlx::query(&format!("SET app.current_org_id = '{other_org}'"))
-        .execute(&mut *conn)
-        .await
-        .expect("set org context");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET app.current_org_id = '{other_org}'"
+    )))
+    .execute(&mut *conn)
+    .await
+    .expect("set org context");
     let visible: i64 =
         sqlx::query_scalar("SELECT count(*) FROM broker_credentials WHERE org_id = $1")
             .bind(f.org_id)

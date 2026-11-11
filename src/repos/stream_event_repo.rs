@@ -299,7 +299,7 @@ impl StreamEventRepo {
         let offset_param = next_param;
         sql.push_str(&format!(" LIMIT ${limit_param} OFFSET ${offset_param}"));
 
-        let mut query = sqlx::query(&sql)
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(org_id)
             .bind(stream_id)

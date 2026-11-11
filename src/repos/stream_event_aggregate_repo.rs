@@ -66,7 +66,7 @@ impl StreamEventAggregateRepo {
              ORDER BY bucket_start"
         );
 
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(org_id)
             .bind(stream_id)
@@ -125,7 +125,7 @@ impl StreamEventAggregateRepo {
              ORDER BY bucket_start"
         );
 
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(org_id)
             .bind(stream_id)
@@ -192,7 +192,7 @@ impl StreamEventAggregateRepo {
              ORDER BY bucket_start"
         );
 
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(org_id)
             .bind(stream_id)

@@ -766,10 +766,12 @@ async fn schema_enum_pipeline_event_stage_rejects_junk() {
 async fn schema_enum_peer_status_all_variants() {
     let pool = pool().await;
     for variant in &["pending_oauth", "pending_allowlist", "active", "revoked"] {
-        let result: Result<_, sqlx::Error> =
-            sqlx::query(&format!("SELECT '{}'::peer_status AS s", variant))
-                .execute(&pool)
-                .await;
+        let result: Result<_, sqlx::Error> = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT '{}'::peer_status AS s",
+            variant
+        )))
+        .execute(&pool)
+        .await;
         assert!(
             result.is_ok(),
             "peer_status must have variant '{}'",

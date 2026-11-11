@@ -22,11 +22,11 @@ impl PeerRepo {
         issuer_id: Uuid,
         sharing_policy: serde_json::Value,
     ) -> anyhow::Result<Peer> {
-        sqlx::query_as::<_, Peer>(&format!(
+        sqlx::query_as::<_, Peer>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO peers (org_id, name, mcp_url, issuer_id, sharing_policy)
                  SELECT org_id, $1, $2, id, $4 FROM trust_issuers WHERE id = $3
                  RETURNING {PEER_COLUMNS}"
-        ))
+        )))
         .bind(name)
         .bind(mcp_url)
         .bind(issuer_id)
@@ -37,18 +37,18 @@ impl PeerRepo {
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<Peer>> {
-        sqlx::query_as::<_, Peer>(&format!(
+        sqlx::query_as::<_, Peer>(sqlx::AssertSqlSafe(format!(
             "SELECT {PEER_COLUMNS} FROM peers ORDER BY created_at DESC"
-        ))
+        )))
         .fetch_all(&self.pool)
         .await
         .context("failed to list peers")
     }
 
     pub async fn list_for_org(&self, org_id: Uuid) -> anyhow::Result<Vec<Peer>> {
-        sqlx::query_as::<_, Peer>(&format!(
+        sqlx::query_as::<_, Peer>(sqlx::AssertSqlSafe(format!(
             "SELECT {PEER_COLUMNS} FROM peers WHERE org_id = $1 ORDER BY created_at DESC"
-        ))
+        )))
         .bind(org_id)
         .fetch_all(&self.pool)
         .await
@@ -56,11 +56,13 @@ impl PeerRepo {
     }
 
     pub async fn get(&self, id: Uuid) -> anyhow::Result<Option<Peer>> {
-        sqlx::query_as::<_, Peer>(&format!("SELECT {PEER_COLUMNS} FROM peers WHERE id = $1"))
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .context("failed to get peer")
+        sqlx::query_as::<_, Peer>(sqlx::AssertSqlSafe(format!(
+            "SELECT {PEER_COLUMNS} FROM peers WHERE id = $1"
+        )))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to get peer")
     }
 
     pub async fn set_webhook_secret(&self, peer_id: Uuid, ciphertext: &[u8]) -> anyhow::Result<()> {
@@ -81,9 +83,9 @@ impl PeerRepo {
         &self,
         id: Uuid,
     ) -> anyhow::Result<Option<(Peer, Option<Vec<u8>>)>> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {PEER_COLUMNS}, webhook_secret_ciphertext FROM peers WHERE id = $1"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&self.pool)
         .await
@@ -120,9 +122,9 @@ impl PeerRepo {
     }
 
     pub async fn update_status(&self, id: Uuid, status: PeerStatus) -> anyhow::Result<Peer> {
-        sqlx::query_as::<_, Peer>(&format!(
+        sqlx::query_as::<_, Peer>(sqlx::AssertSqlSafe(format!(
             "UPDATE peers SET status = $2 WHERE id = $1 RETURNING {PEER_COLUMNS}"
-        ))
+        )))
         .bind(id)
         .bind(status)
         .fetch_one(&self.pool)
@@ -237,9 +239,9 @@ impl PeerRepo {
     }
 
     pub async fn get_for_org(&self, id: Uuid, org_id: Uuid) -> anyhow::Result<Option<Peer>> {
-        sqlx::query_as::<_, Peer>(&format!(
+        sqlx::query_as::<_, Peer>(sqlx::AssertSqlSafe(format!(
             "SELECT {PEER_COLUMNS} FROM peers WHERE id = $1 AND org_id = $2"
-        ))
+        )))
         .bind(id)
         .bind(org_id)
         .fetch_optional(&self.pool)
@@ -248,9 +250,9 @@ impl PeerRepo {
     }
 
     pub async fn list_active_for_org(&self, org_id: Uuid) -> anyhow::Result<Vec<Peer>> {
-        sqlx::query_as::<_, Peer>(&format!(
+        sqlx::query_as::<_, Peer>(sqlx::AssertSqlSafe(format!(
             "SELECT {PEER_COLUMNS} FROM peers WHERE org_id = $1 AND status = 'active' ORDER BY created_at DESC"
-        ))
+        )))
         .bind(org_id)
         .fetch_all(&self.pool)
         .await

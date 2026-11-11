@@ -1597,12 +1597,12 @@ fn catalog_content_hash(
 /// `tool_allowlist_configured` hydrated `false` and quietly disabled the
 /// allowlist gate (issue #26).
 async fn peer_by_prefix(state: &AppState, org_id: Uuid, prefix: &str) -> anyhow::Result<Peer> {
-    sqlx::query_as::<_, Peer>(&format!(
+    sqlx::query_as::<_, Peer>(sqlx::AssertSqlSafe(format!(
         "SELECT {}
          FROM peers
          WHERE org_id = $1 AND tool_prefix = $2 AND status = 'active'",
         Peer::COLUMNS
-    ))
+    )))
     .bind(org_id)
     .bind(prefix)
     .fetch_optional(&state.pool)

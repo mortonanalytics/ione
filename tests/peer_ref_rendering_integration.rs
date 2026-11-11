@@ -646,7 +646,7 @@ async fn tables_containing(pool: &PgPool, tables: &[String], needle: &str) -> Ve
         let sql = format!(
             "SELECT EXISTS (SELECT 1 FROM \"{table}\" AS scan_row WHERE scan_row::text LIKE $1)"
         );
-        let found: bool = sqlx::query_scalar(&sql)
+        let found: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .bind(format!("%{needle}%"))
             .fetch_one(pool)
             .await

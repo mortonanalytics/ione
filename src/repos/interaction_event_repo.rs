@@ -46,7 +46,7 @@ const INTERACTION_COLUMNS: &str = "ie.id, ie.org_id, ie.workspace_id, ie.peer_id
      ie.session_id, ie.sequence_number, ie.outcome, ie.latency_ms, ie.detail, ie.recorded_at";
 
 pub(crate) fn push_filtered_from_where(
-    qb: &mut QueryBuilder<'_, Postgres>,
+    qb: &mut QueryBuilder<Postgres>,
     workspace_id: Uuid,
     org_id: Uuid,
     filter: &InteractionEventFilter,
@@ -94,7 +94,7 @@ pub(crate) fn push_filtered_from_where(
     }
 }
 
-fn push_cursor_predicate(qb: &mut QueryBuilder<'_, Postgres>, cursor: (DateTime<Utc>, Uuid)) {
+fn push_cursor_predicate(qb: &mut QueryBuilder<Postgres>, cursor: (DateTime<Utc>, Uuid)) {
     qb.push(" AND (ie.recorded_at, ie.id) < (");
     qb.push_bind(cursor.0);
     qb.push(", ");

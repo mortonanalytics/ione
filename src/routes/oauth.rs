@@ -402,7 +402,7 @@ async fn token_belongs_to_client(
     client_id: &str,
 ) -> bool {
     let sql = format!("SELECT client_id FROM {table} WHERE token_hash = $1");
-    match sqlx::query_scalar::<_, String>(&sql)
+    match sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql))
         .bind(token_hash)
         .fetch_optional(pool)
         .await

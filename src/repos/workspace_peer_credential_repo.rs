@@ -42,22 +42,23 @@ impl WorkspacePeerCredentialRepo {
         let ciphertext = token_crypto::encrypt_versioned(plaintext.as_bytes())
             .context("failed to encrypt peer credential")?;
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let credential = sqlx::query_as::<_, WorkspacePeerCredential>(&format!(
-            "INSERT INTO workspace_peer_credentials
+        let credential =
+            sqlx::query_as::<_, WorkspacePeerCredential>(sqlx::AssertSqlSafe(format!(
+                "INSERT INTO workspace_peer_credentials
                (workspace_id, peer_id, credential_ciphertext, created_by)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT ON CONSTRAINT wpc_unique_workspace_peer DO UPDATE
                SET credential_ciphertext = EXCLUDED.credential_ciphertext,
                    rotated_at = now()
              RETURNING {CREDENTIAL_COLUMNS}"
-        ))
-        .bind(workspace_id)
-        .bind(peer_id)
-        .bind(&ciphertext)
-        .bind(created_by)
-        .fetch_one(&mut *tx)
-        .await
-        .context("failed to upsert workspace peer credential")?;
+            )))
+            .bind(workspace_id)
+            .bind(peer_id)
+            .bind(&ciphertext)
+            .bind(created_by)
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to upsert workspace peer credential")?;
         tx.commit()
             .await
             .context("failed to commit workspace peer credential upsert")?;
@@ -77,10 +78,10 @@ impl WorkspacePeerCredentialRepo {
         org_id: Uuid,
     ) -> anyhow::Result<Option<WorkspacePeerCredential>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let row = sqlx::query_as::<_, WorkspacePeerCredential>(&format!(
+        let row = sqlx::query_as::<_, WorkspacePeerCredential>(sqlx::AssertSqlSafe(format!(
             "SELECT {CREDENTIAL_COLUMNS} FROM workspace_peer_credentials
              WHERE workspace_id = $1 AND peer_id = $2 AND org_id = $3"
-        ))
+        )))
         .bind(workspace_id)
         .bind(peer_id)
         .bind(org_id)
@@ -100,11 +101,11 @@ impl WorkspacePeerCredentialRepo {
         org_id: Uuid,
     ) -> anyhow::Result<Vec<WorkspacePeerCredential>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let rows = sqlx::query_as::<_, WorkspacePeerCredential>(&format!(
+        let rows = sqlx::query_as::<_, WorkspacePeerCredential>(sqlx::AssertSqlSafe(format!(
             "SELECT {CREDENTIAL_COLUMNS} FROM workspace_peer_credentials
              WHERE workspace_id = $1 AND org_id = $2
              ORDER BY created_at DESC"
-        ))
+        )))
         .bind(workspace_id)
         .bind(org_id)
         .fetch_all(&mut *tx)

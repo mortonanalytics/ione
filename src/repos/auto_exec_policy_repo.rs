@@ -40,11 +40,11 @@ impl AutoExecPolicyRepo {
         workspace_id: Uuid,
     ) -> anyhow::Result<Vec<AutoExecPolicy>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let row = sqlx::query_as::<_, AutoExecPolicy>(&format!(
+        let row = sqlx::query_as::<_, AutoExecPolicy>(sqlx::AssertSqlSafe(format!(
             "SELECT {RETURNING} FROM auto_exec_policies
              WHERE workspace_id = $1
              ORDER BY created_at"
-        ))
+        )))
         .bind(workspace_id)
         .fetch_all(&mut *tx)
         .await
@@ -62,11 +62,11 @@ impl AutoExecPolicyRepo {
         workspace_id: Uuid,
     ) -> anyhow::Result<Vec<AutoExecPolicy>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let row = sqlx::query_as::<_, AutoExecPolicy>(&format!(
+        let row = sqlx::query_as::<_, AutoExecPolicy>(sqlx::AssertSqlSafe(format!(
             "SELECT {RETURNING} FROM auto_exec_policies
              WHERE workspace_id = $1 AND enabled = true
              ORDER BY created_at"
-        ))
+        )))
         .bind(workspace_id)
         .fetch_all(&mut *tx)
         .await
@@ -84,10 +84,10 @@ impl AutoExecPolicyRepo {
         workspace_id: Uuid,
     ) -> anyhow::Result<Option<AutoExecPolicy>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let row = sqlx::query_as::<_, AutoExecPolicy>(&format!(
+        let row = sqlx::query_as::<_, AutoExecPolicy>(sqlx::AssertSqlSafe(format!(
             "SELECT {RETURNING} FROM auto_exec_policies
              WHERE id = $1 AND workspace_id = $2"
-        ))
+        )))
         .bind(id)
         .bind(workspace_id)
         .fetch_optional(&mut *tx)
@@ -107,7 +107,7 @@ impl AutoExecPolicyRepo {
         input: &AutoExecPolicyInput,
     ) -> anyhow::Result<AutoExecPolicy> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let row = sqlx::query_as::<_, AutoExecPolicy>(&format!(
+        let row = sqlx::query_as::<_, AutoExecPolicy>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO auto_exec_policies
                (org_id, workspace_id, name, trigger_signal_title_prefix,
                 trigger_severity_at_most, connector_id, op, args_template,
@@ -116,7 +116,7 @@ impl AutoExecPolicyRepo {
              VALUES ((SELECT org_id FROM workspaces WHERE id = $1),
                      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              RETURNING {RETURNING}"
-        ))
+        )))
         .bind(workspace_id)
         .bind(&input.name)
         .bind(&input.trigger_signal_title_prefix)
@@ -147,7 +147,7 @@ impl AutoExecPolicyRepo {
         input: &AutoExecPolicyInput,
     ) -> anyhow::Result<Option<AutoExecPolicy>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let row = sqlx::query_as::<_, AutoExecPolicy>(&format!(
+        let row = sqlx::query_as::<_, AutoExecPolicy>(sqlx::AssertSqlSafe(format!(
             "UPDATE auto_exec_policies SET
                name = $3,
                trigger_signal_title_prefix = $4,
@@ -161,7 +161,7 @@ impl AutoExecPolicyRepo {
                enabled = $12
              WHERE id = $1 AND workspace_id = $2
              RETURNING {RETURNING}"
-        ))
+        )))
         .bind(id)
         .bind(workspace_id)
         .bind(&input.name)

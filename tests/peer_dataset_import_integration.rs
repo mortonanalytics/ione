@@ -406,12 +406,14 @@ async fn peer_import_pins_identity_retries_and_revokes_current_mapping_access() 
             format!("{}/mcp", owner.uri()),
         ),
     ] {
-        sqlx::query(&format!("UPDATE {table} SET {column}=$2 WHERE id=$1"))
-            .bind(key)
-            .bind(&changed)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {table} SET {column}=$2 WHERE id=$1"
+        )))
+        .bind(key)
+        .bind(&changed)
+        .execute(&pool)
+        .await
+        .unwrap();
         assert!(
             repo.effective_for_user(org, ws, actor)
                 .await
@@ -446,12 +448,14 @@ async fn peer_import_pins_identity_retries_and_revokes_current_mapping_access() 
             403,
             "{column}"
         );
-        sqlx::query(&format!("UPDATE {table} SET {column}=$2 WHERE id=$1"))
-            .bind(key)
-            .bind(&original)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {table} SET {column}=$2 WHERE id=$1"
+        )))
+        .bind(key)
+        .bind(&original)
+        .execute(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             repo.effective_for_user(org, ws, actor).await.unwrap().len(),
             1
@@ -680,10 +684,12 @@ async fn peer_import_pins_identity_retries_and_revokes_current_mapping_access() 
         "relay_peer_dataset_mappings",
         "workspace_relay_mappings",
     ] {
-        let rows: Vec<Value> = sqlx::query_scalar(&format!("SELECT to_jsonb(t) FROM {table} t"))
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+        let rows: Vec<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT to_jsonb(t) FROM {table} t"
+        )))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert!(!serde_json::to_string(&rows).unwrap().contains(&token));
     }
     for request in owner.received_requests().await.unwrap() {
