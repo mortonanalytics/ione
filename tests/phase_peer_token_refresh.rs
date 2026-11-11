@@ -120,7 +120,7 @@ async fn insert_peer_with_tokens(
         ione::util::token_crypto::encrypt_token(access_token).expect("encrypt access");
     let refresh_ciphertext =
         ione::util::token_crypto::encrypt_token(refresh_token).expect("encrypt refresh");
-    let peer_id: Uuid = sqlx::query_scalar(&format!(
+    let peer_id: Uuid = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "INSERT INTO peers (
             name, mcp_url, issuer_id, sharing_policy, status, oauth_client_id,
             access_token_hash, refresh_token_hash, access_token_ciphertext,
@@ -131,7 +131,7 @@ async fn insert_peer_with_tokens(
             'old-access-hash', 'old-refresh-hash', $3, $4, {expires_at_sql}, '[]'::jsonb
          )
          RETURNING id"
-    ))
+    )))
     .bind(mcp_url)
     .bind(issuer_id)
     .bind(access_ciphertext)

@@ -40,9 +40,9 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 async-trait = "0.1"
-# Held at 0.4.1 in Cargo.lock: 0.4.2 moved to sqlx 0.9, which puts two
-# sqlx_core versions in the graph and breaks every `query_as` over a Vector
-# column. Bump this together with sqlx, not before it.
+# pgvector 0.4.2 is the first release built against sqlx 0.9. The two must
+# resolve to one sqlx_core, or every `query_as` over a Vector column breaks:
+# bump them together.
 pgvector = { version = "0.4", features = ["sqlx"] }
 evalexpr = "13"
 futures-util = "0.3"

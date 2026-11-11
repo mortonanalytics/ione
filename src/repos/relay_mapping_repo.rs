@@ -38,13 +38,13 @@ impl RelayMappingRepo {
         user_id: Uuid,
     ) -> anyhow::Result<Vec<WorkspaceRelayMapping>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let rows = sqlx::query_as::<_, WorkspaceRelayMapping>(&format!(
+        let rows = sqlx::query_as::<_, WorkspaceRelayMapping>(sqlx::AssertSqlSafe(format!(
             "SELECT {MAPPING_COLUMNS} FROM workspace_relay_mappings \
              WHERE workspace_id = $1 AND enabled \
                AND (principal_id IS NULL OR principal_id = $2) \
                AND (NOT peer_dataset_import OR EXISTS (SELECT 1 FROM relay_peer_dataset_mappings d JOIN workspace_peer_bindings b ON b.id=d.binding_id AND b.org_id=d.org_id AND b.workspace_id=d.workspace_id AND b.peer_id=d.peer_id JOIN peers p ON p.id=d.peer_id AND p.org_id=d.org_id WHERE d.mapping_id=workspace_relay_mappings.id AND d.org_id=workspace_relay_mappings.org_id AND d.workspace_id=workspace_relay_mappings.workspace_id AND b.status='active' AND p.status='active' AND d.owner_tenant_id IS NOT NULL AND b.foreign_tenant_id=d.owner_tenant_id::text AND b.foreign_workspace_id=d.owner_workspace_id::text AND p.mcp_url=d.peer_url AND (NOT (p.sharing_policy ? 'deployment_id') OR p.sharing_policy->>'deployment_id'=d.owner_deployment_id::text))) \
              ORDER BY display_name"
-        ))
+        )))
         .bind(workspace_id)
         .bind(user_id)
         .fetch_all(&mut *tx)
@@ -60,10 +60,10 @@ impl RelayMappingRepo {
         workspace_id: Uuid,
     ) -> anyhow::Result<Vec<WorkspaceRelayMapping>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let rows = sqlx::query_as::<_, WorkspaceRelayMapping>(&format!(
+        let rows = sqlx::query_as::<_, WorkspaceRelayMapping>(sqlx::AssertSqlSafe(format!(
             "SELECT {MAPPING_COLUMNS} FROM workspace_relay_mappings \
              WHERE workspace_id = $1 ORDER BY display_name"
-        ))
+        )))
         .bind(workspace_id)
         .fetch_all(&mut *tx)
         .await?;
@@ -78,10 +78,10 @@ impl RelayMappingRepo {
         alias: &str,
     ) -> anyhow::Result<Option<WorkspaceRelayMapping>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let row = sqlx::query_as::<_, WorkspaceRelayMapping>(&format!(
+        let row = sqlx::query_as::<_, WorkspaceRelayMapping>(sqlx::AssertSqlSafe(format!(
             "SELECT {MAPPING_COLUMNS} FROM workspace_relay_mappings \
              WHERE workspace_id = $1 AND alias = $2"
-        ))
+        )))
         .bind(workspace_id)
         .bind(alias)
         .fetch_optional(&mut *tx)
@@ -98,12 +98,12 @@ impl RelayMappingRepo {
         input: NewRelayMapping,
     ) -> anyhow::Result<WorkspaceRelayMapping> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let row = sqlx::query_as::<_, WorkspaceRelayMapping>(&format!(
+        let row = sqlx::query_as::<_, WorkspaceRelayMapping>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO workspace_relay_mappings \
                (org_id, workspace_id, relay_connection_id, display_name, alias, principal_id, \
                 created_by) \
              VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING {MAPPING_COLUMNS}"
-        ))
+        )))
         .bind(org_id)
         .bind(workspace_id)
         .bind(input.relay_connection_id)
@@ -128,10 +128,10 @@ impl RelayMappingRepo {
         enabled: bool,
     ) -> anyhow::Result<Option<WorkspaceRelayMapping>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let row = sqlx::query_as::<_, WorkspaceRelayMapping>(&format!(
+        let row = sqlx::query_as::<_, WorkspaceRelayMapping>(sqlx::AssertSqlSafe(format!(
             "UPDATE workspace_relay_mappings SET enabled = $3, updated_at = now() \
              WHERE id = $1 AND workspace_id = $2 AND (NOT $3 OR NOT peer_dataset_import OR EXISTS (SELECT 1 FROM relay_peer_dataset_mappings d JOIN workspace_peer_bindings b ON b.id=d.binding_id AND b.org_id=d.org_id AND b.workspace_id=d.workspace_id AND b.peer_id=d.peer_id JOIN peers p ON p.id=d.peer_id AND p.org_id=d.org_id WHERE d.mapping_id=workspace_relay_mappings.id AND d.org_id=workspace_relay_mappings.org_id AND d.workspace_id=workspace_relay_mappings.workspace_id AND b.status='active' AND p.status='active' AND d.owner_tenant_id IS NOT NULL AND b.foreign_tenant_id=d.owner_tenant_id::text AND b.foreign_workspace_id=d.owner_workspace_id::text AND p.mcp_url=d.peer_url AND (NOT (p.sharing_policy ? 'deployment_id') OR p.sharing_policy->>'deployment_id'=d.owner_deployment_id::text))) RETURNING {MAPPING_COLUMNS}"
-        ))
+        )))
         .bind(id)
         .bind(workspace_id)
         .bind(enabled)

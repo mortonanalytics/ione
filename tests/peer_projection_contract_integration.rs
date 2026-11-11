@@ -118,9 +118,9 @@ async fn omitting_a_column_errors_instead_of_defaulting() {
         "the column must actually be gone from the projection under test"
     );
 
-    let result = sqlx::query_as::<_, Peer>(&format!(
+    let result = sqlx::query_as::<_, Peer>(sqlx::AssertSqlSafe(format!(
         "SELECT {projection_missing_the_gate} FROM peers WHERE id = $1"
-    ))
+    )))
     .bind(peer_id)
     .fetch_one(&pool)
     .await;

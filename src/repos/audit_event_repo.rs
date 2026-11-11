@@ -28,7 +28,7 @@ const AUDIT_EVENT_COLUMNS: &str = "ae.id, ae.workspace_id, ae.actor_kind, ae.act
 /// DB-layer backstop: the workspaces join requires w.org_id = org_id in
 /// addition to the route-layer ensure_workspace_in_org check.
 pub(crate) fn push_filtered_from_where(
-    qb: &mut QueryBuilder<'_, Postgres>,
+    qb: &mut QueryBuilder<Postgres>,
     workspace_id: Uuid,
     org_id: Uuid,
     filter: &AuditEventFilter,
@@ -72,7 +72,7 @@ pub(crate) fn push_filtered_from_where(
     }
 }
 
-fn push_cursor_predicate(qb: &mut QueryBuilder<'_, Postgres>, cursor: (DateTime<Utc>, Uuid)) {
+fn push_cursor_predicate(qb: &mut QueryBuilder<Postgres>, cursor: (DateTime<Utc>, Uuid)) {
     qb.push(" AND (ae.created_at, ae.id) < (");
     qb.push_bind(cursor.0);
     qb.push(", ");
@@ -202,7 +202,7 @@ impl AuditEventRepo {
         last: (DateTime<Utc>, Uuid),
     ) -> impl futures_util::Stream<Item = sqlx::Result<AuditEvent>> + Send + 'static {
         let pool = self.pool.clone();
-        let mut qb: QueryBuilder<'static, Postgres> =
+        let mut qb: QueryBuilder<Postgres> =
             QueryBuilder::new(format!("SELECT {AUDIT_EVENT_COLUMNS}"));
         push_filtered_from_where(&mut qb, workspace_id, org_id, filter);
         qb.push(" AND (ae.created_at, ae.id) <= (");

@@ -140,8 +140,9 @@ impl WorkspacePeerDelegationRepo {
         granted_by: Option<Uuid>,
     ) -> anyhow::Result<WorkspacePeerDelegation> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let delegation = sqlx::query_as::<_, WorkspacePeerDelegation>(&format!(
-            "INSERT INTO workspace_peer_delegations
+        let delegation =
+            sqlx::query_as::<_, WorkspacePeerDelegation>(sqlx::AssertSqlSafe(format!(
+                "INSERT INTO workspace_peer_delegations
                (workspace_id, peer_id, oauth_client_id, token_endpoint,
                 access_token_ciphertext, refresh_token_ciphertext,
                 token_expires_at, granted_by)
@@ -155,18 +156,18 @@ impl WorkspacePeerDelegationRepo {
                    granted_by = EXCLUDED.granted_by,
                    refreshed_at = now()
              RETURNING {DELEGATION_COLUMNS}"
-        ))
-        .bind(workspace_id)
-        .bind(peer_id)
-        .bind(oauth_client_id)
-        .bind(token_endpoint)
-        .bind(access_ciphertext)
-        .bind(refresh_ciphertext)
-        .bind(token_expires_at)
-        .bind(granted_by)
-        .fetch_one(&mut *tx)
-        .await
-        .context("failed to upsert workspace peer delegation")?;
+            )))
+            .bind(workspace_id)
+            .bind(peer_id)
+            .bind(oauth_client_id)
+            .bind(token_endpoint)
+            .bind(access_ciphertext)
+            .bind(refresh_ciphertext)
+            .bind(token_expires_at)
+            .bind(granted_by)
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to upsert workspace peer delegation")?;
         tx.commit()
             .await
             .context("failed to commit workspace peer delegation upsert")?;
@@ -217,10 +218,10 @@ impl WorkspacePeerDelegationRepo {
         org_id: Uuid,
     ) -> anyhow::Result<Option<WorkspacePeerDelegation>> {
         let mut tx = org_scoped_tx(&self.pool, org_id).await?;
-        let row = sqlx::query_as::<_, WorkspacePeerDelegation>(&format!(
+        let row = sqlx::query_as::<_, WorkspacePeerDelegation>(sqlx::AssertSqlSafe(format!(
             "SELECT {DELEGATION_COLUMNS} FROM workspace_peer_delegations
              WHERE workspace_id = $1 AND peer_id = $2 AND org_id = $3"
-        ))
+        )))
         .bind(workspace_id)
         .bind(peer_id)
         .bind(org_id)
