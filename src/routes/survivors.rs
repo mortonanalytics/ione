@@ -27,7 +27,7 @@ pub async fn list_survivors(
     Query(query): Query<ListSurvivorsQuery>,
 ) -> Result<Json<Value>, AppError> {
     ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
-    let limit = query.limit.unwrap_or(100).min(500);
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
 
     let verdict_filter = query.verdict.as_deref().and_then(parse_verdict);
 

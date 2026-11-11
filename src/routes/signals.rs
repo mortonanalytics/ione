@@ -28,7 +28,7 @@ pub async fn list_signals(
     Query(query): Query<ListSignalsQuery>,
 ) -> Result<Json<Value>, AppError> {
     ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
-    let limit = query.limit.unwrap_or(100).min(500);
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
 
     let source_filter = query.source.as_deref().and_then(parse_signal_source);
     let severity_filter = query.severity.as_deref().and_then(parse_severity);
