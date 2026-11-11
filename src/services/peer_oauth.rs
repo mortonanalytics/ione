@@ -320,6 +320,10 @@ pub fn verify_peer_endpoint_hosts(peer_url: &str, disc: &PeerDiscovery) -> Resul
     Ok(())
 }
 
+/// Cap on a peer's OAuth authorization-server metadata document, on every
+/// path that reads one.
+pub(crate) const MAX_PEER_METADATA_BYTES: usize = 64_000;
+
 pub async fn fetch_peer_metadata(
     state: &AppState,
     peer_url: &str,
@@ -327,7 +331,7 @@ pub async fn fetch_peer_metadata(
 ) -> Result<serde_json::Value> {
     match crate::util::safe_http::fetch_public_metadata(
         metadata_url,
-        64_000,
+        MAX_PEER_METADATA_BYTES,
         std::time::Duration::from_secs(5),
     )
     .await
@@ -348,7 +352,9 @@ pub async fn fetch_peer_metadata(
         .context("peer metadata request failed")?
         .error_for_status()
         .context("peer metadata status")?;
-    resp.json().await.context("peer metadata json")
+    crate::util::safe_http::read_json_body(resp, MAX_PEER_METADATA_BYTES)
+        .await
+        .context("peer metadata json")
 }
 
 fn generate_opaque(bytes: usize) -> String {

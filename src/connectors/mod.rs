@@ -32,6 +32,34 @@ pub(crate) fn connector_http_client(timeout: Duration) -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+/// Why a capped body read stopped.
+pub(crate) enum CappedReadError {
+    /// The body is larger than the cap. Nothing past the cap was buffered.
+    TooLarge,
+    Read(reqwest::Error),
+}
+
+/// Read a response body while enforcing `max` bytes, so an oversized body is
+/// refused before it is buffered: a declared `Content-Length` over the cap is
+/// rejected up front, and a body without one is rejected at the chunk that
+/// would cross the cap.
+pub(crate) async fn read_capped(
+    mut resp: reqwest::Response,
+    max: usize,
+) -> Result<Vec<u8>, CappedReadError> {
+    if resp.content_length().is_some_and(|n| n > max as u64) {
+        return Err(CappedReadError::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(CappedReadError::Read)? {
+        if chunk.len() > max - body.len() {
+            return Err(CappedReadError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 /// Describes a stream that a connector exposes by default.
 pub struct StreamDescriptor {
     pub name: String,
@@ -178,6 +206,40 @@ pub fn build_with_pool(
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Serve every connection a `Transfer-Encoding: chunked` 200 whose body
+    /// never ends, and return the base URL. There is no `Content-Length`, so
+    /// only a reader that enforces its cap while streaming can stop.
+    pub(crate) async fn serve_endless_chunked(content_type: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let _ = socket.read(&mut request).await;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ntransfer-encoding: chunked\r\n\r\n"
+                    );
+                    if socket.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let mut chunk = b"10000\r\n".to_vec();
+                    chunk.extend(std::iter::repeat_n(b' ', 0x10000));
+                    chunk.extend_from_slice(b"\r\n");
+                    while socket.write_all(&chunk).await.is_ok() {}
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -204,5 +266,40 @@ mod tests {
         .expect("the client's own timeout must fire well before 5 s");
         let err = result.expect_err("a silent upstream must not produce a response");
         assert!(err.is_timeout(), "expected a timeout error, got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn read_capped_stops_an_endless_chunked_body_at_the_cap() {
+        let base = test_support::serve_endless_chunked("application/json").await;
+        let resp = connector_http_client(Duration::from_secs(3))
+            .get(&base)
+            .send()
+            .await
+            .expect("response head");
+        assert!(matches!(
+            read_capped(resp, 1024 * 1024).await,
+            Err(CappedReadError::TooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_capped_checks_declared_length_and_passes_bodies_at_the_cap() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 1025]))
+            .mount(&server)
+            .await;
+        let client = connector_http_client(Duration::from_secs(3));
+
+        let resp = client.get(server.uri()).send().await.expect("response");
+        assert_eq!(resp.content_length(), Some(1025));
+        assert!(matches!(
+            read_capped(resp, 1024).await,
+            Err(CappedReadError::TooLarge)
+        ));
+
+        let resp = client.get(server.uri()).send().await.expect("response");
+        let body = read_capped(resp, 1025).await.ok().expect("body at the cap");
+        assert_eq!(body.len(), 1025);
     }
 }

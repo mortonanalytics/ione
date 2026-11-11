@@ -202,7 +202,7 @@ pub async fn list_policies(
     ensure_workspace_in_org(&state.pool, workspace_id, ctx.org_id).await?;
     require_permission(&ctx, &state.pool, workspace_id, "approvals:decide").await?;
     let items = AutoExecPolicyRepo::new(state.pool.clone())
-        .list_for_workspace(workspace_id)
+        .list_for_workspace(ctx.org_id, workspace_id)
         .await
         .map_err(AppError::Internal)?;
     Ok(Json(json!({
@@ -223,7 +223,7 @@ pub async fn create_policy(
     let name = body.name.clone();
     let input = validate_body(&state, &ctx, workspace_id, body).await?;
     let created = AutoExecPolicyRepo::new(state.pool.clone())
-        .create(workspace_id, ctx.user_id, &input)
+        .create(ctx.org_id, workspace_id, ctx.user_id, &input)
         .await
         .map_err(|e| map_name_conflict(e, &name))?;
 
@@ -252,7 +252,7 @@ pub async fn update_policy(
 
     let repo = AutoExecPolicyRepo::new(state.pool.clone());
     let before = repo
-        .get(policy_id, workspace_id)
+        .get(ctx.org_id, policy_id, workspace_id)
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound("policy not found".into()))?;
@@ -260,7 +260,7 @@ pub async fn update_policy(
     let name = body.name.clone();
     let input = validate_body(&state, &ctx, workspace_id, body).await?;
     let updated = repo
-        .update(policy_id, workspace_id, &input)
+        .update(ctx.org_id, policy_id, workspace_id, &input)
         .await
         .map_err(|e| map_name_conflict(e, &name))?
         .ok_or_else(|| AppError::NotFound("policy not found".into()))?;
@@ -293,13 +293,13 @@ pub async fn delete_policy(
 
     let repo = AutoExecPolicyRepo::new(state.pool.clone());
     let before = repo
-        .get(policy_id, workspace_id)
+        .get(ctx.org_id, policy_id, workspace_id)
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound("policy not found".into()))?;
 
     let removed = repo
-        .delete(policy_id, workspace_id)
+        .delete(ctx.org_id, policy_id, workspace_id)
         .await
         .map_err(AppError::Internal)?;
     if !removed {

@@ -17,7 +17,7 @@
 
 `id UUID PK · org_id UUID FK organizations ON DELETE RESTRICT (populated by BEFORE INSERT trigger from the workspace; never caller-supplied) · workspace_id UUID FK workspaces ON DELETE CASCADE · name TEXT (UNIQUE per workspace) · trigger_signal_title_prefix TEXT NULL · trigger_severity_at_most TEXT NULL CHECK in {routine,flagged} · connector_id UUID FK connectors ON DELETE RESTRICT · op TEXT · args_template JSONB DEFAULT '{}' · rate_limit_per_min INT CHECK BETWEEN 1 AND 1000 · severity_cap TEXT DEFAULT 'routine' CHECK in {routine,flagged} · authorized_by_permission TEXT · enabled BOOLEAN DEFAULT true · created_by UUID FK users ON DELETE RESTRICT · created_at · updated_at (touch trigger)`
 
-Org-isolation RLS (`aep_org_isolation`) mirrors the existing pattern. Partial index on `(workspace_id) WHERE enabled`. No backfill — the metadata-JSONB path had no production rows.
+Org-isolation RLS (`aep_org_isolation`) mirrors the existing pattern. Every `AutoExecPolicyRepo` method takes the caller's org id and runs inside `rls::org_scoped_tx`, so the CRUD routes and the engine's enabled-policy read work under the restricted `ione_app` role; the engine takes the org from the survivor's workspace (#64). Partial index on `(workspace_id) WHERE enabled`. No backfill — the metadata-JSONB path had no production rows.
 
 **Engine read path** (`src/services/auto_exec.rs`): policies come from `SELECT … WHERE workspace_id = $1 AND enabled = true` (`AutoExecPolicyRepo::list_enabled_for_workspace`); the workspace-metadata JSONB parse path is deleted. The in-memory rate bucket is keyed `(workspace_id, policy_id)`. `MAX_RATE_LIMIT_PER_MIN = 1000` is the named ceiling constant in the engine, reused by write-path validation.
 

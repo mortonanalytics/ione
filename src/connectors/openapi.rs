@@ -18,7 +18,9 @@ use crate::{
     },
 };
 
-use super::{ConnectorImpl, PollResult, StreamDescriptor, StreamEventInput};
+use super::{
+    read_capped, CappedReadError, ConnectorImpl, PollResult, StreamDescriptor, StreamEventInput,
+};
 
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const MAX_TIMEOUT_MS: u64 = 30_000;
@@ -202,13 +204,15 @@ impl OpenApiConnector {
             bail!("openapi spec fetch failed: HTTP {}", resp.status().as_u16());
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .context("failed to read openapi spec response")?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            bail!("openapi spec fetch failed: response too large");
-        }
+        let bytes = match read_capped(resp, MAX_RESPONSE_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(CappedReadError::TooLarge) => {
+                bail!("openapi spec fetch failed: response too large")
+            }
+            Err(CappedReadError::Read(e)) => {
+                return Err(e).context("failed to read openapi spec response")
+            }
+        };
 
         serde_json::from_slice(&bytes).map_err(|e| {
             let body = std::str::from_utf8(&bytes).unwrap_or_default();
@@ -293,13 +297,13 @@ impl OpenApiConnector {
             bail!("openapi request failed: HTTP {}", resp.status().as_u16());
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .context("failed to read openapi response body")?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            bail!("openapi response too large");
-        }
+        let bytes = match read_capped(resp, MAX_RESPONSE_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(CappedReadError::TooLarge) => bail!("openapi response too large"),
+            Err(CappedReadError::Read(e)) => {
+                return Err(e).context("failed to read openapi response body")
+            }
+        };
 
         let body: Value =
             serde_json::from_slice(&bytes).context("openapi response is not valid JSON")?;
@@ -1048,5 +1052,43 @@ mod tests {
             let result = connector.poll("stream", None).await.expect("poll");
             assert_eq!(result.events.len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn endless_spec_and_operation_bodies_are_refused_at_the_cap() {
+        let base = crate::connectors::test_support::serve_endless_chunked("application/json").await;
+        let cfg = json!({
+            "spec_inline": {
+                "openapi": "3.0.0",
+                "servers": [{ "url": base }],
+                "paths": { "/incidents": { "get": { "operationId": "listIncidents" } } }
+            },
+            "base_url": base,
+            "auth": { "type": "none" },
+            "defaults": { "timeout_ms": 3000 },
+            "streams": [{
+                "name": "incidents",
+                "method": "GET",
+                "path": "/incidents",
+                "items_json_pointer": "/items",
+                "observed_at_json_pointer": "/updated_at"
+            }]
+        });
+        let connector = OpenApiConnector::from_config(&cfg).expect("connector");
+
+        let err = connector
+            .fetch_spec(&format!("{base}/spec.json"))
+            .await
+            .expect_err("oversize spec");
+        assert_eq!(
+            err.to_string(),
+            "openapi spec fetch failed: response too large"
+        );
+
+        let err = match connector.poll("incidents", None).await {
+            Ok(_) => panic!("oversize operation response must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.to_string(), "openapi response too large");
     }
 }

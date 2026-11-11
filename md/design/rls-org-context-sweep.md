@@ -58,11 +58,11 @@ All eleven `FORCE`d tables, with what each needs.
 | `peers` | unscoped | 1 | `PeerRepo` — most call sites already hold an org |
 | `workspace_peer_bindings` | unscoped | 1, 2 | `WorkspacePeerBindingRepo`, `webhook_ingress` (case 2 — the peer names the org) |
 | `service_account_tokens` | unscoped | 3 | authentication by token hash. Called out separately as HP-M4 in [headless-provisioning.md](headless-provisioning.md) |
-| `auto_exec_policies` | unscoped | 1 | workspace-scoped call sites |
+| `auto_exec_policies` | **scoped** | 1 | `AutoExecPolicyRepo`: every method takes the caller's org id; the engine reads it from the survivor's workspace (#64) |
 | `interaction_events` | **scoped** | 1 | `InteractionEventRepo`: reads take an org id; `insert_batch` writes each org's rows under that org's context (#64) |
 | `peer_catalog_entries` | unscoped | 1, 2 | `catalog_repo`, `federation` |
 | `mfa_enrollments`, `mfa_recovery_codes` | unscoped | 1 | `routes::mfa`, which has a session |
-| `identity_audit_events` | unscoped | 1 | `identity_audit_writer` |
+| `identity_audit_events` | **scoped** | 1 | `IdentityAuditWriter::write` inserts under the caller's org context (#64) |
 
 ## Phase 1 — this change
 

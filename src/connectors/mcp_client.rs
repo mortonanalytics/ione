@@ -359,9 +359,9 @@ impl ConnectorImpl for McpClientConnector {
             let items = extract_items_from_tool_result(&data, stream_name);
             for item in items {
                 all_events.push(StreamEventInput {
+                    dedup_key: item_dedup_key(workspace_id_str, &item),
                     payload: item,
                     observed_at: now,
-                    dedup_key: None,
                 });
             }
         }
@@ -456,11 +456,40 @@ impl McpClientConnector {
     }
 }
 
+/// Dedup key for one polled item: the peer's own item id, scoped by the peer
+/// workspace it came from. Every item in a poll shares one `observed_at`, so
+/// without a key only the first item per stream per poll would be stored.
+fn item_dedup_key(workspace_id: &str, item: &Value) -> Option<String> {
+    let id = item.get("id")?.as_str()?;
+    (!id.is_empty()).then(|| format!("{workspace_id}:{id}"))
+}
+
 /// Extract the array of items from a tools/call result for the given tool.
 fn extract_items_from_tool_result(data: &Value, stream_name: &str) -> Vec<Value> {
     match stream_name {
         "list_survivors" => data["survivors"].as_array().cloned().unwrap_or_default(),
         "search_stream_events" => data["events"].as_array().cloned().unwrap_or_default(),
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::item_dedup_key;
+    use serde_json::json;
+
+    #[test]
+    fn items_are_keyed_by_workspace_and_peer_item_id() {
+        assert_eq!(
+            item_dedup_key("ws", &json!({ "id": "x" })).as_deref(),
+            Some("ws:x")
+        );
+        assert_eq!(
+            item_dedup_key("ws", &json!({ "id": "y" })).as_deref(),
+            Some("ws:y")
+        );
+        assert_eq!(item_dedup_key("ws", &json!({ "title": "no id" })), None);
+        assert_eq!(item_dedup_key("ws", &json!({ "id": "" })), None);
+        assert_eq!(item_dedup_key("ws", &json!({ "id": 7 })), None);
     }
 }

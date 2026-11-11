@@ -62,7 +62,8 @@ impl StreamEventRepo {
         Self { pool }
     }
 
-    /// Insert a stream event only if no row with the same (stream_id, observed_at) exists.
+    /// Insert a keyless stream event only if no keyless row with the same
+    /// (stream_id, observed_at) exists.
     /// Returns true if a row was inserted, false if it was a duplicate.
     pub async fn insert_if_absent(
         &self,
@@ -76,7 +77,7 @@ impl StreamEventRepo {
         let rows_affected = sqlx::query(
             "INSERT INTO stream_events (stream_id, payload, observed_at)
              VALUES ($1, $2, $3)
-             ON CONFLICT (stream_id, observed_at) DO NOTHING",
+             ON CONFLICT (stream_id, observed_at) WHERE dedup_key IS NULL DO NOTHING",
         )
         .bind(stream_id)
         .bind(payload)

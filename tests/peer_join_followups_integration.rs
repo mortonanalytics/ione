@@ -256,6 +256,8 @@ struct PeerSpec {
     tools_pages: usize,
     /// Answer `tools/list` with a JSON-RPC error inside an HTTP 200.
     tools_error: bool,
+    /// Bytes of padding added to the discovery document as an extra field.
+    discovery_pad: usize,
 }
 
 impl Default for PeerSpec {
@@ -267,6 +269,7 @@ impl Default for PeerSpec {
             legacy_discovery: false,
             tools_pages: 1,
             tools_error: false,
+            discovery_pad: 0,
         }
     }
 }
@@ -364,6 +367,9 @@ fn discovery_document(state: &PeerState) -> Value {
     }
     if state.spec.cimd {
         doc["client_id_metadata_document_supported"] = json!(true);
+    }
+    if state.spec.discovery_pad > 0 {
+        doc["pad"] = json!("x".repeat(state.spec.discovery_pad));
     }
     doc
 }
@@ -661,6 +667,31 @@ async fn a_peer_serving_discovery_only_under_the_mcp_path_still_joins() {
     assert!(
         paths.iter().any(|path| path == LEGACY_DISCOVERY_PATH),
         "the legacy location must be the fallback: {paths:?}"
+    );
+}
+
+/// A loopback peer is read through the private-network fallback, which had no
+/// size cap: a valid discovery document of any size was buffered and accepted.
+#[tokio::test]
+#[ignore]
+async fn a_private_peer_with_oversized_discovery_metadata_cannot_join() {
+    let h = spawn_app().await;
+    let peer = TestPeer::start(PeerSpec {
+        discovery_pad: 70_000,
+        ..PeerSpec::default()
+    })
+    .await;
+
+    let (status, body) = h.register_peer(&peer.mcp_url).await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "metadata over 64,000 bytes must be refused: {body}"
+    );
+    assert!(
+        peer.registrations().is_empty(),
+        "the join must stop at discovery: {:?}",
+        peer.registrations()
     );
 }
 

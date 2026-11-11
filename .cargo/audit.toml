@@ -17,4 +17,14 @@ ignore = [
     # (`cargo tree -i rsa` prints nothing). It cannot be removed from the
     # lockfile until sqlx stops listing optional drivers there.
     "RUSTSEC-2023-0071",
+    # libsqlite3-sys 0.30.1 — bundled SQLite before 3.54.0 (CVE-2026-119375),
+    # fixed in libsqlite3-sys 0.39.0.
+    # Path: sqlx -> sqlx-sqlite -> libsqlite3-sys, the same lockfile-only
+    # listing as rsa above: IONe enables only postgres, so sqlx-sqlite and
+    # libsqlite3-sys are never compiled (`cargo tree --target all -i
+    # libsqlite3-sys` prints nothing) and no SQLite file is ever opened.
+    # No upgrade path: sqlx-sqlite 0.8.6 requires libsqlite3-sys ^0.30.1 and
+    # sqlx-sqlite 0.9.0 requires <0.38.0. Remove this entry when a sqlx release
+    # accepts libsqlite3-sys >= 0.39.
+    "RUSTSEC-2026-0459",
 ]

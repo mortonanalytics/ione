@@ -415,6 +415,58 @@ async fn dedup_insert_reports_update_not_insert() {
     assert_eq!(row.1["properties"]["mag"], json!(4.8));
 }
 
+/// Keyed events are identified by `(stream_id, dedup_key)`. The original full
+/// unique index on `(stream_id, observed_at)` made the second insert here raise
+/// a unique violation, which aborted the rest of the poll.
+#[tokio::test]
+#[ignore]
+async fn distinct_dedup_keys_same_timestamp_both_insert() {
+    let (_, pool) = spawn_app().await;
+    let workspace_id = default_workspace_id(&pool).await;
+    let connector_id = insert_connector(&pool, workspace_id, "geojson-test", json!({})).await;
+    let stream_id = insert_stream(&pool, connector_id, None).await;
+    let repo = StreamEventRepo::new(pool.clone());
+    let observed_at = Utc.timestamp_millis_opt(1779991039445).single().unwrap();
+
+    for key in ["a", "b"] {
+        let outcome = repo
+            .insert_event(stream_id, json!({ "key": key }), observed_at, Some(key))
+            .await
+            .expect("keyed insert");
+        assert_eq!(outcome, InsertOutcome::Inserted, "dedup key {key}");
+    }
+
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM stream_events WHERE stream_id = $1")
+        .bind(stream_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(rows, 2);
+}
+
+#[tokio::test]
+#[ignore]
+async fn keyless_same_timestamp_still_dedups() {
+    let (_, pool) = spawn_app().await;
+    let workspace_id = default_workspace_id(&pool).await;
+    let connector_id = insert_connector(&pool, workspace_id, "geojson-test", json!({})).await;
+    let stream_id = insert_stream(&pool, connector_id, None).await;
+    let repo = StreamEventRepo::new(pool.clone());
+    let observed_at = Utc.timestamp_millis_opt(1779991039445).single().unwrap();
+
+    let first = repo
+        .insert_event(stream_id, json!({ "n": 1 }), observed_at, None)
+        .await
+        .expect("first insert");
+    let second = repo
+        .insert_event(stream_id, json!({ "n": 2 }), observed_at, None)
+        .await
+        .expect("second insert");
+
+    assert_eq!(first, InsertOutcome::Inserted);
+    assert_eq!(second, InsertOutcome::Duplicate);
+}
+
 #[tokio::test]
 #[ignore]
 async fn create_rejects_link_local_feed_urls_without_insert() {

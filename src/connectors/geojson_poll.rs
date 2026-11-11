@@ -13,7 +13,9 @@ use crate::{
     util::{json_pointer::validate_json_pointer, url_guard},
 };
 
-use super::{ConnectorImpl, PollResult, StreamDescriptor, StreamEventInput};
+use super::{
+    read_capped, CappedReadError, ConnectorImpl, PollResult, StreamDescriptor, StreamEventInput,
+};
 
 pub(crate) const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
@@ -109,13 +111,13 @@ impl GeoJsonPollConnector {
             bail!("geojson_poll fetch failed: HTTP {}", resp.status().as_u16());
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .context("failed to read geojson_poll response body")?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            bail!("geojson_poll response too large");
-        }
+        let bytes = match read_capped(resp, MAX_RESPONSE_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(CappedReadError::TooLarge) => bail!("geojson_poll response too large"),
+            Err(CappedReadError::Read(e)) => {
+                return Err(e).context("failed to read geojson_poll response body")
+            }
+        };
 
         serde_json::from_slice(&bytes).context("geojson_poll response is not valid JSON")
     }
@@ -428,5 +430,20 @@ mod tests {
             }
         });
         assert!(GeoJsonPollConnector::from_config(&invalid).is_err());
+    }
+
+    #[tokio::test]
+    async fn endless_feed_body_is_refused_at_the_cap() {
+        let base = crate::connectors::test_support::serve_endless_chunked("application/json").await;
+        let config = json!({
+            "kind": "geojson_poll",
+            "feed_url": format!("{base}/feed"),
+            "stream_name": "earthquakes",
+            "observed_at_format": "none",
+            "timeout_ms": 3000
+        });
+        let connector = GeoJsonPollConnector::from_config(&config).expect("valid config");
+        let err = connector.fetch_feed_json().await.expect_err("oversize");
+        assert_eq!(err.to_string(), "geojson_poll response too large");
     }
 }

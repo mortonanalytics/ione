@@ -51,6 +51,10 @@ pub fn sse_data_payload(line: &str) -> Option<&str> {
     (!data.is_empty()).then_some(data)
 }
 
+/// Cap on one peer JSON-RPC reply body: twice the 2 MiB chart/table resource
+/// caps, so a valid panel payload plus its envelope still fits.
+pub const MAX_JSONRPC_REPLY_BYTES: usize = 4 * 1024 * 1024;
+
 /// Read the JSON-RPC reply to a request whose id is `expected_id`.
 ///
 /// A spec-conforming MCP server may answer a POST with `application/json` (one
@@ -70,10 +74,16 @@ pub async fn read_jsonrpc_reply(resp: reqwest::Response, expected_id: &Value) ->
                 .starts_with("text/event-stream")
         })
         .unwrap_or(false);
-    let body = resp
-        .text()
-        .await
-        .context("failed to read peer JSON-RPC response body")?;
+    let body = match crate::connectors::read_capped(resp, MAX_JSONRPC_REPLY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(crate::connectors::CappedReadError::TooLarge) => {
+            anyhow::bail!("peer JSON-RPC response exceeds {MAX_JSONRPC_REPLY_BYTES} bytes")
+        }
+        Err(crate::connectors::CappedReadError::Read(e)) => {
+            return Err(e).context("failed to read peer JSON-RPC response body")
+        }
+    };
+    let body = String::from_utf8(body).context("peer JSON-RPC response body is not valid UTF-8")?;
     if is_sse {
         select_sse_reply(&body, expected_id)
     } else {
@@ -746,15 +756,20 @@ async fn discover_peer(peer: &Peer, http: &reqwest::Client) -> Result<PeerDiscov
 }
 
 async fn fetch_discovery_at(url: &str, http: &reqwest::Client) -> Result<PeerDiscovery> {
-    http.get(url)
+    let resp = http
+        .get(url)
         .send()
         .await
         .context("peer discovery request failed")?
         .error_for_status()
-        .context("peer discovery status")?
-        .json()
-        .await
-        .context("peer discovery json")
+        .context("peer discovery status")?;
+    let value = crate::util::safe_http::read_json_body(
+        resp,
+        crate::services::peer_oauth::MAX_PEER_METADATA_BYTES,
+    )
+    .await
+    .context("peer discovery json")?;
+    serde_json::from_value(value).context("peer discovery json")
 }
 
 fn verify_refresh_endpoint_host(peer: &Peer, discovery: &PeerDiscovery) -> Result<()> {
@@ -834,5 +849,91 @@ mod sse_tests {
         let body = "data: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}";
         let reply = select_sse_reply(body, &json!(3)).expect("reply should be found");
         assert_eq!(reply["id"], json!(3));
+    }
+}
+
+#[cfg(test)]
+mod reply_cap_tests {
+    use super::{read_jsonrpc_reply, MAX_JSONRPC_REPLY_BYTES};
+    use serde_json::json;
+    use wiremock::{matchers::any, Mock, MockServer, ResponseTemplate};
+
+    async fn reply_with_pad(pad: usize) -> anyhow::Result<serde_json::Value> {
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"pad":"{}"}}}}"#,
+            "x".repeat(pad)
+        );
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+        let resp = reqwest::get(server.uri()).await.expect("response");
+        read_jsonrpc_reply(resp, &json!(1)).await
+    }
+
+    #[tokio::test]
+    async fn a_reply_over_the_cap_with_a_declared_length_is_refused() {
+        let err = reply_with_pad(MAX_JSONRPC_REPLY_BYTES)
+            .await
+            .expect_err("oversize");
+        assert!(err.to_string().contains("exceeds 4194304 bytes"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_endless_chunked_reply_is_refused_at_the_cap() {
+        let base = crate::connectors::test_support::serve_endless_chunked("application/json").await;
+        let resp = crate::connectors::connector_http_client(std::time::Duration::from_secs(3))
+            .get(&base)
+            .send()
+            .await
+            .expect("response head");
+        let err = read_jsonrpc_reply(resp, &json!(1))
+            .await
+            .expect_err("oversize");
+        assert!(err.to_string().contains("exceeds 4194304 bytes"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_reply_under_the_cap_still_parses() {
+        let reply = reply_with_pad(MAX_JSONRPC_REPLY_BYTES - 1024)
+            .await
+            .expect("under the cap");
+        assert_eq!(reply["id"], json!(1));
+    }
+}
+
+#[cfg(test)]
+mod discovery_cap_tests {
+    use super::fetch_discovery_at;
+    use serde_json::json;
+    use wiremock::{matchers::any, Mock, MockServer, ResponseTemplate};
+
+    async fn discovery_with_pad(pad: usize) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        let mut doc = json!({
+            "authorization_endpoint": format!("{}/oauth/authorize", server.uri()),
+            "token_endpoint": format!("{}/oauth/token", server.uri()),
+        });
+        if pad > 0 {
+            doc["pad"] = json!("x".repeat(pad));
+        }
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc))
+            .mount(&server)
+            .await;
+        fetch_discovery_at(&server.uri(), &reqwest::Client::new())
+            .await
+            .map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn a_discovery_document_over_the_cap_is_refused() {
+        assert!(discovery_with_pad(70_000).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_normal_discovery_document_still_parses() {
+        discovery_with_pad(0).await.expect("under the cap");
     }
 }
