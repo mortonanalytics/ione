@@ -217,13 +217,30 @@ async fn connect_and_read(
             anyhow::bail!("peer SSE stream ended");
         };
         let chunk = chunk?;
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(idx) = pending.find('\n') {
-            let line = pending[..idx].trim_end_matches('\r').to_string();
-            pending = pending[idx + 1..].to_string();
+        for line in drain_lines(&mut pending, &chunk)? {
             handle_sse_line(state, peer_id, &line).await?;
         }
     }
+}
+
+/// A single SSE line longer than this ends the session. MCP notifications are
+/// small JSON-RPC messages; a peer that never sends a newline would otherwise
+/// grow the line buffer for as long as it keeps the stream active.
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+
+/// Append `chunk` to the line buffer and take every complete line out of it,
+/// leaving the unterminated remainder in `pending`.
+fn drain_lines(pending: &mut String, chunk: &[u8]) -> anyhow::Result<Vec<String>> {
+    pending.push_str(&String::from_utf8_lossy(chunk));
+    let mut lines = Vec::new();
+    while let Some(idx) = pending.find('\n') {
+        lines.push(pending[..idx].trim_end_matches('\r').to_string());
+        pending.drain(..=idx);
+    }
+    if pending.len() > MAX_SSE_LINE_BYTES {
+        anyhow::bail!("peer SSE line exceeds {MAX_SSE_LINE_BYTES} bytes");
+    }
+    Ok(lines)
 }
 
 async fn handle_sse_line(state: &AppState, peer_id: Uuid, line: &str) -> anyhow::Result<()> {
@@ -235,4 +252,38 @@ async fn handle_sse_line(state: &AppState, peer_id: Uuid, line: &str) -> anyhow:
         crate::services::federation::dispatch_notification(state, peer_id, value).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{drain_lines, MAX_SSE_LINE_BYTES};
+
+    #[test]
+    fn a_line_over_the_cap_ends_the_session() {
+        let mut pending = String::new();
+        let err = drain_lines(&mut pending, &vec![b'x'; MAX_SSE_LINE_BYTES + 1])
+            .expect_err("an unterminated line over the cap must fail");
+        assert!(err.to_string().contains("exceeds 1048576 bytes"), "{err}");
+    }
+
+    #[test]
+    fn lines_split_across_chunks_are_reassembled() {
+        let stream = "data: {\"method\":\"a\"}\r\n\ndata: {\"method\":\"b\"}\n\n";
+        for split in 0..=stream.len() {
+            let mut pending = String::new();
+            let mut lines = drain_lines(&mut pending, &stream.as_bytes()[..split]).expect("head");
+            lines.extend(drain_lines(&mut pending, &stream.as_bytes()[split..]).expect("tail"));
+            assert_eq!(
+                lines,
+                [
+                    "data: {\"method\":\"a\"}",
+                    "",
+                    "data: {\"method\":\"b\"}",
+                    ""
+                ],
+                "split at {split}"
+            );
+            assert!(pending.is_empty());
+        }
+    }
 }
