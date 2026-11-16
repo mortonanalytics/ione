@@ -61,7 +61,7 @@ All eleven `FORCE`d tables, with what each needs.
 | `auto_exec_policies` | **scoped** | 1 | `AutoExecPolicyRepo`: every method takes the caller's org id; the engine reads it from the survivor's workspace (#64) |
 | `interaction_events` | **scoped** | 1 | `InteractionEventRepo`: reads take an org id; `insert_batch` writes each org's rows under that org's context (#64) |
 | `peer_catalog_entries` | unscoped | 1, 2 | `catalog_repo`, `federation` |
-| `mfa_enrollments`, `mfa_recovery_codes` | unscoped | 1 | `routes::mfa`, which has a session |
+| `mfa_enrollments`, `mfa_recovery_codes` | **scoped** | 1 | `MfaRepo`: every method takes the caller's org id; `routes::mfa` and `mfa_gate` pass `ctx.org_id` (#64) |
 | `identity_audit_events` | **scoped** | 1 | `IdentityAuditWriter::write` inserts under the caller's org context (#64) |
 
 ## Phase 1 — this change

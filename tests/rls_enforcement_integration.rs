@@ -793,6 +793,118 @@ async fn auto_exec_policy_repo_works_under_the_restricted_role() {
     cleanup(&pool, &seed).await;
 }
 
+/// Every `MfaRepo` method must work under the restricted role, and another
+/// org's context must never reach the enrollment or its recovery codes.
+/// Unscoped, the enrollment insert is rejected by the policy's implicit insert
+/// check, and `is_enrolled` reads `false` — which is the dangerous half: the MFA
+/// gate would wave an enrolled user through.
+#[tokio::test]
+#[ignore]
+async fn mfa_repo_works_under_the_restricted_role() {
+    use ione::repos::MfaRepo;
+
+    let pool = default_pool().await;
+    let seed = seed_two_orgs(&pool).await;
+    let restricted = restricted_pool().await;
+    let repo = MfaRepo::new(restricted.clone());
+    let (org_a, user_a, org_b) = (seed.org_a, seed.user_a, seed.org_b);
+
+    repo.upsert_enrollment(org_a, user_a, b"ciphertext")
+        .await
+        .expect("enroll must succeed under the restricted role");
+    assert!(!repo.is_enrolled(org_a, user_a).await.expect("is_enrolled"));
+    assert_eq!(
+        repo.totp_ciphertext(org_a, user_a)
+            .await
+            .expect("totp_ciphertext")
+            .as_deref(),
+        Some(&b"ciphertext"[..])
+    );
+    repo.activate(org_a, user_a).await.expect("activate");
+    assert!(repo.is_enrolled(org_a, user_a).await.expect("is_enrolled"));
+
+    assert!(repo
+        .recovery_codes_viewed_at(org_a, user_a)
+        .await
+        .expect("viewed_at")
+        .is_none());
+    let hashes = vec!["hash-1".to_string(), "hash-2".to_string()];
+    repo.store_recovery_codes(org_a, user_a, &hashes)
+        .await
+        .expect("store recovery codes");
+    assert!(repo
+        .recovery_codes_viewed_at(org_a, user_a)
+        .await
+        .expect("viewed_at")
+        .is_some());
+    assert_eq!(
+        repo.unused_recovery_count(org_a, user_a)
+            .await
+            .expect("count"),
+        2
+    );
+
+    // The other org's context sees nothing and consumes nothing, even with the
+    // right user id and a valid code hash.
+    assert!(!repo.is_enrolled(org_b, user_a).await.expect("foreign"));
+    assert!(repo
+        .totp_ciphertext(org_b, user_a)
+        .await
+        .expect("foreign")
+        .is_none());
+    assert_eq!(
+        repo.unused_recovery_count(org_b, user_a)
+            .await
+            .expect("foreign"),
+        0
+    );
+    assert!(!repo
+        .consume_recovery_code(org_b, user_a, "hash-1")
+        .await
+        .expect("foreign consume"));
+    repo.delete_enrollment(org_b, user_a)
+        .await
+        .expect("foreign delete");
+    assert!(repo
+        .is_enrolled(org_a, user_a)
+        .await
+        .expect("still enrolled"));
+
+    assert!(repo
+        .consume_recovery_code(org_a, user_a, "hash-1")
+        .await
+        .expect("consume"));
+    assert!(!repo
+        .consume_recovery_code(org_a, user_a, "hash-1")
+        .await
+        .expect("reuse"));
+    assert_eq!(
+        repo.unused_recovery_count(org_a, user_a)
+            .await
+            .expect("count"),
+        1
+    );
+
+    repo.delete_enrollment(org_a, user_a).await.expect("delete");
+    assert!(repo
+        .totp_ciphertext(org_a, user_a)
+        .await
+        .expect("after delete")
+        .is_none());
+
+    sqlx::query("DELETE FROM mfa_recovery_codes WHERE user_id = $1")
+        .bind(user_a)
+        .execute(&pool)
+        .await
+        .expect("cleanup recovery codes");
+    sqlx::query("DELETE FROM mfa_enrollments WHERE user_id = $1")
+        .bind(user_a)
+        .execute(&pool)
+        .await
+        .expect("cleanup enrollment");
+    cleanup(&pool, &seed).await;
+}
+
 async fn cleanup(pool: &PgPool, seed: &TwoOrgs) {
     sqlx::query("DELETE FROM broker_credentials WHERE org_id = ANY($1)")
         .bind(vec![seed.org_a, seed.org_b])

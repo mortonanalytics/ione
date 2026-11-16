@@ -14,6 +14,7 @@ pub mod funnel_event_repo;
 pub mod interaction_event_repo;
 pub mod membership_repo;
 pub mod message_repo;
+pub mod mfa_repo;
 pub mod oauth_client_repo;
 pub mod oauth_token_repo;
 pub mod org_membership_repo;
@@ -56,6 +57,7 @@ pub use interaction_event_repo::{
 };
 pub use membership_repo::MembershipRepo;
 pub use message_repo::MessageRepo;
+pub use mfa_repo::MfaRepo;
 pub use oauth_client_repo::*;
 pub use oauth_token_repo::*;
 pub use org_membership_repo::OrgMembershipRepo;
