@@ -556,13 +556,10 @@ pub async fn mfa_gate(
     if ctx.is_service_account {
         return Ok(());
     }
-    let enrolled: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM mfa_enrollments WHERE user_id = $1 AND activated_at IS NOT NULL)",
-    )
-    .bind(ctx.user_id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false);
+    let enrolled = crate::repos::MfaRepo::new(pool.clone())
+        .is_enrolled(ctx.org_id, ctx.user_id)
+        .await
+        .unwrap_or(false);
     let org_requires_admin: bool = sqlx::query_scalar(
         "SELECT COALESCE(mfa_required_for_admins, false) FROM organizations WHERE id = $1",
     )
