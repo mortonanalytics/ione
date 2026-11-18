@@ -361,7 +361,12 @@ fn mint_jwt(subject: &str, issuer: &str, audience: &str, secret: &[u8]) -> Strin
         "iat": chrono::Utc::now().timestamp(),
     });
     let header = Header::new(Algorithm::HS256);
-    encode(&header, &claims, &EncodingKey::from_secret(secret)).expect("failed to mint test JWT")
+    encode(
+        &header,
+        &claims,
+        &EncodingKey::from_secret(secret).expect("hmac key"),
+    )
+    .expect("failed to mint test JWT")
 }
 
 // ─── Test 1: initialize handshake ────────────────────────────────────────────
@@ -1401,6 +1406,79 @@ async fn mcp_bearer_jwt_from_untrusted_issuer_is_rejected() {
     assert_eq!(
         body["error"], "unauthorized",
         "invalid bearer must return the standard unauthorized envelope"
+    );
+}
+
+// ─── Test 11b: trusted-issuer JWT validation still rejects bad tokens ────────
+
+async fn resolve_bearer(state: &AppState, token: &str) -> Option<AuthContext> {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {token}").parse().expect("header value"),
+    );
+    ione::mcp_server::resolve_auth(state, &headers).await
+}
+
+/// A JWT signed by a registered HS256 trust issuer resolves to a peer context;
+/// the same token expired, minted for another audience, or signed with another
+/// key is rejected.
+#[tokio::test]
+#[ignore]
+async fn trusted_issuer_jwt_rejects_expired_wrong_audience_and_bad_signature() {
+    use base64::Engine as _;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+    let (pool, state) = spawn_state().await;
+    let org_id = default_org_id(&pool).await;
+    let issuer_url = "https://jwt-validation.issuer.test";
+    let audience = "ione-mcp";
+    let secret: Vec<u8> = (0u8..32).collect();
+    let wrong_secret: Vec<u8> = (100u8..132).collect();
+    sqlx::query(
+        "INSERT INTO trust_issuers (org_id, issuer_url, audience, jwks_uri, claim_mapping)
+         VALUES ($1, $2, $3, $4, '{}'::jsonb)",
+    )
+    .bind(org_id)
+    .bind(issuer_url)
+    .bind(audience)
+    .bind(format!(
+        "secret:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&secret)
+    ))
+    .execute(&pool)
+    .await
+    .expect("insert hmac trust issuer");
+
+    let now = Utc::now().timestamp();
+    let sign = |aud: &str, exp: i64, key: &[u8]| {
+        encode(
+            &Header::new(Algorithm::HS256),
+            &json!({ "sub": "peer-subject", "iss": issuer_url, "aud": aud, "exp": exp, "iat": now }),
+            &EncodingKey::from_secret(key).expect("hmac key"),
+        )
+        .expect("mint jwt")
+    };
+
+    let valid = resolve_bearer(&state, &sign(audience, now + 3600, &secret)).await;
+    assert!(
+        valid.map(|ctx| ctx.is_mcp_peer).unwrap_or(false),
+        "a valid trusted-issuer JWT must resolve to an MCP peer context"
+    );
+
+    let expired = resolve_bearer(&state, &sign(audience, now - 3600, &secret)).await;
+    assert!(expired.is_none(), "expired JWT must be rejected");
+
+    let wrong_aud = resolve_bearer(&state, &sign("other-audience", now + 3600, &secret)).await;
+    assert!(
+        wrong_aud.is_none(),
+        "JWT for another audience must be rejected"
+    );
+
+    let bad_sig = resolve_bearer(&state, &sign(audience, now + 3600, &wrong_secret)).await;
+    assert!(
+        bad_sig.is_none(),
+        "JWT signed with another key must be rejected"
     );
 }
 

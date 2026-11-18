@@ -215,7 +215,7 @@ fn mint_jwt(subject: &str, issuer: &str, audience: &str, secret: &[u8]) -> Strin
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(secret),
+        &EncodingKey::from_secret(secret).expect("hmac key"),
     )
     .expect("mint jwt")
 }

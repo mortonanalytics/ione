@@ -314,7 +314,7 @@ async fn verify_jwt_against_issuer(
             secret.trim(),
         )
         .ok()?;
-        (DecodingKey::from_secret(&key_bytes), Algorithm::HS256)
+        (DecodingKey::from_secret(&key_bytes).ok()?, Algorithm::HS256)
     } else {
         let jwks: jsonwebtoken::jwk::JwkSet = reqwest::get(&issuer.jwks_uri)
             .await
