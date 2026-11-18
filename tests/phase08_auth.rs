@@ -511,7 +511,7 @@ async fn oidc_callback_exchanges_code_and_validates_id_token() {
             "exp": chrono::Utc::now().timestamp() + 300,
             "iat": chrono::Utc::now().timestamp(),
         }),
-        &EncodingKey::from_secret(secret),
+        &EncodingKey::from_secret(secret).expect("hmac key"),
     )
     .expect("sign id token");
 

@@ -272,7 +272,12 @@ fn mint_jwt(subject: &str, issuer: &str, audience: &str, secret: &[u8]) -> Strin
         "iat": chrono::Utc::now().timestamp(),
     });
     let header = Header::new(Algorithm::HS256);
-    encode(&header, &claims, &EncodingKey::from_secret(secret)).expect("failed to mint JWT")
+    encode(
+        &header,
+        &claims,
+        &EncodingKey::from_secret(secret).expect("hmac key"),
+    )
+    .expect("failed to mint JWT")
 }
 
 // ─── Test 1: peer_status_enum_variants ───────────────────────────────────────
