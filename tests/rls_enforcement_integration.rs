@@ -905,6 +905,105 @@ async fn mfa_repo_works_under_the_restricted_role() {
     cleanup(&pool, &seed).await;
 }
 
+/// `service_account_tokens` is case 3: bearer authentication arrives with a
+/// token hash and no org, so `verify` resolves the org through the
+/// `SECURITY DEFINER` resolver (migration 0060) and then reads under that org's
+/// context. Every other method takes the caller's org.
+#[tokio::test]
+#[ignore]
+async fn service_account_token_repo_works_under_the_restricted_role() {
+    use ione::repos::ServiceAccountTokenRepo;
+
+    let pool = default_pool().await;
+    let seed = seed_two_orgs(&pool).await;
+    let restricted = restricted_pool().await;
+    let repo = ServiceAccountTokenRepo::new(restricted.clone());
+    let (org_a, org_b) = (seed.org_a, seed.org_b);
+    let token_hash = format!("rls-sat-{}", Uuid::new_v4());
+
+    let token = repo
+        .issue(
+            org_a,
+            "rls-probe",
+            &token_hash,
+            &serde_json::json!(["workspace:read"]),
+            3,
+            None,
+            None,
+        )
+        .await
+        .expect("issue must succeed under the restricted role");
+    assert_eq!(token.org_id, org_a);
+
+    let verified = repo
+        .verify(&token_hash)
+        .await
+        .expect("verify")
+        .expect("verify must find the token under the restricted role");
+    assert_eq!(verified.id, token.id);
+    assert_eq!(verified.org_id, org_a);
+    assert!(repo
+        .verify("rls-sat-unknown-hash")
+        .await
+        .expect("verify unknown")
+        .is_none());
+
+    let listed = repo.list_active(org_a).await.expect("list");
+    assert!(listed.iter().any(|t| t.id == token.id));
+    assert_eq!(
+        repo.provisionable_max_coc(org_a, token.id)
+            .await
+            .expect("coc"),
+        Some(3)
+    );
+    repo.touch_last_used(org_a, token.id)
+        .await
+        .expect("touch must succeed under the restricted role");
+    let last_used: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT last_used_at FROM service_account_tokens WHERE id = $1")
+            .bind(token.id)
+            .fetch_one(&pool)
+            .await
+            .expect("read last_used_at");
+    assert!(last_used.is_some(), "touch under org A's context must land");
+
+    // The other org's context sees nothing and revokes nothing.
+    assert!(repo
+        .list_active(org_b)
+        .await
+        .expect("foreign list")
+        .is_empty());
+    assert_eq!(
+        repo.provisionable_max_coc(org_b, token.id)
+            .await
+            .expect("foreign coc"),
+        None
+    );
+    assert!(!repo.revoke(token.id, org_b).await.expect("foreign revoke"));
+
+    // The resolver hands the restricted role an org id and nothing else.
+    let resolved: Option<Uuid> = sqlx::query_scalar("SELECT resolve_service_account_token_org($1)")
+        .bind(&token_hash)
+        .fetch_one(&restricted)
+        .await
+        .expect("restricted role may execute the resolver");
+    assert_eq!(resolved, Some(org_a));
+
+    assert!(repo.revoke(token.id, org_a).await.expect("revoke"));
+    assert!(repo
+        .verify(&token_hash)
+        .await
+        .expect("verify revoked")
+        .is_none());
+
+    sqlx::query("DELETE FROM service_account_tokens WHERE id = $1")
+        .bind(token.id)
+        .execute(&pool)
+        .await
+        .expect("cleanup token");
+    cleanup(&pool, &seed).await;
+}
+
 async fn cleanup(pool: &PgPool, seed: &TwoOrgs) {
     sqlx::query("DELETE FROM broker_credentials WHERE org_id = ANY($1)")
         .bind(vec![seed.org_a, seed.org_b])

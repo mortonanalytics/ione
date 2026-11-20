@@ -257,6 +257,7 @@ pub async fn auth_middleware(
         {
             Ok(Some(token)) => {
                 let token_id = token.id;
+                let token_org_id = token.org_id;
                 let ctx = AuthContext {
                     user_id: Uuid::nil(),
                     org_id: token.org_id,
@@ -272,7 +273,7 @@ pub async fn auth_middleware(
                 let pool = state.pool.clone();
                 tokio::spawn(async move {
                     let _ = crate::repos::ServiceAccountTokenRepo::new(pool)
-                        .touch_last_used(token_id)
+                        .touch_last_used(token_org_id, token_id)
                         .await;
                 });
                 req.extensions_mut().insert(ctx);
