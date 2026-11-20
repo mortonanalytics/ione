@@ -41,7 +41,7 @@ takes it: **a `SECURITY DEFINER` resolver per lookup, returning only an org id**
 — never a data row. The caller then opens an ordinary org-scoped transaction for
 the real read. A resolver is a small, auditable function whose entire output is
 one uuid, which is a far smaller hole than leaving the table's queries
-unscoped. No resolver exists yet; #64 introduces the first one.
+unscoped. The first one, for `service_account_tokens`, landed in #64 as migration 0060.
 
 Nothing here is exempt-with-no-reason. A table either scopes, resolves, or has a
 written reason in the table below.
@@ -57,7 +57,7 @@ All eleven `FORCE`d tables, with what each needs.
 | `workspace_peer_delegations` | **scoped** | 1, 2 | `get`, `delete` in #23; `upsert_tokens`, `update_refreshed`, `material_for` in this phase |
 | `peers` | unscoped | 1 | `PeerRepo` — most call sites already hold an org |
 | `workspace_peer_bindings` | unscoped | 1, 2 | `WorkspacePeerBindingRepo`, `webhook_ingress` (case 2 — the peer names the org) |
-| `service_account_tokens` | unscoped | 3 | authentication by token hash. Called out separately as HP-M4 in [headless-provisioning.md](headless-provisioning.md) |
+| `service_account_tokens` | **scoped** | 3 | `ServiceAccountTokenRepo`: `verify` resolves the org through `resolve_service_account_token_org` (migration 0060, the first `SECURITY DEFINER` resolver), then reads under it; every other method takes the caller's org id (#64). Also HP-M4 in [headless-provisioning.md](headless-provisioning.md) |
 | `auto_exec_policies` | **scoped** | 1 | `AutoExecPolicyRepo`: every method takes the caller's org id; the engine reads it from the survivor's workspace (#64) |
 | `interaction_events` | **scoped** | 1 | `InteractionEventRepo`: reads take an org id; `insert_batch` writes each org's rows under that org's context (#64) |
 | `peer_catalog_entries` | unscoped | 1, 2 | `catalog_repo`, `federation` |

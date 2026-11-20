@@ -174,7 +174,7 @@ pub async fn apply(
         .map_err(|e| AppError::Internal(e.into()))?;
 
     // The actor's coc ceiling: a service-account token's provisionable_max_coc.
-    let max_coc = actor_coc_ceiling(&mut tx, ctx).await?;
+    let max_coc = actor_coc_ceiling(&state.pool, &mut tx, ctx).await?;
 
     // 1. Workspace (org_id, name).
     let workspace_id = upsert_workspace(
@@ -297,18 +297,16 @@ pub async fn apply(
 /// `provisionable_max_coc`; for a session actor (rare via this endpoint) it is
 /// their effective max coc across the org.
 async fn actor_coc_ceiling(
+    pool: &sqlx::PgPool,
     tx: &mut Transaction<'_, Postgres>,
     ctx: &AuthContext,
 ) -> Result<i32, AppError> {
     if let Some(token_id) = ctx.service_account_token_id {
-        let coc: i32 = sqlx::query_scalar(
-            "SELECT provisionable_max_coc FROM service_account_tokens WHERE id = $1",
-        )
-        .bind(token_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?
-        .unwrap_or(0);
+        let coc = crate::repos::ServiceAccountTokenRepo::new(pool.clone())
+            .provisionable_max_coc(ctx.org_id, token_id)
+            .await
+            .map_err(AppError::Internal)?
+            .unwrap_or(0);
         return Ok(coc);
     }
     let coc: i32 = sqlx::query_scalar(

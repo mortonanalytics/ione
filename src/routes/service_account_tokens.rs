@@ -68,14 +68,11 @@ async fn issuer_authority(
 ) -> Result<IssuerAuthority, AppError> {
     if ctx.is_service_account {
         let max_coc = match ctx.service_account_token_id {
-            Some(id) => sqlx::query_scalar::<_, i32>(
-                "SELECT provisionable_max_coc FROM service_account_tokens WHERE id = $1",
-            )
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| AppError::Internal(e.into()))?
-            .unwrap_or(0),
+            Some(id) => ServiceAccountTokenRepo::new(state.pool.clone())
+                .provisionable_max_coc(ctx.org_id, id)
+                .await
+                .map_err(AppError::Internal)?
+                .unwrap_or(0),
             None => 0,
         };
         return Ok(IssuerAuthority {
