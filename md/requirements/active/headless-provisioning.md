@@ -13,7 +13,7 @@ RBAC vocabulary (`md/requirements/active/rbac.md`).
 `id UUID PK · org_id UUID FK organizations ON DELETE RESTRICT · name TEXT · token_hash TEXT · permissions JSONB DEFAULT '[]' CHECK(array) · provisionable_max_coc INT DEFAULT 0 · created_by UUID FK users ON DELETE SET NULL · expires_at · revoked_at · last_used_at · created_at · updated_at · UNIQUE(org_id, name)`
 
 - `token_hash` is the SHA-256 hex of the plaintext (`ione_sat_<base64url(32 bytes)>`). The plaintext is shown **once** at issuance and never stored.
-- Indexes: `UNIQUE(token_hash)`, partial `(org_id) WHERE revoked_at IS NULL`, GIN on `permissions`. `BEFORE UPDATE` trigger touches `updated_at`. Org-isolation RLS policy (dormant — same as the rest; app-layer `WHERE org_id` is the real enforcement).
+- Indexes: `UNIQUE(token_hash)`, partial `(org_id) WHERE revoked_at IS NULL`, GIN on `permissions`. `BEFORE UPDATE` trigger touches `updated_at`. Org-isolation RLS policy, inert under the bypassing `ione` role but enforced under `ione_app`: every `ServiceAccountTokenRepo` method runs in an `org_scoped_tx`. `verify` has only the hash, so it first calls `resolve_service_account_token_org(token_hash)` (migration 0060, `SECURITY DEFINER`, returns the org id and nothing else), then reads the row under that org (#64).
 - Migration 0041 adds `actor_kind` enum value `service_account` and backfills `["service_accounts:manage","provisioning:apply"]` into `org_memberships` for any user holding a `permissions @> ["admin"]` role. `RoleRepo::ORG_ADMIN_GRANTS` carries both forward for post-migration admin roles.
 
 ### Lifecycle
@@ -25,7 +25,7 @@ RBAC vocabulary (`md/requirements/active/rbac.md`).
 
 ## Headless auth (`src/auth.rs`)
 
-`AuthContext` gains `is_service_account: bool`, `service_account_token_id: Option<Uuid>`, `permissions: Vec<String>` (empty for non-SA contexts). `auth_middleware` checks `Authorization: Bearer ione_sat_…` **before** the session/default branch: SHA-256 the value, `ServiceAccountTokenRepo::verify` (not-revoked, not-expired), and on success build a synthetic context (`user_id = nil`, token's `org_id`, `is_oidc=false`, `mfa_verified=true`, `is_service_account=true`, `service_account_token_id=Some`, `permissions` from the token). **Fail-closed**: once an `ione_sat_` bearer is presented, an unknown/expired/revoked value returns 401 (never falls back to the default user). `last_used_at` is touched fire-and-forget.
+`AuthContext` gains `is_service_account: bool`, `service_account_token_id: Option<Uuid>`, `permissions: Vec<String>` (empty for non-SA contexts). `auth_middleware` checks `Authorization: Bearer ione_sat_…` **before** the session/default branch: SHA-256 the value, `ServiceAccountTokenRepo::verify` (not-revoked, not-expired), and on success build a synthetic context (`user_id = nil`, token's `org_id`, `is_oidc=false`, `mfa_verified=true`, `is_service_account=true`, `service_account_token_id=Some`, `permissions` from the token). **Fail-closed**: once an `ione_sat_` bearer is presented, an unknown/expired/revoked value returns 401 (never falls back to the default user). `last_used_at` is touched fire-and-forget under the token's org.
 
 `require_permission` / `require_org_permission` short-circuit on `ctx.is_service_account` — they check `permission ∈ ctx.permissions` (with the `admin` short-circuit + segment-glob matcher) and skip the membership join (the synthetic `user_id` has none). `mfa_gate` passes through for service accounts.
 
