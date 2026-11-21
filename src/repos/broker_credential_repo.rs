@@ -82,15 +82,26 @@ impl BrokerCredentialRepo {
         Ok(rows)
     }
 
-    /// Not org-scoped, and cannot be: the OAuth callback arrives with only the
-    /// `state` token, which is what establishes which org the flow belongs to.
-    /// Same for [`BrokerCredentialRepo::consume_by_state`]. Listed as uncovered
-    /// under AC-15 in md/design/identity-broker.md.
+    /// The OAuth callback arrives with only the `state` token, which is what
+    /// establishes which org the flow belongs to. The org comes from the
+    /// `resolve_broker_credential_state_org` resolver (migration 0061), which
+    /// returns an org id and nothing else; the row itself is read under that
+    /// org's context. Same for [`BrokerCredentialRepo::consume_by_state`].
     pub async fn find_by_state(
         &self,
         state_token: &str,
     ) -> anyhow::Result<Option<BrokerCredential>> {
-        sqlx::query_as::<_, BrokerCredential>(
+        let org_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT resolve_broker_credential_state_org($1)")
+                .bind(state_token)
+                .fetch_one(&self.pool)
+                .await
+                .context("failed to resolve broker credential state org")?;
+        let Some(org_id) = org_id else {
+            return Ok(None);
+        };
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query_as::<_, BrokerCredential>(
             "SELECT id, user_id, org_id, provider, label, scopes, access_token_ciphertext,
                 refresh_token_ciphertext, token_expires_at, state_token, code_verifier,
                 state_expires_at, created_at
@@ -98,16 +109,30 @@ impl BrokerCredentialRepo {
              WHERE state_token = $1",
         )
         .bind(state_token)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .context("failed to find broker credential by state")
+        .context("failed to find broker credential by state")?;
+        tx.commit()
+            .await
+            .context("failed to commit broker credential state read")?;
+        Ok(row)
     }
 
     pub async fn consume_by_state(
         &self,
         state_token: &str,
     ) -> anyhow::Result<Option<BrokerCredential>> {
-        sqlx::query_as::<_, BrokerCredential>(
+        let org_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT resolve_broker_credential_state_org($1)")
+                .bind(state_token)
+                .fetch_one(&self.pool)
+                .await
+                .context("failed to resolve broker credential state org")?;
+        let Some(org_id) = org_id else {
+            return Ok(None);
+        };
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query_as::<_, BrokerCredential>(
             "UPDATE broker_credentials
              SET state_token = NULL
              WHERE state_token = $1 AND state_expires_at > now()
@@ -116,9 +141,13 @@ impl BrokerCredentialRepo {
                 state_expires_at, created_at",
         )
         .bind(state_token)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .context("failed to consume broker credential state")
+        .context("failed to consume broker credential state")?;
+        tx.commit()
+            .await
+            .context("failed to commit broker credential state consume")?;
+        Ok(row)
     }
 
     /// One connection by id, scoped to its owner so a caller cannot address
@@ -150,27 +179,35 @@ impl BrokerCredentialRepo {
         Ok(row)
     }
 
-    /// Not org-scoped: no caller has an org id in hand here. Listed as uncovered
-    /// under AC-15 in md/design/identity-broker.md.
+    /// The user's newest connected credential for `provider`, read under the
+    /// caller's org. Org-scoped; see [`BrokerCredentialRepo::create_pending`].
     pub async fn find_user_provider(
         &self,
         user_id: Uuid,
         provider: &str,
+        org_id: Uuid,
     ) -> anyhow::Result<Option<BrokerCredential>> {
-        sqlx::query_as::<_, BrokerCredential>(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query_as::<_, BrokerCredential>(
             "SELECT id, user_id, org_id, provider, label, scopes, access_token_ciphertext,
                 refresh_token_ciphertext, token_expires_at, state_token, code_verifier,
                 state_expires_at, created_at
              FROM broker_credentials
-             WHERE user_id = $1 AND provider = $2 AND access_token_ciphertext IS NOT NULL
+             WHERE user_id = $1 AND provider = $2 AND org_id = $3
+               AND access_token_ciphertext IS NOT NULL
              ORDER BY created_at DESC
              LIMIT 1",
         )
         .bind(user_id)
         .bind(provider)
-        .fetch_optional(&self.pool)
+        .bind(org_id)
+        .fetch_optional(&mut *tx)
         .await
-        .context("failed to find broker credential")
+        .context("failed to find broker credential")?;
+        tx.commit()
+            .await
+            .context("failed to commit broker credential read")?;
+        Ok(row)
     }
 
     /// Org-scoped; see [`BrokerCredentialRepo::create_pending`]. Both callers

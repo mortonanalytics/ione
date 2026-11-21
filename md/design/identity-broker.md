@@ -389,9 +389,6 @@ the default role still returns both orgs.
     `wpc_check_same_org` trigger, not supplied) and `::secret_for`
   - `WorkspacePeerDelegationRepo::upsert_tokens`, `::update_refreshed`,
     `::material_for`, `::begin_pending`, `::consume_pending`
-  - `BrokerCredentialRepo::find_by_state`, `::consume_by_state` (the OAuth
-    callback arrives with only the `state` token, which is what establishes the
-    org), `::find_user_provider`
 - **Every other repository** — `peer_repo`, `workspace_peer_binding_repo`,
   `service_account_token_repo`, `auto_exec_policy_repo`,
   `interaction_event_repo`, `catalog_repo`, the MFA and identity-audit writers,

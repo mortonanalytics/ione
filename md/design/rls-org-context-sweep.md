@@ -52,7 +52,7 @@ All eleven `FORCE`d tables, with what each needs.
 
 | Table | State | Case | Where |
 |---|---|---|---|
-| `broker_credentials` | partly scoped | 1, and 3 for the state lookups | `create_pending`, `list_for_user`, `find_for_user`, `store_tokens`, `delete` scoped in #23. `find_by_state`, `consume_by_state`, `find_user_provider` are case 3 |
+| `broker_credentials` | **scoped** | 1, and 3 for the state lookups | `create_pending`, `list_for_user`, `find_for_user`, `store_tokens`, `delete` scoped in #23. `find_by_state`, `consume_by_state` resolve the org from the state token through `resolve_broker_credential_state_org` (migration 0061), then read under it; `find_user_provider` takes the caller's org id (#64) |
 | `workspace_peer_credentials` | **scoped** | 1, 2 | `get`, `list_for_workspace`, `delete` in #23; `upsert` and `secret_for` in this phase |
 | `workspace_peer_delegations` | **scoped** | 1, 2 | `get`, `delete` in #23; `upsert_tokens`, `update_refreshed`, `material_for` in this phase |
 | `peers` | unscoped | 1 | `PeerRepo` — most call sites already hold an org |
