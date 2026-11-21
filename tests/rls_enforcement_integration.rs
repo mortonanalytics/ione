@@ -1004,6 +1004,88 @@ async fn service_account_token_repo_works_under_the_restricted_role() {
     cleanup(&pool, &seed).await;
 }
 
+/// The OAuth callback arrives with only the `state` token, so the state lookups
+/// resolve the org first (`resolve_broker_credential_state_org`) and then read
+/// under that org's context. `find_user_provider` takes the caller's org.
+#[tokio::test]
+#[ignore]
+async fn broker_state_lookups_work_under_the_restricted_role() {
+    let pool = default_pool().await;
+    let seed = seed_two_orgs(&pool).await;
+    let restricted = restricted_pool().await;
+    let repo = ione::repos::BrokerCredentialRepo::new(restricted.clone());
+    let provider = format!("{}-state", seed.provider);
+    let state_token = format!("rls-state-{}", Uuid::new_v4());
+
+    let pending = repo
+        .create_pending(
+            seed.user_a,
+            seed.org_a,
+            &provider,
+            "",
+            &["read".to_string()],
+            &state_token,
+            "verifier",
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .await
+        .expect("create pending under the restricted role");
+
+    let found = repo
+        .find_by_state(&state_token)
+        .await
+        .expect("find by state")
+        .expect("find_by_state must see the row under the restricted role");
+    assert_eq!(found.id, pending.id);
+    assert!(repo
+        .find_by_state("rls-state-unknown")
+        .await
+        .expect("find unknown state")
+        .is_none());
+
+    // The resolver hands the restricted role an org id and nothing else.
+    let resolved: Option<Uuid> =
+        sqlx::query_scalar("SELECT resolve_broker_credential_state_org($1)")
+            .bind(&state_token)
+            .fetch_one(&restricted)
+            .await
+            .expect("restricted role may execute the resolver");
+    assert_eq!(resolved, Some(seed.org_a));
+
+    let consumed = repo
+        .consume_by_state(&state_token)
+        .await
+        .expect("consume state")
+        .expect("consume_by_state must see the row under the restricted role");
+    assert_eq!(consumed.id, pending.id);
+    assert_eq!(consumed.org_id, seed.org_a);
+    assert!(consumed.state_token.is_none());
+    assert!(repo
+        .consume_by_state(&state_token)
+        .await
+        .expect("replay consume")
+        .is_none());
+
+    repo.store_tokens(pending.id, seed.org_a, b"access", None, None)
+        .await
+        .expect("store tokens");
+    let connected = repo
+        .find_user_provider(seed.user_a, &provider, seed.org_a)
+        .await
+        .expect("find user provider")
+        .expect("find_user_provider must see the row under the restricted role");
+    assert_eq!(connected.id, pending.id);
+
+    // Org B's context cannot reach org A's connection.
+    assert!(repo
+        .find_user_provider(seed.user_a, &provider, seed.org_b)
+        .await
+        .expect("foreign find user provider")
+        .is_none());
+
+    cleanup(&pool, &seed).await;
+}
+
 async fn cleanup(pool: &PgPool, seed: &TwoOrgs) {
     sqlx::query("DELETE FROM broker_credentials WHERE org_id = ANY($1)")
         .bind(vec![seed.org_a, seed.org_b])
