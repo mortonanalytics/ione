@@ -391,7 +391,7 @@ the default role still returns both orgs.
     `::material_for`, `::begin_pending`, `::consume_pending`
 - **Every other repository** — `peer_repo`, `workspace_peer_binding_repo`,
   `service_account_token_repo`, `auto_exec_policy_repo`,
-  `interaction_event_repo`, `catalog_repo`, the MFA and identity-audit writers,
+  `interaction_event_repo`, the MFA and identity-audit writers,
   and the rest. Their tables carry `FORCE` but their queries never set the
   context.
 

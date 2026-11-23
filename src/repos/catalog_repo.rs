@@ -3,6 +3,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::CatalogEntryKind;
+use crate::rls::org_scoped_tx;
 
 /// Write payload for an upsert into `peer_catalog_entries`. `org_id` is derived
 /// from `peers.org_id` by the caller (never the org-blind manifest cache).
@@ -58,6 +59,7 @@ impl CatalogRepo {
     /// unchanged content a no-op (no row write, no GIN churn, no updated_at
     /// bump). Returns true when a row was actually inserted or updated.
     pub async fn upsert_entry(&self, e: &CatalogUpsert) -> anyhow::Result<bool> {
+        let mut tx = org_scoped_tx(&self.pool, e.org_id).await?;
         let affected = sqlx::query(
             "INSERT INTO peer_catalog_entries
                  (org_id, peer_id, kind, namespaced_name, raw_name, description,
@@ -81,10 +83,13 @@ impl CatalogRepo {
         .bind(&e.sample_queries)
         .bind(&e.schema_field_names)
         .bind(&e.content_hash)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("failed to upsert catalog entry")?
         .rows_affected();
+        tx.commit()
+            .await
+            .context("failed to commit catalog upsert")?;
         Ok(affected > 0)
     }
 
@@ -95,15 +100,39 @@ impl CatalogRepo {
         org_id: Uuid,
         peer_id: Uuid,
     ) -> anyhow::Result<Vec<(String, String)>> {
-        sqlx::query_as::<_, (String, String)>(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT namespaced_name, content_hash FROM peer_catalog_entries
              WHERE org_id = $1 AND peer_id = $2",
         )
         .bind(org_id)
         .bind(peer_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .context("failed to read catalog hashes for peer")
+        .context("failed to read catalog hashes for peer")?;
+        tx.commit().await.context("failed to commit catalog read")?;
+        Ok(rows)
+    }
+
+    /// `sample_queries` already stored for a peer, by `namespaced_name` — kept
+    /// when a refresh's catalog slice is unusable.
+    pub async fn sample_queries_for_peer(
+        &self,
+        org_id: Uuid,
+        peer_id: Uuid,
+    ) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let rows = sqlx::query_as::<_, (String, Vec<String>)>(
+            "SELECT namespaced_name, sample_queries FROM peer_catalog_entries
+             WHERE org_id = $1 AND peer_id = $2",
+        )
+        .bind(org_id)
+        .bind(peer_id)
+        .fetch_all(&mut *tx)
+        .await
+        .context("failed to read indexed catalog sample queries")?;
+        tx.commit().await.context("failed to commit catalog read")?;
+        Ok(rows)
     }
 
     /// Delete entries for a peer whose `namespaced_name` is no longer in the
@@ -114,6 +143,7 @@ impl CatalogRepo {
         peer_id: Uuid,
         surviving: &[String],
     ) -> anyhow::Result<u64> {
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
         let affected = sqlx::query(
             "DELETE FROM peer_catalog_entries
              WHERE org_id = $1 AND peer_id = $2 AND namespaced_name <> ALL($3)",
@@ -121,10 +151,13 @@ impl CatalogRepo {
         .bind(org_id)
         .bind(peer_id)
         .bind(surviving)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("failed to delete orphaned catalog entries")?
         .rows_affected();
+        tx.commit()
+            .await
+            .context("failed to commit catalog orphan delete")?;
         Ok(affected)
     }
 
@@ -134,7 +167,8 @@ impl CatalogRepo {
         &self,
         org_id: Uuid,
     ) -> anyhow::Result<Vec<PermissionCandidate>> {
-        sqlx::query_as::<_, PermissionCandidate>(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let rows = sqlx::query_as::<_, PermissionCandidate>(
             "SELECT e.namespaced_name, p.name AS peer_name, e.raw_name, e.kind,
                     p.tool_allowlist, p.tool_allowlist_configured
              FROM peer_catalog_entries e
@@ -142,9 +176,11 @@ impl CatalogRepo {
              WHERE e.org_id = $1",
         )
         .bind(org_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .context("failed to list catalog permission candidates")
+        .context("failed to list catalog permission candidates")?;
+        tx.commit().await.context("failed to commit catalog read")?;
+        Ok(rows)
     }
 
     /// Ranked lexical search, pre-filtered to the caller's invokable set.
@@ -157,7 +193,8 @@ impl CatalogRepo {
         kind: Option<CatalogEntryKind>,
         limit: i64,
     ) -> anyhow::Result<Vec<CatalogSearchRow>> {
-        sqlx::query_as::<_, CatalogSearchRow>(
+        let mut tx = org_scoped_tx(&self.pool, org_id).await?;
+        let rows = sqlx::query_as::<_, CatalogSearchRow>(
             "SELECT e.id, e.peer_id, p.name AS peer_name, e.kind, e.namespaced_name,
                     e.raw_name, e.description, e.sample_queries,
                     (coalesce(ts_rank_cd(e.tsv, websearch_to_tsquery('english', $3)), 0) * 1.5
@@ -175,8 +212,10 @@ impl CatalogRepo {
         .bind(q)
         .bind(limit)
         .bind(kind)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .context("failed to search catalog entries")
+        .context("failed to search catalog entries")?;
+        tx.commit().await.context("failed to commit catalog read")?;
+        Ok(rows)
     }
 }

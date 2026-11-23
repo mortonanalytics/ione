@@ -1491,15 +1491,9 @@ async fn indexed_sample_queries(
     state: &AppState,
     peer: &Peer,
 ) -> anyhow::Result<HashMap<String, Vec<String>>> {
-    let rows: Vec<(String, Vec<String>)> = sqlx::query_as(
-        "SELECT namespaced_name, sample_queries FROM peer_catalog_entries
-         WHERE org_id = $1 AND peer_id = $2",
-    )
-    .bind(peer.org_id)
-    .bind(peer.id)
-    .fetch_all(&state.pool)
-    .await
-    .context("failed to read indexed catalog sample queries")?;
+    let rows = CatalogRepo::new(state.pool.clone())
+        .sample_queries_for_peer(peer.org_id, peer.id)
+        .await?;
     Ok(rows.into_iter().collect())
 }
 

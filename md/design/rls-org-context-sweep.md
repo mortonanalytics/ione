@@ -55,12 +55,12 @@ All eleven `FORCE`d tables, with what each needs.
 | `broker_credentials` | **scoped** | 1, and 3 for the state lookups | `create_pending`, `list_for_user`, `find_for_user`, `store_tokens`, `delete` scoped in #23. `find_by_state`, `consume_by_state` resolve the org from the state token through `resolve_broker_credential_state_org` (migration 0061), then read under it; `find_user_provider` takes the caller's org id (#64) |
 | `workspace_peer_credentials` | **scoped** | 1, 2 | `get`, `list_for_workspace`, `delete` in #23; `upsert` and `secret_for` in this phase |
 | `workspace_peer_delegations` | **scoped** | 1, 2 | `get`, `delete` in #23; `upsert_tokens`, `update_refreshed`, `material_for` in this phase |
-| `peers` | unscoped | 1 | `PeerRepo` — most call sites already hold an org |
+| `peers` | no policy | — | Not one of the eleven: migration 0050 never `FORCE`d it and no migration enables RLS or declares a policy on it, so it is unfiltered under `ione_app` and needs no context. Listed because #64 named it; `PeerRepo` queries keep their application-layer `WHERE org_id` |
 | `workspace_peer_bindings` | unscoped | 1, 2 | `WorkspacePeerBindingRepo`, `webhook_ingress` (case 2 — the peer names the org) |
 | `service_account_tokens` | **scoped** | 3 | `ServiceAccountTokenRepo`: `verify` resolves the org through `resolve_service_account_token_org` (migration 0060, the first `SECURITY DEFINER` resolver), then reads under it; every other method takes the caller's org id (#64). Also HP-M4 in [headless-provisioning.md](headless-provisioning.md) |
 | `auto_exec_policies` | **scoped** | 1 | `AutoExecPolicyRepo`: every method takes the caller's org id; the engine reads it from the survivor's workspace (#64) |
 | `interaction_events` | **scoped** | 1 | `InteractionEventRepo`: reads take an org id; `insert_batch` writes each org's rows under that org's context (#64) |
-| `peer_catalog_entries` | unscoped | 1, 2 | `catalog_repo`, `federation` |
+| `peer_catalog_entries` | **scoped** | 1 | `CatalogRepo`: every method opens an `org_scoped_tx` on the org id it already took (`upsert_entry` uses the upsert's `org_id`); `federation`'s indexed-sample-queries read moved into `CatalogRepo::sample_queries_for_peer` (#64). The joined `peers` table has no policy, so the join adds no filter |
 | `mfa_enrollments`, `mfa_recovery_codes` | **scoped** | 1 | `MfaRepo`: every method takes the caller's org id; `routes::mfa` and `mfa_gate` pass `ctx.org_id` (#64) |
 | `identity_audit_events` | **scoped** | 1 | `IdentityAuditWriter::write` inserts under the caller's org context (#64) |
 
