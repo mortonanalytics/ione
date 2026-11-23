@@ -1086,6 +1086,174 @@ async fn broker_state_lookups_work_under_the_restricted_role() {
     cleanup(&pool, &seed).await;
 }
 
+/// Every `CatalogRepo` method must work under the restricted role, and another
+/// org's context must never read, search, or delete org A's catalog rows.
+/// Unscoped, the upsert is rejected by the policy's implicit insert check and
+/// every read returns nothing, so federated search would silently go empty.
+#[tokio::test]
+#[ignore]
+async fn catalog_repo_works_under_the_restricted_role() {
+    use ione::models::CatalogEntryKind;
+    use ione::repos::{CatalogRepo, CatalogUpsert};
+
+    let pool = default_pool().await;
+    let seed = seed_two_orgs(&pool).await;
+    let restricted = restricted_pool().await;
+
+    let issuer_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO trust_issuers (org_id, issuer_url, audience, jwks_uri, claim_mapping)
+         VALUES ($1, $2, 'aud', 'secret:test', '{}'::jsonb)
+         RETURNING id",
+    )
+    .bind(seed.org_a)
+    .bind(format!("https://issuer-{}.example", seed.provider))
+    .fetch_one(&pool)
+    .await
+    .expect("insert trust issuer");
+    let peer_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO peers (org_id, name, mcp_url, issuer_id, sharing_policy, tool_allowlist, status)
+         VALUES ($1, 'rls-catalog-peer', $3, $2, '{}'::jsonb, '[]'::jsonb,
+                 'active'::peer_status)
+         RETURNING id",
+    )
+    .bind(seed.org_a)
+    .bind(issuer_id)
+    .bind(format!("https://peer-{}.example/mcp", seed.provider))
+    .fetch_one(&pool)
+    .await
+    .expect("insert peer");
+
+    let name = "rlscat:gauge_readings".to_owned();
+    let entry = |hash: &str| CatalogUpsert {
+        org_id: seed.org_a,
+        peer_id,
+        kind: CatalogEntryKind::Tool,
+        namespaced_name: name.clone(),
+        raw_name: "gauge_readings".into(),
+        description: "river gauge discharge readings".into(),
+        sample_queries: vec!["discharge at the north gauge".into()],
+        schema_field_names: vec!["discharge_cfs".into()],
+        content_hash: hash.into(),
+    };
+
+    let repo = CatalogRepo::new(restricted.clone());
+    assert!(repo
+        .upsert_entry(&entry("h1"))
+        .await
+        .expect("insert must succeed under the restricted role"));
+    // The conflict path has to see the existing row to update it.
+    assert!(!repo
+        .upsert_entry(&entry("h1"))
+        .await
+        .expect("unchanged upsert"));
+    assert!(repo
+        .upsert_entry(&entry("h2"))
+        .await
+        .expect("changed upsert"));
+
+    assert_eq!(
+        repo.hashes_for_peer(seed.org_a, peer_id)
+            .await
+            .expect("hashes"),
+        [(name.clone(), "h2".to_owned())]
+    );
+    assert_eq!(
+        repo.sample_queries_for_peer(seed.org_a, peer_id)
+            .await
+            .expect("sample queries"),
+        [(
+            name.clone(),
+            vec!["discharge at the north gauge".to_owned()]
+        )]
+    );
+    let candidates = repo
+        .permission_candidates_for_org(seed.org_a)
+        .await
+        .expect("candidates");
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|c| c.namespaced_name.as_str())
+            .collect::<Vec<_>>(),
+        [name.as_str()]
+    );
+    let hits = repo
+        .search(
+            seed.org_a,
+            std::slice::from_ref(&name),
+            "discharge",
+            None,
+            10,
+        )
+        .await
+        .expect("search");
+    assert_eq!(
+        hits.iter().map(|h| h.peer_id).collect::<Vec<_>>(),
+        [peer_id]
+    );
+
+    // The other org's context sees nothing and deletes nothing, even when it
+    // names org A's peer and entry.
+    assert!(repo
+        .hashes_for_peer(seed.org_b, peer_id)
+        .await
+        .expect("foreign hashes")
+        .is_empty());
+    assert!(repo
+        .sample_queries_for_peer(seed.org_b, peer_id)
+        .await
+        .expect("foreign sample queries")
+        .is_empty());
+    assert!(repo
+        .permission_candidates_for_org(seed.org_b)
+        .await
+        .expect("foreign candidates")
+        .is_empty());
+    assert!(repo
+        .search(
+            seed.org_b,
+            std::slice::from_ref(&name),
+            "discharge",
+            None,
+            10
+        )
+        .await
+        .expect("foreign search")
+        .is_empty());
+    assert_eq!(
+        repo.delete_orphans(seed.org_b, peer_id, &[])
+            .await
+            .expect("foreign delete"),
+        0
+    );
+
+    assert_eq!(
+        repo.delete_orphans(seed.org_a, peer_id, &[])
+            .await
+            .expect("delete"),
+        1
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM peer_catalog_entries WHERE peer_id = $1")
+            .bind(peer_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count remaining");
+    assert_eq!(remaining, 0);
+
+    sqlx::query("DELETE FROM peers WHERE id = $1")
+        .bind(peer_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup peer");
+    sqlx::query("DELETE FROM trust_issuers WHERE id = $1")
+        .bind(issuer_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup issuer");
+    cleanup(&pool, &seed).await;
+}
+
 async fn cleanup(pool: &PgPool, seed: &TwoOrgs) {
     sqlx::query("DELETE FROM broker_credentials WHERE org_id = ANY($1)")
         .bind(vec![seed.org_a, seed.org_b])
