@@ -24,7 +24,7 @@ path = "src/main.rs"
 [dependencies]
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tower-http = { version = "0.7", features = ["fs", "trace", "cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "cookies"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -64,8 +64,8 @@ async-stream = "0.3"
 csv = "1"
 phf = { version = "0.14", features = ["macros"] }
 totp-lite = "2"
-argon2 = "0.5"
-qrcode = { version = "0.14", default-features = false }
+argon2 = "0.6"
+qrcode = { version = "0.15", default-features = false }
 data-encoding = "2"
 aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["http-1x", "default-https-client", "rt-tokio"] }
 aws-config = { version = "1", optional = true }
